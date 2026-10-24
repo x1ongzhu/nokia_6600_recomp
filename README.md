@@ -243,9 +243,36 @@ criteria and phased roadmap live in
   `0x802ff000` and the compacted list at `0x802ff400` has the three banks.
   `tools/test_bootregions.sh` is the acceptance test.  The remaining KaeP
   frontier is now inside the payload lookup, not an empty list.
+- [x] **KaeP becomes measurable; the loader passes 0xc58 (round 14)** — the
+  first 7 MiB of flash are a **paged** boot image: a 6-byte tag
+  `20 00 00 00 dc 23` every `0x20ec` bytes, first real tag at `0x20b0`, last
+  at `0x6d9134` — **852 tags**.  (The bytes at `0x128` are the KaeP size/value
+  prefix and happen to spell the same six bytes; they are not a tag.)  The
+  kernel text starts exactly on a tag (`0x326924` =
+  `0x50310000`), so its entry `+0x54` is valid while code after later tags is
+  shifted six bytes per page.  [`recompiler/kaep.py`](recompiler/kaep.py)
+  measures the grid, writes the experimental tag-free view, and provides an
+  explicit descriptor/node stand-in.  The boot-region model was corrected:
+  `0x1a1c` only sees type 5..8 banks with attr bit `0x04000000`, and
+  `0x1b34` only type 2, so the old `attr=1` table could never satisfy the KaeP
+  lookup.  `bootregions.py --profile linear` (type-2 RAM, type-5 ROM/boot,
+  linear flag, 6 MiB via `NK_RAM_EXTRA`) lets the **original** linked bank
+  pass `0xc58`; 600,000 instructions later it stops in the page-table fill at
+  `0x2fe4` with zero recoveries/undefined.  `tools/test_kaep.sh` is the
+  acceptance test.  This is a new frontier, not a finished boot; the real
+  KaeP unpack, the `linbase` base-vs-page-mask ambiguity and the page-table
+  target are the next tasks.
 
 **← current frontier →**
 
+- [ ] **Boot-region page tables (round 14)** — the corrected `linear` profile
+  lets the original linked boot bank pass the KaeP lookup and reach the
+  page-table builder.  At a 600,000-instruction budget it is filling a
+  second-level table at `0x2fe4` (`r2 ≈ 0x65802`); with a larger budget the
+  next table targets addresses around `0x7e...`, so the `linbase`
+  base-address/page-mask dual role is not modelled correctly yet.  The real
+  KaeP unpack (the `0xdff9ea00` payload) is still open.  See
+  `docs/BOOT.md` round 14 and `tools/test_kaep.sh`.
 - [ ] **Packed text vs. export table** — the kernel's 478 export addresses are
   all 4-byte aligned and inside the text, but only 82 (17.2%) land on a
   function start in the stored text; a pool-aware detector that walks back
@@ -425,6 +452,28 @@ NK_LOW_ROM=1 NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
   --rom-image out/6600_runtime.bin
 tools/test_bootregions.sh
+
+# round 14: KaeP page grid + the linear boot-region profile
+.venv/bin/python recompiler/kaep.py analyze 6600_mcu.bin
+.venv/bin/python recompiler/kaep.py verify 6600_mcu.bin
+.venv/bin/python recompiler/kaep.py despan 6600_mcu.bin out/6600_despanned.bin
+
+.venv/bin/python recompiler/bootregions.py build 6600_mcu.bin \
+  out/6600_bootregions_linear.bin --profile linear
+.venv/bin/python recompiler/bootregions.py verify 6600_mcu.bin --profile linear
+NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
+  NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
+  NK_REGIONS=out/6600_bootregions_linear.bin@0x80000000 \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=600000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+# ... now the old 0xc58 frontier is gone; stop is the page-table fill 0x2fe4
+
+# optional: explicit KaeP descriptor/node stand-in
+.venv/bin/python recompiler/kaep.py synth \
+  out/6600_bootbank_linked.bin out/6600_bootbank_kaep.bin
+tools/test_kaep.sh
 ```
 
 `6600_mcu.bin` is now the **23.3 MB raw EKA1 flash image** extracted from
@@ -471,8 +520,9 @@ full analysis and the relayout plan are in [`docs/BOOT.md`](docs/BOOT.md) and
 ## Toolchain
 
 - **Python 3 + Capstone** — the recompiler (`wd2.py`, `extract.py`, `lift.py`,
-  `gen_register.py`, `romimage.py`, `relayout.py`, `layout.py`, `bootbank.py`);
-  `dct4decrypt.py` remains for the older 6100 DCT4 chunks.
+  `gen_register.py`, `romimage.py`, `relayout.py`, `layout.py`, `bootbank.py`,
+  `bootregions.py`, `kaep.py`); `dct4decrypt.py` remains for the older 6100
+  DCT4 chunks.
 - **IDA Pro 9.1 (headless)** — exact function boundaries on the EKA1 image
   (`extract_ida.py`).
 - **clang** — compiles the generated C + runtime.

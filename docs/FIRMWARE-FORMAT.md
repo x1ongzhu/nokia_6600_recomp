@@ -208,6 +208,41 @@ No literal in the reachable text points at them; the working hypothesis is
 that they are the pre-ROM-build debug/rodata copies.
 
 
+## Paged boot image and KaeP
+
+The first 7 MiB of the flash image are not a plain byte stream.  A six-byte
+page tag
+
+```
+20 00 00 00 dc 23
+```
+
+is inserted every `0x20ec` bytes.  The first tag is at file `0x20b0`, the last
+at `0x6d9134`, and there are **852** tags.
+
+```
+0x0124  "KaeP" 20 00 00 00 dc 23 14 00   ; magic, size 0x20, value 0x1423dc
+0x0128  20 00 00 00 dc 23 ...             ; size/value prefix, *not* a tag
+0x20b0  20 00 00 00 dc 23 ...             ; first page tag, stride 0x20ec
+...
+0x326924 20 00 00 00 dc 23 ...            ; kernel text also starts on a tag
+0x6d9134 20 00 00 00 dc 23                ; last tag
+```
+
+The tag semantics are not documented yet.  What is measurable is that the
+kernel text starts on a tag and that code after later tags is shifted by six
+bytes per page; `recompiler/kaep.py` (`analyze`/`despan`/`synth`/`verify`)
+pins the grid.  A tag-free view does **not** fix the packed-vs-linked export
+layout: the kernel's pool-aware export hit rate drops from 104/478 to 67/478,
+so the page tags and the function-order mismatch are independent.
+
+`KaeP` is a 12-byte header followed by a 32-byte payload at file `0x130`
+(linked `0x80`).  The mask ROM normally turns it into the boot-image list the
+secondary loader consumes; the payload in this dump is the repeated
+`0xdff9ea00` block, not the final descriptor.  `kaep.py synth` writes an
+explicit bring-up descriptor/list node into a linked boot-bank view; it does
+not implement the real KaeP unpack.
+
 ## ROM file system
 
 The ROMFS is plaintext, but it is a **directory tree** and its packed layout is

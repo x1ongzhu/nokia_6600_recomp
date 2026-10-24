@@ -40,7 +40,8 @@
  *   NK_RECOVER_LOG=n        log the first n skips (default 16)
  *   NK_SNAP_NOFAST=1        ignore a leaf entry at the raw target and always
  *                           snap to the nearest prologue
- *   NK_HLE_HEAP=0x...       bump heap for NK_HLE_ALLOC (default 0x80400000)
+ *   NK_HLE_HEAP=0x...       bump heap for NK_HLE_ALLOC (default: above the
+ *                           allocated RAM window, at least 0x80400000)
  *   NK_IAT_FAKE=1           unresolved imports return 0 instead of stopping
  *   NK_IAT_LOG=n            log the first n unbound imports (default 16)
  *   NK_ENTRY_ARM=1          start in ARM state instead of Thumb
@@ -78,6 +79,9 @@
  *                           addr (default 0x80000000) and report it; pass the
  *                           same addr in NK_R11 to reproduce the mask-ROM
  *                           hand-off
+ *   NK_RAM_EXTRA=n          allocate n extra bytes of RAM above the 3 MiB
+ *                           kernel-data window (the linear boot-region profile
+ *                           uses NK_RAM_EXTRA=0x300000 for a 6 MiB bank)
  *   NK_DUMP=a:l[,a:l...]    append guest memory ranges to NK_DUMP_FILE at the
  *                           end of the run (default out/memdump.bin)
  */
@@ -423,15 +427,23 @@ int main(int argc, char** argv) {
     uint8_t* rom_copy = (uint8_t*)calloc(1, rom_pages);
     memcpy(rom_copy, rom, (size_t)rom_len);
     if (nk_map_region(&cpu, NK_FLASH_BASE, rom_pages, rom_copy) != 0) return 1;
-    if (nk_alloc_ram(&cpu, NK_RAM_BASE, NK_RAM_SIZE) != 0) return 1;
+    /* The EKA1 header's kern_limit (0x80300000) bounds *kernel data*, not the
+     * physical RAM the boot loader may use for its page tables, heap and
+     * super page.  NK_RAM_EXTRA lets a mask-ROM stand-in model more RAM. */
+    uint32_t ram_size = NK_RAM_SIZE +
+        (uint32_t)env_ulong("NK_RAM_EXTRA", 0);
+    if (nk_alloc_ram(&cpu, NK_RAM_BASE, ram_size) != 0) return 1;
     /* The EKA1 kernel entry runs before the MMU remaps RAM to 0x80000000;
      * its early literal pools contain physical data offsets (0x0004_6564,
      * 0x0004_6fca), so the bootstrap view needs RAM at 0x00000000 too. */
     if (!getenv("NK_NO_LOW_RAM") &&
         nk_alloc_ram(&cpu, 0x00000000u, NK_RAM_SIZE) != 0) return 1;
     if (nk_alloc_ram(&cpu, NK_HIGH_VECTORS, 0x10000) != 0) return 1;
-    /* Bring-up heap for the callmap's NK_HLE_ALLOC entries. */
-    if (nk_alloc_ram(&cpu, 0x80400000u, 0x400000u) != 0) return 1;
+    /* Bring-up heap for the callmap's NK_HLE_ALLOC entries.  Keep it above
+     * the RAM window when NK_RAM_EXTRA extends RAM past 0x80400000. */
+    uint32_t hle_heap = NK_RAM_BASE + ram_size;
+    if (hle_heap < 0x80400000u) hle_heap = 0x80400000u;
+    if (nk_alloc_ram(&cpu, hle_heap, 0x400000u) != 0) return 1;
 
     nk_interp_t ip;
     nk_interp_init(&ip);
@@ -624,8 +636,9 @@ int main(int argc, char** argv) {
     ip.allow_low_alias = getenv("NK_LOW_ROM") ? 1 : 0;
     const char* callmap = getenv("NK_CALLMAP");
     if (callmap) load_callmap(&ip, callmap);
-    ip.hle_heap = (uint32_t)env_ulong("NK_HLE_HEAP", 0x80400000);
-    ip.hle_heap_end = (uint32_t)env_ulong("NK_HLE_HEAP_END", 0x80800000);
+    ip.hle_heap = (uint32_t)env_ulong("NK_HLE_HEAP", hle_heap);
+    ip.hle_heap_end = (uint32_t)env_ulong("NK_HLE_HEAP_END",
+                                          (unsigned long)hle_heap + 0x400000u);
     if (getenv("NK_TRACE")) ip.trace = 1;
     ip.trace_limit = (long)env_ulong("NK_TRACE_N", 64);
     ip.trace_from = (uint32_t)env_ulong("NK_TRACE_FROM", 0);

@@ -86,10 +86,28 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
 - **`bootregions.py`** — derive and inspect the mask-ROM boot-region (bank)
   table the secondary loader receives in `r0/fp`.  Entries are 0x10 bytes
   (`base`, `size`, `attr`, `linbase`, with `count` at `+0` and entries from
-  `+8`); `attr & 0x1f` is the bank type and `0x4000` marks the RAM bank whose
-  top becomes the super page.  `build` emits boot/ROM/RAM from `TRomHeader`,
-  `explain` decodes a file and `verify` pins the derived values.  Install it
-  with `NK_REGIONS=path[@addr]` (`../tools/test_bootregions.sh`).
+  `+8`); `attr & 0x1f` is the bank type, `0x4000` marks the RAM bank whose top
+  becomes the super page, and `0x04000000` is the linear-translation flag read
+  by `0x1a1c` (its first pass also requires type 5..8).  The `legacy` profile
+  emits boot/ROM/RAM with `attr=1`, which satisfies the super-page/list
+  consumers but is invisible to `0x1a1c`/`0x1b34`.  The `linear` profile puts a
+  type-2 RAM bank first (offset mapping, 6 MiB), then type-5 ROM and boot
+  banks for linear translation; it is the table that moves the KaeP frontier.
+  `explain` decodes a file and `verify` pins both profiles.  Install it with
+  `NK_REGIONS=path[@addr]` and `NK_RAM_EXTRA=0x300000` for the 6 MiB bank
+  (`../tools/test_bootregions.sh`, `../tools/test_kaep.sh`).
+- **`kaep.py`** — measure the KaeP block (`0x124`: magic, size 0x20, value
+  `0x1423dc`) and the paged boot image.  The first 7 MiB carry a six-byte page
+  tag (`20 00 00 00 dc 23`) every `0x20ec` bytes: first at `0x20b0`, last at
+  `0x6d9134`, **852 tags**.  (`0x128` reads the same six bytes but is the
+  KaeP size/value prefix, not a tag.)  The kernel text starts on a tag
+  (`0x326924` = `0x50310000`), so its entry `+0x54` is valid while the
+  post-tag code is shifted by six bytes per page.  `analyze` reports the grid,
+  `despan` writes the experimental tag-free view, `synth` writes an explicit
+  bring-up descriptor/list node into a linked boot bank, and `verify` pins the
+  structure (`../tools/test_kaep.sh`).  The tag semantics (and the real KaeP
+  unpack) are still unknown; the despanned view does **not** fix the export
+  layout by itself.
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

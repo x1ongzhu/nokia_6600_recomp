@@ -67,6 +67,15 @@ carries the CPSR T bit, a shadow call stack for mode restore, and an optional
 Thumb/ARM boundary.  The generator stays simple: lifted C calls `nk_call`,
 which either dispatches to generated C or enters the interpreter.
 
+The boot image is **paged**: the first 7 MiB carry a six-byte page tag
+(`20 00 00 00 dc 23`) every `0x20ec` bytes, and the `KaeP` header at `0x124`
+describes a boot-image payload the mask ROM normally installs.  The boot-region
+table is therefore modelled with explicit type/flag bits: `0x1a1c` needs type
+5..8 plus attr `0x04000000`, while `0x1b34` needs type 2.  `recompiler/kaep.py`
+measures the page grid and `bootregions.py --profile linear` emits the
+linear-capable table; with it the original linked boot bank passes the old KaeP
+lookup and reaches the page-table builder at `0x2fe4`.
+
 For the packed-image bring-up it also has:
 
 - **call-target repair** (`NK_CALL_INFER`, `NK_SNAP_WINDOW_ARM/THUMB`) — the

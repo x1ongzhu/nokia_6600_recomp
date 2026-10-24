@@ -601,6 +601,85 @@ linear address to map: the 0x20-byte payload is a packed/obfuscated blob that
 must be **unpacked first**.  Guessing more banks cannot fix it; the next task
 is the KaeP unpacker.
 
+### Round 14: the KaeP page grid; the loader passes 0xc58 (2026-10-25)
+
+Two independent findings move the boot frontier this round.
+
+**1. The first 7 MiB are a paged image, not a byte stream.**  A six-byte page
+tag
+
+```
+20 00 00 00 dc 23
+```
+
+is inserted every `0x20ec` bytes.  The first real tag is at file `0x20b0` and
+the last at `0x6d9134` — **852 tags**.  (`0x128` also reads `20 00 00 00 dc 23`,
+but those bytes are the KaeP size field plus the low half of its value, not a
+page tag.)  The kernel text starts exactly on a tag (file `0x326924` = runtime
+`0x50310000`), which is why its entry `+0x54` is still `nop; push {r4,r7,lr}`;
+removing the tag at the text start puts the same entry at `+0x4e`.  Code after
+a tag is shifted by six bytes relative to a tag-free layout.
+
+`recompiler/kaep.py` makes this measurable (`analyze`, `despan`, `synth`,
+`verify`), and `tools/test_kaep.sh` pins it.  Two cautions:
+
+* the tag semantics are **not** known.  It may be a flash page header, a
+  flasher insertion, or part of a KaeP container; the tool only measures the
+  grid.
+* despinning does **not** repair the export layout.  On the kernel the
+  pool-aware export hit rate drops from **104/478 (spanned)** to **67/478
+  (despanned)**, so the function-order mismatch (B1g2) is independent of the
+  page tags.
+
+The `KaeP` header itself is `{magic, size=0x20, value=0x1423dc}`.  Its payload
+at linked `0x80` is the repeated `0xdff9ea00` block; the loader consumes it as
+a boot-image descriptor.  `kaep.py synth` can substitute an explicit
+descriptor/list node for bring-up, but that is not the real unpack.
+
+**2. The boot-region table's type and flag checks were wrong.**  `0x1a1c`'s
+first pass only processes banks whose low-5-bit type is **5..8** *and* whose
+attr byte at `+0xb` has bit 2 set (`0x04000000`).  `0x1b34` only processes
+**type 2**.  The round-13 legacy table (`attr=1`) is therefore invisible to
+both, so the KaeP lookup `0xf018e59f` could never succeed.  The new
+`bootregions.py --profile linear` profile is:
+
+| bank | base | size | attr | purpose |
+|---|---|---|---|---|
+| RAM | `0x80000000` | 6 MiB | `0x04004002` | type-2 offset mapping, super page |
+| ROM | `0x50000000` | `0x1600000` | `0x04000005` | type-5 linear translation |
+| boot | `0` | `0x10000` | `0x04000005` | type-5 linear translation |
+
+The RAM bank is first so `0x1b34(table, 0)` maps offset 0 to RAM, not the boot
+bank.  The harness needs `NK_RAM_EXTRA=0x300000` for the 6 MiB bank.  On the
+**original** linked boot bank (no synthetic descriptor) the run now:
+
+| | round 13 | round 14 |
+|---|---|---|
+| boot-region table | `attr=1` legacy | linear profile |
+| KaeP lookup `0xc58` | fails (`0xf018e59f` outside) | **passes** |
+| instructions | 600,000 | 600,000 |
+| recoveries / undefined | 0 / 0 | 0 / 0 |
+| stop | `0xc7c`/`0x1a1c` lookup loop | **`0x2fe4` page-table fill** |
+
+`0x2fe4` is a page-table fill loop (`r2 ≈ 0x65802` entries, `r8` walking the
+destination).  It is progress, not a finished boot: the linear profile's
+`linbase` is used as a base address by `0x1a1c` but as a page mask by
+`0x1958`/`0x18b0`, and that dual role is not modelled correctly yet.  That, the
+real KaeP unpack and the page-table destination are the next tasks.
+
+```
+.venv/bin/python recompiler/kaep.py verify 6600_mcu.bin
+.venv/bin/python recompiler/bootregions.py verify 6600_mcu.bin --profile linear
+NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
+  NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
+  NK_REGIONS=out/6600_bootregions_linear.bin@0x80000000 \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=600000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+tools/test_kaep.sh
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):
@@ -913,8 +992,10 @@ is mid-function.
 1. **Resolve the entry's two out-of-range calls (P0)** — `0x5030fbc6` and
    `0x5030807a` are below the kernel code base.  They land inside the ROMFS
    directory block; the +0x10000 hypothesis lands mid-function, so the mapping
-   is not a simple relocation.  Try the WD2 "ALGORITHM" bytecode, a
-   function-order/constraint solver, and the kernel's own export/veneer layout.
+   is not a simple relocation.  Round 14 added the page-tag grid
+   (`recompiler/kaep.py`) but showed that despinning alone does not repair the
+   export layout (104/478 → 67/478); a function-order/constraint solver or an
+   explicit relocation table is still required.
 2. **Model the kernel object state (P0/P1)** — `0x80000000` starts as zero and
    the entry's second call expects a vtable-backed object at `[0x80000000]`
    (slot `+0x14`).  Decide whether the mask-ROM stand-in must pre-fill the
@@ -934,7 +1015,11 @@ is mid-function.
    file offset) so the pictures, ringtones, fonts and resource files can be
    placed in the flat image and served by a future file HLE.
 6. **Mask ROM stand-in** — CP15/MMU flat mapping, high vectors, SVC/IRQ state,
-   and the initial super-page/kernel-data contents.
+   and the initial super-page/kernel-data contents.  Round 14's linear
+   boot-region profile (`bootregions.py --profile linear`) passes the old
+   `0xc58` KaeP lookup and stops in the page-table fill at `0x2fe4`; the
+   `linbase` base-vs-page-mask semantics and the page-table destination are
+   the concrete next steps.  The real KaeP unpack remains open.
 7. **MMIO/display** — the entry already writes UPP registers around
    `0x58150000` / `0x58150500`; the next useful milestone is a real UPP
    display/timer/keypad register table rather than logging every access.
