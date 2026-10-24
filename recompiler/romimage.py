@@ -589,6 +589,54 @@ def scan_e32_files(rom: bytes) -> dict[int, int]:
     return out
 
 
+def find_app_companions(rom: bytes, root_off: int,
+                        e32: dict[int, int]) -> list[tuple[RomfsEntry, int]]:
+    """Locate the AIF and MBM companions stored in each app's packed run.
+
+    The packed app records are `[<App>.app E32Image][AIF][MBM]...`, in the
+    same order as the runtime addresses.  The AIF and MBM files start with a
+    0xff/zero prefix and a well-known UID; scanning for that UID inside the
+    app's run recovers them without a full E32 header parser.  The `.r01`
+    resources live in the separate compressed data area and are not handled
+    here.
+    """
+    tree = read_app_tree(rom, root_off)
+    if tree is None:
+        return []
+    apps: list[tuple[int, RomDir]] = []
+    for d in tree.apps.values():
+        app = next((e for e in d.entries if e.name.lower().endswith(".app")), None)
+        if app is None:
+            continue
+        foff = e32.get(app.addr)
+        if foff is not None:
+            apps.append((foff, d))
+    apps.sort(key=lambda t: t[0])
+    out: list[tuple[RomfsEntry, int]] = []
+    for i, (foff, d) in enumerate(apps):
+        end = apps[i + 1][0] if i + 1 < len(apps) else min(len(rom), foff + 0x200000)
+        for e in d.entries:
+            low = e.name.lower()
+            if low.endswith(".aif"):
+                uid = b"\x32\xb0\x1f\x10"
+                prefix = 0x0A
+            elif low.endswith(".mbm"):
+                uid = b"\x41\x00\x00\x10"
+                prefix = 0x10
+            else:
+                continue
+            pos = rom.find(uid, foff, end)
+            if pos < 0 or pos < prefix:
+                continue
+            start = pos - prefix
+            if start + e.size > end and i + 1 < len(apps):
+                continue
+            if start + e.size > len(rom):
+                continue
+            out.append((e, start))
+    return out
+
+
 def collect_romfs_files(rom: bytes, root_off: int) -> list[tuple[RomfsEntry, bool]]:
     """All file entries we can name: Libs, Programs and the app tree.
 
@@ -913,6 +961,12 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
             put(e.addr, rom[foff:foff + e.size], f"romfs_e32_{e.name}", foff,
                 overlay=is_app)
 
+        for e, foff in find_app_companions(rom, root_off, e32):
+            if foff + e.size > len(rom):
+                continue
+            put(e.addr, rom[foff:foff + e.size], f"romfs_data_{e.name}", foff,
+                overlay=True)
+
     return bytes(buf), warnings, placed
 
 
@@ -1148,6 +1202,9 @@ def cmd_build(a):
     e32n = sum(1 for s in placed if s.name.startswith("romfs_e32_"))
     if e32n:
         print(f"  ROMFS E32Image files: {e32n} placed at their runtime addresses")
+    datan = sum(1 for s in placed if s.name.startswith("romfs_data_"))
+    if datan:
+        print(f"  ROMFS app companions: {datan} AIF/MBM files placed")
     for w in warnings[:40]:
         print(f"  ! {w}")
     if len(warnings) > 40:

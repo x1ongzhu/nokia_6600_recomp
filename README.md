@@ -186,11 +186,12 @@ criteria and phased roadmap live in
   directories**, including **`snakeex`** (SnakeEx.app, 0x7ddc) and
   **`mixpix`** (mixpix.app, 0xd718).  `romimage.py build` now copies the
   **76 E32Image files** (63 `.app` binaries plus 13 plugin/driver files) from
-  their packed file records to their runtime addresses.  The `\System\
-  Programs` directory itself is truncated after nine boot entries (the rest is
-  overwritten by the next packed record); `romimage.py` validates entries and
-  reports this instead of inventing names.  Companion app data
-  (`.aif`/`.mbm`/`.r01`/`.wav`) still needs B3g.
+  their packed file records to their runtime addresses, plus **84 AIF/MBM**
+  companion files found by their UID headers in each app's packed run.  The
+  `\System\Programs` directory itself is truncated after nine boot entries
+  (the rest is overwritten by the next packed record); `romimage.py` validates
+  entries and reports this instead of inventing names.  The `.r01`/`.wav`
+  resources still need B3g.
 
 **← current frontier →**
 
@@ -224,9 +225,9 @@ criteria and phased roadmap live in
   (`ekern.exe`, `ecust.dll`, `ecomm.ldd`, ...) are the boot-critical set.
   `romimage.py` now validates names/addresses and reports the truncation
   instead of inventing entries; see `tools/test_romimage.sh`.  The **63
-  `<App>.app` E32Image files** (plus 13 plugin/driver files) are placed by
-  `build`; their companion data (`.aif`/`.mbm`/`.r01`/`.wav`) is still in the
-  packed data area and is the remaining B3g work.
+  `<App>.app` E32Image files** (plus 13 plugin/driver files) and **84 AIF/MBM
+  companions** are placed by `build`; the `.r01`/`.wav` data in the packed
+  data area is the remaining B3g work.
 - [ ] **Boot continuation** — the kernel entry still returns to the mask-ROM
   stand-in.  The old claim that recovery + the full image map runs into
   `euser.dll` and loops at `0x50389330` was a faithful-image artifact (missing

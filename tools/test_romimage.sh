@@ -112,7 +112,9 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 secs = {s["name"]: s for s in d["placed"]}
 for name, va, size in (("romfs_e32_SnakeEx.app", 0x5147f060, 0x7ddc),
-                       ("romfs_e32_mixpix.app", 0x514ace40, 0xd718)):
+                       ("romfs_e32_mixpix.app", 0x514ace40, 0xd718),
+                       ("romfs_data_About.aif", 0x50a209c0, 0x27c),
+                       ("romfs_data_About.mbm", 0x50a20c40, 0xcf8)):
     s = secs.get(name)
     if not s:
         print(f"FAIL: {name} not placed")
@@ -122,6 +124,8 @@ for name, va, size in (("romfs_e32_SnakeEx.app", 0x5147f060, 0x7ddc),
         sys.exit(1)
 print("ok: SnakeEx.app and mixpix.app placed at their runtime addresses")
 EOF
+check "ROMFS app companions: 84 AIF/MBM files placed" \
+    "app AIF/MBM companions placed"
 
 # No two non-overlay placed sections may overlap.
 "$PY" - "$LAYOUT" <<'EOF' || fail=1

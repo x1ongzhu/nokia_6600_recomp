@@ -243,7 +243,8 @@ and each app directory is the small directory holding `<App>.app`.  All
 **63** app directories resolve, including `snakeex` (`SnakeEx.app`, `0x7ddc`)
 and `mixpix` (`mixpix.app`, `0xd718`).  `romimage.py build` copies the 76
 E32Image files (63 `.app` plus 13 plugin/driver files) from their packed file
-records to the runtime addresses given by the directory entries.  `\System\
+records to the runtime addresses given by the directory entries, and locates
+84 AIF/MBM companions by their UID headers in the same packed runs.  `\System\
 Programs` is the exception: its `TRomDir` declares `0x5608` bytes but only
 **9 entries / 0x114 bytes** are present (the next packed record overwrites the
 tail), so only the boot modules `ekern.exe`, `ecust.dll`, `ecomm.ldd`,

@@ -336,8 +336,10 @@ E32Image files** (63 `.app` binaries plus 13 plugin/driver files): a plain
 E32Image file header is at `entry_addr`, its `iCodeAddress` is
 `entry_addr + 0x64`, and the packed bytes from that header are the file.  The
 flat image has `SnakeEx.app` at 0x5147f060, byte-identical to the packed file
-record.  The companion data (`.aif`, `.mbm`, `.r01`, `.wav`) is stored in a
-different packed data area and is still the remaining B3g work.
+record.  The AIF and MBM companions are in the same packed run: their UID
+headers (`0x101fb032` / `0x10000041`) locate 84 of them, which `build` copies
+too.  The `.r01`/`.wav` resources are stored in the compressed data area and
+are the remaining B3g work.
 
 ```
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin
