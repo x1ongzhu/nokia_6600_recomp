@@ -65,6 +65,9 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   padding-only model — every export may match any stored start below it with a
   non-decreasing cumulative drift — against random addresses; the kernel stays
   at the null (1.04–1.09x), so padding/drift cannot recover the linked layout.
+  `gaps` classifies the header-less block between `.text` and `.data`: most
+  records hold strings/pointer tables there, but 15 carry a second
+  Thumb/ARM code fragment (the kernel and the big boot DLL stay rodata).
   `verify` is the machine check used by `../tools/test_layout.sh`.  Small
   images are stored in their linked layout (the 5-export Thumb DLL is 5/5)
   but the kernel and the big DLLs are not: the pool-aware census reaches

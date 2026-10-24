@@ -208,8 +208,11 @@ criteria and phased roadmap live in
   its type-switch table is **0-based**, so the boot bank must execute at
   address 0 (`NK_LOW_ROM=1`), not at `0x50000000`.  In that view it runs
   **299,991** instructions and reaches the high-vector/super-page frontier at
-  `0x1248`.  `tools/test_layout.sh` pins the drift null test; the interpreter
-  self-test pins the opt-in low-alias window.
+  `0x1248`.  `layout.py gaps` also finds **15 records whose header-less
+  `.text`/`.data` block is a second Thumb/ARM code fragment** (the kernel and
+  the big boot DLL gaps stay rodata).  `tools/test_layout.sh` pins the drift
+  null test and the gap split; the interpreter self-test pins the opt-in
+  low-alias window.
 
 **← current frontier →**
 

@@ -436,6 +436,19 @@ NK_ENTRY=0x500003bc NK_R11=0x80000000 NK_R10=0 \
   --rom-image out/6600_runtime.bin
 ```
 
+**5. The header-less block is not always debug rodata.**  `layout.py gaps`
+classifies the block between `.text` and `.data` by printability, pointer
+density and instruction decode.  Of 629 images with a gap >= 16 bytes, 404 are
+strings/pointer tables and 15 are a **second Thumb/ARM code fragment**
+(`0x100039e1` 0x1838, `0x100058c1` 0xbce, `0x101f85e3` 0xa32, ...).  The kernel
+(`0x135c`) and the big boot DLL (`0x19dc`) are correctly rodata, so this does
+not explain the kernel export mismatch, but it is another way a packed record
+is not a simple contiguous image.  `tools/test_layout.sh` pins the split.
+
+```
+.venv/bin/python recompiler/layout.py gaps 6600_mcu.bin --code-only
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):

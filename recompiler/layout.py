@@ -25,6 +25,7 @@ stored text is not the linked text.
     py recompiler/layout.py census 6600_mcu.bin
     py recompiler/layout.py census 6600_mcu.bin --json out/layout_census.json
     py recompiler/layout.py drift  6600_mcu.bin --json out/layout_drift.json
+    py recompiler/layout.py gaps   6600_mcu.bin --code-only
     py recompiler/layout.py pools  6600_mcu.bin
     py recompiler/layout.py verify 6600_mcu.bin
 
@@ -33,6 +34,10 @@ some 2-byte padding removed" model: an export may match any stored start at or
 below it, with a non-decreasing cumulative drift.  Even that freedom only
 matches the kernel exports at the same rate as random addresses (a null test),
 so padding/relayout cannot recover the linked layout.
+
+`gaps` classifies the header-less block between `.text` and `.data`.  It is
+usually strings/pointer tables (the kernel and the big boot DLL), but a small
+group of records stores a second Thumb/ARM code fragment there.
 
 `verify` exits non-zero if the invariants used by the loader stop holding
 (export tables inside the text, the small reference DLL fully aligned, the
@@ -265,6 +270,95 @@ def drift_image(rom: bytes, img: romimage.Image, max_drift: int,
         "null_max": max(null, default=0),
         "ratio": (real / null_avg) if null_avg else None,
     }
+
+
+def classify_gap(data: bytes) -> str:
+    """Classify the header-less block between .text and .data.
+
+    The packing note used to call this block "debug/rodata".  Some records
+    actually carry a second *code* fragment there (Thumb or ARM).  Printable
+    strings, a pointer table or a high ratio of plausible instructions are
+    different signals; require a clean decode before calling it code.
+    """
+    if len(data) < 16:
+        return "small"
+    printable = sum(1 for b in data if 0x20 <= b < 0x7F or b == 0) / len(data)
+    if printable > 0.70:
+        return "rodata"
+    words = [int.from_bytes(data[i:i + 4], "little")
+             for i in range(0, len(data) - 3, 4)]
+    ptr = sum(1 for w in words if 0x50000000 <= w < 0x51700000)
+    if words and ptr > len(words) * 0.25:
+        return "rodata"
+    # Decode a short prefix in both instruction sets at both alignments.
+    best = None
+    try:
+        from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
+    except ImportError:                      # tools remain usable without it
+        return "data"
+    for mode, name in ((CS_MODE_THUMB, "thumb"), (CS_MODE_ARM, "arm")):
+        md = Cs(CS_ARCH_ARM, mode)
+        for off in (0, 2):
+            ins = list(md.disasm(data[off:off + 0x60], 0x1000 + off))
+            if len(ins) < 10:
+                continue
+            bad = sum(1 for i in ins if "undefined" in i.mnemonic or
+                      i.mnemonic == "udf")
+            cf = sum(1 for i in ins if i.mnemonic in
+                     ("bl", "blx", "bx", "b", "pop", "ldm", "mov") and
+                     ("pc" in i.op_str or i.mnemonic in
+                      ("bl", "blx", "bx", "b")))
+            pro = sum(1 for i in ins if i.mnemonic in ("push", "stmdb", "sub")
+                      or (i.mnemonic == "mov" and "ip" in i.op_str))
+            score = len(ins) - 4 * bad + cf + 2 * pro
+            if best is None or score > best[0]:
+                best = (score, f"{name}{off}", bad, cf, len(ins))
+    if best and best[2] == 0 and best[4] >= 10 and best[3] >= 2:
+        return "code:" + best[1]
+    return "data"
+
+
+def gap_rows(rom: bytes, images: list[romimage.Image]) -> list[dict]:
+    rows = []
+    for im in images:
+        if im.rodata is None or im.rodata.size < 16:
+            continue
+        data = rom[im.rodata.file_off:im.rodata.file_end]
+        rows.append({
+            "uid3": f"{im.uid3:#010x}",
+            "code": f"{im.code:#x}",
+            "text_size": im.text_size,
+            "code_size": im.code_size,
+            "gap_size": im.rodata.size,
+            "gap_file": f"{im.rodata.file_off:#x}",
+            "exports": im.export_count,
+            "kind": classify_gap(data),
+        })
+    rows.sort(key=lambda r: -r["gap_size"])
+    return rows
+
+
+def cmd_gaps(a):
+    rom, images = load_images(a.rom)
+    rows = gap_rows(rom, images)
+    code = [r for r in rows if r["kind"].startswith("code:")]
+    print(f"# header-less blocks: {len(rows)} images with a gap >= 16 bytes")
+    print(f"code-like gaps: {len(code)}  "
+          f"(thumb {sum(1 for r in code if r['kind'].startswith('code:thumb'))}, "
+          f"arm {sum(1 for r in code if r['kind'].startswith('code:arm'))})")
+    print(f"{'size':>8} {'uid3':>12} {'kind':>12} {'exports':>7}  code")
+    show = code if a.code_only else rows
+    for r in show[:a.limit]:
+        print(f"{r['gap_size']:8x} {r['uid3']:>12} {r['kind']:>12} "
+              f"{r['exports']:7d}  {r['code']}")
+    print("The kernel and the big boot DLL gaps are rodata (strings/pointer "
+          "tables), but a small group of records really stores a second code "
+          "fragment in this header-less block.  It is another way the packed "
+          "record is not the linked image.")
+    if a.json:
+        with open(a.json, "w") as f:
+            json.dump({"gaps": rows}, f, indent=1)
+        print(f"wrote {a.json}")
 
 
 def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
@@ -557,6 +651,13 @@ def main():
     p.add_argument("--uid3", type=lambda s: int(s, 0),
                    default=KERNEL_UID3)
     p.set_defaults(func=cmd_pools)
+
+    g = sub.add_parser("gaps")
+    g.add_argument("rom")
+    g.add_argument("--json")
+    g.add_argument("--code-only", action="store_true")
+    g.add_argument("--limit", type=int, default=40)
+    g.set_defaults(func=cmd_gaps)
 
     d = sub.add_parser("drift")
     d.add_argument("rom")

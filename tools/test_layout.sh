@@ -43,11 +43,14 @@ CENSUS_LOG=out/layout_census.log
 POOLS_LOG=out/layout_pools.log
 DRIFT=out/layout_drift.json
 DRIFT_LOG=out/layout_drift.log
+GAPS=out/layout_gaps.json
+GAPS_LOG=out/layout_gaps.log
 VERIFY_LOG=out/layout_verify.log
 
 "$PY" recompiler/layout.py census "$ROM" --json "$CENSUS" >"$CENSUS_LOG"
 "$PY" recompiler/layout.py pools "$ROM" >"$POOLS_LOG"
 "$PY" recompiler/layout.py drift "$ROM" --null 12 --json "$DRIFT" >"$DRIFT_LOG"
+"$PY" recompiler/layout.py gaps "$ROM" --json "$GAPS" >"$GAPS_LOG"
 "$PY" recompiler/layout.py verify "$ROM" >"$VERIFY_LOG"
 
 fail=0
@@ -71,6 +74,7 @@ check "0x100058e8" "$CENSUS_LOG" "kernel export census present"
 check "0x101f6e00" "$CENSUS_LOG" "reference DLL export census present"
 check "kernel scores at the null level" "$DRIFT_LOG" \
     "padding-only drift model is rejected"
+check "code-like gaps:" "$GAPS_LOG" "header-less blocks include code fragments"
 
 # The census must keep reporting a real split: the kernel export table does
 # not describe the stored text, while the small Thumb DLL does.
@@ -132,6 +136,26 @@ print(f"ok: drift chain {r['chain']}/{r['exports']} vs null "
       f"{r['null_avg']:.1f} ({r['ratio']:.2f}x); padding cannot explain it")
 EOF
 
+# The header-less block is not always debug/rodata: some records carry a
+# second Thumb/ARM fragment.  The kernel and the big boot DLL must stay
+# rodata; if they flip to "code", the classifier or the record layout changed.
+"$PY" - "$GAPS" <<'EOF' || fail=1
+import json, sys
+rows = json.load(open(sys.argv[1]))["gaps"]
+code = [r for r in rows if r["kind"].startswith("code:")]
+if len(code) < 10:
+    print(f"FAIL: only {len(code)} code-like gaps classified (expected >=10)")
+    raise SystemExit(1)
+by_uid = {r["uid3"]: r for r in rows}
+for uid in ("0x100058e8", "0x100039e5"):
+    r = by_uid.get(uid)
+    if r is None or r["kind"] != "rodata":
+        print(f"FAIL: {uid} gap classified as {None if r is None else r['kind']}, "
+              "expected rodata")
+        raise SystemExit(1)
+print(f"ok: {len(code)} code-like header-less blocks; kernel/DLL2 are rodata")
+EOF
+
 if [ "$fail" -ne 0 ]; then
     echo "--- $VERIFY_LOG ---"
     cat "$VERIFY_LOG"
@@ -139,6 +163,8 @@ if [ "$fail" -ne 0 ]; then
     cat "$POOLS_LOG"
     echo "--- $DRIFT_LOG ---"
     cat "$DRIFT_LOG"
+    echo "--- $GAPS_LOG (head) ---"
+    sed -n '1,20p' "$GAPS_LOG"
     echo "--- $CENSUS_LOG (head) ---"
     sed -n '1,16p' "$CENSUS_LOG"
     exit 1
