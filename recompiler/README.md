@@ -73,6 +73,16 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   but the kernel and the big DLLs are not: the pool-aware census reaches
   104/478 (21.8%) against a 17.2% baseline, and the drift null test rejects
   monotone relayout.
+- **`bootbank.py`** — reconstruct the linked view of the UPP boot bank (flash
+  first 64 KiB).  The bank is a concatenation of code fragments linked for
+  different bases, so its absolute pointers are not at the stored offsets.
+  `analyze` reads the relocation addend from `0x3b0` (`sub r1, pc, #0x308; add r0, r0, r1` → `0xb0`)
+  and measures the other fragments from the compiler's
+  `ldrls pc,[pc,rN,lsl#2]` switch tables (A `0xb0`, B `0x19c`, C `0x374`
+  provisional); `build` writes the 64 KiB image with A/B moved to their linked
+  addresses; `verify` pins the measurements.  The boot harness maps the result
+  at 0 with `NK_LOW_ROM_IMAGE` and starts at linked `0x30c`
+  (`../tools/test_bootbank.sh`).
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

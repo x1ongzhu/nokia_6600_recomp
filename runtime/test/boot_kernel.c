@@ -68,6 +68,13 @@
  *   NK_E32_HDR=0x64         serialized EKA1 image header size (code offset)
  *   NK_TEXT_SHIFT=n         diagnostic: load the text n bytes later in the
  *                           packed record (default 0)
+ *   NK_LOW_ROM=1            copy the boot bank to address 0 (the loader's jump
+ *                           tables and hand-off are 0-based)
+ *   NK_LOW_ROM_IMAGE=path   with NK_LOW_ROM: map this 64 KiB *linked* view
+ *                           instead of the raw flash bytes (recompiler/
+ *                           bootbank.py build); start at linked 0x30c
+ *   NK_DUMP=a:l[,a:l...]    append guest memory ranges to NK_DUMP_FILE at the
+ *                           end of the run (default out/memdump.bin)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -505,10 +512,25 @@ int main(int argc, char** argv) {
      * 0x50000000, which is wrong), so the loader only works when its code is
      * reachable at address 0.  Copy the first 64 KiB there for comparison. */
     if (getenv("NK_LOW_ROM")) {
+        /* NK_LOW_ROM_IMAGE replaces the verbatim first 64 KiB with an
+         * already-unpacked (linked) view, e.g. recompiler/bootbank.py.  The
+         * boot bank is stored as fragments linked for different bases, so the
+         * flash copy is not executable at its linked addresses. */
+        const char* low_path = getenv("NK_LOW_ROM_IMAGE");
+        const uint8_t* low_src = rom_copy;
+        long low_len = rom_len;
+        uint8_t* low_buf = NULL;
+        if (low_path) {
+            low_buf = read_file(low_path, &low_len);
+            if (!low_buf) { fprintf(stderr, "cannot read %s\n", low_path); return 1; }
+            low_src = low_buf;
+            printf("low ROM image: %s (%ld bytes)\n", low_path, low_len);
+        }
         uint32_t n = (uint32_t)env_ulong("NK_LOW_ROM_SIZE", 0x10000);
-        if ((long)n > rom_len) n = (uint32_t)rom_len;
-        nk_poke(&cpu, 0x00000000u, rom_copy, n);
+        if ((long)n > low_len) n = (uint32_t)low_len;
+        nk_poke(&cpu, 0x00000000u, low_src, n);
         nk_code_range_add(&ip, 0x00000000u, n);
+        free(low_buf);
         /* The mask ROM's high-vector page is a copy of the boot bank's
          * exception vectors.  Without it, the loader's exception path
          * executes zero pages at 0xffff0000. */
@@ -621,6 +643,35 @@ int main(int argc, char** argv) {
         }
         printf("hint: a Thumb/ARM boundary with no veneer looks like this; "
                "try NK_INFER=2 to rewind the halfword and execute as ARM.\n");
+    }
+
+    /* NK_DUMP=<addr>:<len>[,<addr>:<len>...] appends the guest memory a
+     * bring-up run produced (decompressed images, page tables, ...).  The
+     * destination is NK_DUMP_FILE (default out/memdump.bin) and each range is
+     * also described on stdout, so a loader frontier can be inspected. */
+    const char* dump = getenv("NK_DUMP");
+    if (dump) {
+        const char* path = getenv("NK_DUMP_FILE");
+        if (!path) path = "out/memdump.bin";
+        FILE* f = fopen(path, "wb");
+        if (!f) {
+            fprintf(stderr, "cannot open %s\n", path);
+        } else {
+            const char* p = dump;
+            while (*p) {
+                char* end = NULL;
+                uint32_t addr = (uint32_t)strtoul(p, &end, 0);
+                if (!end || *end != ':') break;
+                uint32_t len = (uint32_t)strtoul(end + 1, &end, 0);
+                printf("dump %#010x..%#010x (%u bytes)\n", addr, addr + len, len);
+                for (uint32_t i = 0; i < len; i++)
+                    fputc(nk_r8(&cpu, addr + i), f);
+                if (!end || *end != ',') break;
+                p = end + 1;
+            }
+            fclose(f);
+            printf("wrote %s\n", path);
+        }
     }
 
     nk_mem_free(&cpu);

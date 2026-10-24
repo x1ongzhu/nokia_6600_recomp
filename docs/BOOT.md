@@ -449,6 +449,84 @@ is not a simple contiguous image.  `tools/test_layout.sh` pins the split.
 .venv/bin/python recompiler/layout.py gaps 6600_mcu.bin --code-only
 ```
 
+### Round 12: the boot bank is fragmented; the linked view runs clean (2026-10-25)
+
+**1. The bank is not stored at its linked addresses, and the mask ROM says by
+how much.**  `0x3b0` is `sub r1, pc, #0x308; add r0, r0, r1; mov pc, lr`: it
+adds the **relocation addend `0xb0`** to `r0` (`physical = linked + 0xb0`).
+So the linked image starts at stored offset `0xb0`.  The loader entry `0x3bc`
+is `mov r0, fp; sub r1, pc, #0x298; ...`; in the linked view it sits at `0x30c`
+and its descriptor is `0x130 - 0xb0 = 0x80`, the KaeP payload.
+
+Two independent anchors confirm the shift:
+
+* the loader's final hand-off at stored `0x1754` is the literal `0x1244`; the
+  real `push {r4,r5,r6,r7,r8,sb,sl,lr}` entry is at stored `0x12f4` = `0x1244 +
+  0xb0`;
+* the first switch table (`ldrls pc, [pc, r0, lsl #2]` at `0x1238`, table
+  `0x1240`) holds `0x11a8/0x11b0/0x11b8/...`; adding `0xb0` gives
+  `0x1258/0x1260/0x1268/...`, exactly the `mov r0, #imm; mov pc, lr` case
+  bodies that follow the table.
+
+**2. Later fragments have a larger bias.**  The packed bank concatenates code
+fragments that were linked for different bases.  The compiler's switch tables
+measure the bias: the closest case body follows the table, so
+`table_end - entry` is a lower bound, and all tables in one fragment agree to
+within `0x20`.  `recompiler/bootbank.py` finds 17 tables in the first 64 KiB:
+
+| fragment | linked range | stored range | measured bias | tables |
+|---|---|---|---|---|
+| A | `0x0000-0x2000` | `0x00b0-0x20b0` | **0xb0** | 7, all exactly `0xb0` |
+| B | `0x2000-0x6000` | `0x219c-0x619c` | **0x19c** | 8 (`0x18c`-`0x19c`) |
+| C | `0x6000-?` | `0x6374-?` | **0x374** | 2 (provisional) |
+
+The gaps `0x20b0-0x219c` (`0xec`) and `0x619c-0x6374` (`0x1d8`) are **not**
+padding: they contain further ARM/Thumb code and literal pools, linked for yet
+another base.  Fragment C's linked base is not pinned down, so `build` only
+relocates A and B.
+
+**3. The reconstructed view boots on the real path.**  `bootbank.py build`
+moves A and B to their linked addresses; `boot_kernel` maps the result at 0 via
+`NK_LOW_ROM_IMAGE` and starts at linked `0x30c`:
+
+```
+NK_LOW_ROM=1 NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=600000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+```
+
+| | verbatim bank (round 11) | linked view (round 12) |
+|---|---|---|
+| instructions | 299,991 then loop | **600,000** (budget) |
+| stale-call recoveries | 9 | **0** |
+| undefined | 0 | 0 |
+| hand-off `0x1244` | executed as a switch table | real loader function |
+| UPP MMIO | none on this path | `0x08000008 = 0x37` |
+| stop | `0x125c` (inside the table) | `0x1a1c`, lookup loop `0xc7c` |
+
+The MMIO write is real device surface: linked `0x4298` (called from the size
+probe `0x36a4`, which returns `0xb8000`) configures `0x08000000` and was
+previously unreachable.
+
+**4. The new frontier is the empty boot-image list, not another veneer.**  The
+loader thread at `0x1244` calls `0xc58` with the KaeP payload (`0x80`) and the
+frame buffer (`0xfffff400`).  `0xc58` treats the payload as a record: it checks
+`[0x80+0x20]` (`0xe59ff018`, the vector table) and looks up the key
+`[0x80+0xc]` (`0xdff9ea00`) in the list at `0xfffff400`.  That list is empty
+(`[0xfffff400] = 0`), so `0x1a1c` returns `-1`; the caller does not check and
+reads `[0x3]`/`[0x5f]`, then loops.  The mask ROM (or a decompression step)
+must install the **boot-image/region list** the loader expects.  This is the
+concrete successor of round 11's "super-page table" task.
+
+```
+.venv/bin/python recompiler/bootbank.py analyze 6600_mcu.bin
+.venv/bin/python recompiler/bootbank.py build 6600_mcu.bin \
+  out/6600_bootbank_linked.bin
+tools/test_bootbank.sh
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):

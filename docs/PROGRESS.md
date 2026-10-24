@@ -15,7 +15,7 @@
 | Kernel | `fw/6600_kernel.bin`（166,592 / `0x28ac0` 字节 text，链接地址 `0x50310000`，入口 `0x50310054`） |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`、pre-MMU 物理 RAM `0x00000000`（round 6）、high vectors `0xffff0000`、MMIO bus；扁平镜像现在放置 **722 个 image**（1,580 个 section，无重叠） |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`、pre-MMU 物理 RAM `0x00000000`（round 6）、high vectors `0xffff0000`、MMIO bus；扁平镜像现在放置 **722 个 image**（1,580 个 section，无重叠）；`NK_LOW_ROM_IMAGE` 可把 `bootbank.py` 重建的 **linked 64 KiB boot bank** 映射到 0 |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）和少量 HLE 编译器运行时 |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
 
@@ -54,6 +54,7 @@
 | M18 | **第 9 轮：export 表作为 layout oracle；packed text 不是 linked text** | 新增 `recompiler/layout.py` 与 `tools/test_layout.sh`。确认 `TRomImageHeader.iExportDir` 就是**按 ordinal 索引的、已 fixed-up 的函数地址数组**（不是名字表；Thumb 函数带 bit 0）；用 5 个 export 的小 DLL `0x101f6e00` 做正对照：5/5 都是 `push {..,lr}` 起点。**关键反证**：kernel 的 478 个 export 全部在 text 内且 4 字节对齐，但只有 82 个（17.2%）落在 stored text 的函数起点上，而随机 4 字节对齐地址的 baseline 就有 13.1%（1.31×）；DLL `0x100039e5` 是 258/1788 = 14.4%，baseline 5.9%（2.44×）。应用当前 relayout（44 pads / 0x58）后 kernel 仍只有 58/478；常数 shift 最好 0xb0 也只有 93/478；线性 drift 也没有改善。packed text 的 1420/1430 个 ARM prologue 都 4 字节对齐、759/787 个 pool 4 字节对齐，所以“只补 2 字节 padding”不可能解释这个差距。结论：**stored text 的 function layout 与 linked layout 不同（不只是对齐）**；`relayout` 只是局部修复（pool/入口验证），不能恢复跨函数调用/export 语义。 |
 | M19 | **第 10 轮：pool-aware 起点检测 + Programs 目录截断 + entry literal 方程** | (1) `layout.py` 的起点检测现在会**穿过 literal pool 回溯到 terminator**，从而识别 pool 后的 leaf 函数；kernel export 命中从 82/478（17.2%）升到 **104/478（21.8%）**，但同一检测器的随机 baseline 也升到 **17.2%**（1.27×），结论不变。(2) `romimage.py` 的 `TRomDir` 解析加入条目校验（ASCII 名、地址在 ROM 窗口、size 上限）并显式报告截断：`\System\Programs` 声明 `0x5608` 字节，实际只有 **9 个有效条目 / 0x114 字节**，其余 `0x54f4` 字节被下一个 packed record 覆盖。旧文档中的 236 项（`EStart.exe`、`EFile.exe` 等）是越过目录尾后把代码当条目的**误报**。`\System\Libs`（171 项）、`\System`（23 项）、root（2 项）完整。(3) entry `0x50310054` 的三条 `ldr` 方程证明 packed pool 在 `0x5031008e`，linked pool 在 `0x50310090`；当前 relayout 把 pad 放在 entry push 前（`0x50310056`）后三条 literal 都正确，relaid entry 局部是自洽的。(4) 新增 `romimage.py tree`：64 KiB packed 目录块里其实有**整棵 ROMFS 树**；`\System\Apps` 是唯一“所有条目都是子目录”的 `TRomDir`，按 `<App>.app` 内容匹配可恢复 **63/63 个 app 目录**，包括 `snakeex`（SnakeEx.app 0x7ddc）和 `mixpix`（mixpix.app 0xd718）。`build` 进一步把 **76 个 E32Image 文件**（63 个 `.app` + 13 个 plugin/driver）按 `iCodeAddress-0x64` 映射从 packed file 原样复制到其 runtime 地址，并用 AIF/MBM UID 在 app packed run 内定位 **84 个 AIF/MBM** 伴随文件；`SnakeEx.app` 已在 flat image `0x5147f060` 验证逐字节一致。这为 P3 提供了完整的应用清单、app 二进制和图标/位图；`.r01`/`.wav` 数据仍待 B3g。 |
 | M20 | **第 11 轮：padding-only drift 被否定；mask ROM loader 入口定位** | (1) 新增 `layout.py drift`：最强的“packed text + 非递减 2 字节 drift”模型允许 export `V` 匹配任意 `c <= V` 的 stored start，且可跳过 entry。kernel 在 `0x60/0xc0/0x200` 预算下最长单调链为 **149/183/225**，随机地址 null 为 **140.4/168.6/217.2**，比值 **1.06/1.09/1.04**——padding-only 模型与随机无差别。B1g2 的 monotone drift 分支关闭，剩余只能是显式 function-order/relocation 表或符号级置换。(2) `census` 新增 `in-code%`：692 个有 export 的 image 中 **135** 个 entry 全在自身 code 内（kernel/大 DLL）、**155** 个约一半、**36** 个更低、**366** 个为 0；kernel 是真实 export 表 + 错误 layout，不是解析错位。(3) boot harness 支持 `NK_Rn`（n=0..12）；定位 mask-ROM 二级 loader 入口 **`0x500003bc`** → **`0x50001648`**，`KaeP` 描述符在 `0x50000124`（payload `0x130`）。无 call repair 时执行 **211** 条、10 次 stale-call recovery 后返回 sentinel；`NK_CALL_POLICY=3 NK_SNAP_WINDOW=0x400` 时首个 stale call（`0x50001664 -> 0x50002ae4`）snap 到最近 prologue **`0x500029dc`**，运行 **>300,000** 条后进入 base 0、count≈`0x80000000` 的表扫描。snap 只是 bring-up 手段，不能证明 `0x29dc` 就是目标 callee；但扫描本身说明 loader 需要 mask ROM 应安装在地址 0 的 **boot image/super-page 表**，flash 中不存在。下一步是建模该表。(4) 发现 boot bank 的跳转表是 **0-based**（`0x2908` 等），所以 mask-ROM 物理视图是 **boot code at 0**、ROM 字面量 at `0x50000000`、RAM at `0x80000000`；新增 `NK_LOW_ROM=1` 把前 64 KiB 复制到 0、登记为 code、复制 16 个 high vectors，并让解释器只在 opt-in 时允许 low alias。该视图下 loader 无 snap 运行 **299,991** 条，随后在 high-vector 异常路径循环于 `0x1248`；下一 frontier 是异常/super-page state。(5) 新增 `layout.py gaps`：对 629 个带 header-less block 的 image 分类，404 个是字符串/指针表，**15 个是第二段 Thumb/ARM code**（最大 `0x100039e1` 0x1838、`0x100058c1` 0xbce、`0x101f85e3` 0xa32）；kernel（`0x135c`）和 DLL2（`0x19dc`）正确判为 rodata，因此它不解释 kernel export mismatch，但再次证明 packed record 不是简单连续镜像。`tools/test_layout.sh` 已加入 drift 回归（ratio < 1.2）与 gaps 回归，`interp_selftest` 新增 low-alias 回归。 |
+| M21 | **第 12 轮：boot bank 是分段链接的；linked view 零恢复启动** | (1) 新增 [`recompiler/bootbank.py`](../recompiler/bootbank.py)：boot bank（flash 前 64 KiB）不是按链接地址存放，而是多个“按不同基址链接的代码段”拼接。`0x3b0` 的 `sub r1, pc, #0x308; add r0, r0, r1` 把 **重定位加数 0xb0** 加到 r0（`physical = linked + 0xb0`）；loader entry `0x3bc` 在 linked view 中是 `0x30c`，其 descriptor 是 `0x130-0xb0 = 0x80`（KaeP payload）。两个独立锚点验证 +0xb0：loader 最后 hand-off 的字面量 `0x1244` 对应 stored `0x12f4` 的真函数入口；第一个 switch table（`0x1238`/table `0x1240`）的 `0x11a8/0x11b0/...` 加 `0xb0` 正好是 `0x1258/0x1260/...` 的 case bodies。(2) `bootbank.py analyze` 扫描 17 个 `ldrls pc,[pc,rN,lsl#2]` 表，用 `table_end - entry` 估计 drift（下界，同段内一致到 `0x20`）：段 A linked `0x0-0x2000` ← stored `0xb0-0x20b0`，bias **0xb0**（7 个表全部精确 0xb0）；段 B linked `0x2000-0x6000` ← stored `0x219c-0x619c`，bias **0x19c**（8 个表 0x18c-0x19c）；段 C stored `0x6374`，bias **0x374**（2 个表，linked base 未定）。两处间隙 `0x20b0-0x219c`（0xec）和 `0x619c-0x6374`（0x1d8）**不是 padding**，里面还有 ARM/Thumb 代码和 literal pool，链接基址不同。(3) `bootbank.py build` 把 A/B 搬到 linked 地址；boot harness 新增 `NK_LOW_ROM_IMAGE` 把该 64 KiB 视图映射到 0，并从 linked `0x30c` 启动。结果：**600,000 条指令、0 恢复、0 undefined**（round 11 为 9 次恢复后循环在 `0x125c`），第一次出现真实 UPP 写 `0x08000008 = 0x37`（linked `0x4298`，由返回 `0xb8000` 的 size probe `0x36a4` 调用），并确认 `0x1244` 线程入口真正执行。(4) 新 frontier：`0x1244` 调用 `0xc58(KaeP payload 0x80, frame 0xfffff400)`；`0xc58` 检查 `[0x80+0x20]=0xe59ff018` 后在 `0xfffff400` 的列表里查 key `[0x80+0xc]=0xdff9ea00`，但该列表为空（`[0xfffff400]=0`），`0x1a1c` 返回 `-1`，调用者未检查而读到 `0x3`/`0x5f`，进入 `0xc7c` 循环。下一步是让 mask ROM/解压步骤安装 loader 需要的 **boot-image/region 列表**。验收：`tools/test_bootbank.sh` |
 
 ### 可复现命令
 
@@ -109,6 +110,17 @@ tools/test_relayout.sh
 .venv/bin/python recompiler/layout.py pools 6600_mcu.bin
 .venv/bin/python recompiler/layout.py verify 6600_mcu.bin
 tools/test_layout.sh
+
+# round 12: boot-bank fragment drift + linked low-ROM view
+.venv/bin/python recompiler/bootbank.py analyze 6600_mcu.bin
+.venv/bin/python recompiler/bootbank.py build 6600_mcu.bin out/6600_bootbank_linked.bin
+.venv/bin/python recompiler/bootbank.py verify 6600_mcu.bin
+NK_LOW_ROM=1 NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
+    NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+    NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=600000 \
+    ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_bootbank.sh
 ```
 
 ---
@@ -327,8 +339,20 @@ tools/test_layout.sh
 ### B2. Mask ROM 初始状态（P0/P1）
 - `0x00e0ca39` 在 UPP 内部 boot ROM 中，不在固件镜像里。
 - 该路径通常负责 MMU、cache、时钟和向量表的初始设置，然后跳入 kernel。
+- **第 12 轮更新**：mask ROM 还会把 flash 前 64 KiB 的 boot bank **按链接地址
+  展开**。boot bank 是多个不同基址的代码段拼接而成（A bias `0xb0`、B
+  `0x19c`、C `0x374`）；按 flash 原样执行会让所有绝对跳转落进错误段。
+  `recompiler/bootbank.py` 已能从 `0x3b0` 的 `sub r1, pc, #0x308` 和 17 个
+  switch table 测出这些 bias 并重建 linked view。用
+  `NK_LOW_ROM_IMAGE` 映射后 loader 连续执行 **600k 条、0 次 stale-call
+  recovery**，到达 linked `0x1244` 的 image-loader 线程，并第一次写 UPP
+  `0x08000008 = 0x37`。**当前缺口**：该线程在 `0xc58` 查
+  `0xfffff400` 的 boot-image/region 列表时列表为空（`[0xfffff400]=0`），
+  `0x1a1c` 返回 `-1` 后调用者未检查，进入 `0xc7c` 循环。mask ROM stand-in
+  还需要安装这张列表（或完成 KaeP 的解压/解密步骤）。
 - 我们需要 runtime 里的 **mask ROM stand-in**：设定初始 CPSR/CP15/栈，映射
-  ROM/RAM/high vectors，然后跳到 `0x50310054`。
+  ROM/RAM/high vectors，展开 linked boot bank，安装 boot-image 列表，然后
+  跳到 `0x50310054`。
 
 ### B3. WD2 是 **packed** 镜像，但 runtime 布局已恢复（P0/P1，大幅推进）
 - 23.3 MB 的 `6600_mcu.bin` 是 **section database**，不是 `rom_base` 起点的
@@ -604,7 +628,10 @@ entry：
 - [x] **M17f** 修正 UID1 常量（`0x1000007a` = EXE，`0x10000079` = DLL）
 - [x] **B6a0** mask-ROM 物理视图：boot bank 的跳转表是 0-based，代码必须在地址 0 执行。`NK_LOW_ROM=1`（copy 64 KiB + high vectors + opt-in low alias）下 loader 运行 299,991 条，循环于 `0x1248`
 - [x] **B6a1** mask-ROM 二级 loader 入口：`0x500003bc` → `0x50001648`，输入是 `0x50000130` 的 KaeP 描述符；boot harness 支持 `NK_Rn` 注入。无 repair 时 211 条 / 10 次 recovery；`NK_CALL_POLICY=3` 时进入表扫描
-- [ ] **B6a2** 建模 boot image/super-page 表：loader 在 base=0、count≈`0x80000000` 的表上扫描；该表应由 mask ROM 从 ROM header/ROMFS 安装，flash 中不存在。先确定表格式（16 字节 entry），再从 722 个 image + boot 模块表生成它
+- [x] **B6a1b** boot-bank 分段重建：`recompiler/bootbank.py`。`0x3b0` 的 `sub r1,pc,#0x308; add r0,r0,r1` 给出重定位加数 `0xb0`；17 个 switch table 测出段 A `0xb0`（7/7）、段 B `0x19c`（8 个，0x18c-0x19c）、段 C `0x374`（2 个，linked base 待定）。`build` 把 A/B 搬到 linked 地址；两处间隙（0xec / 0x1d8）是另一基址的 ARM/Thumb 代码，不是 padding。验收：`tools/test_bootbank.sh`
+- [x] **B6a1c** linked low-ROM view：`NK_LOW_ROM_IMAGE` + `NK_ENTRY=0x30c`。结果 **600,000 条、0 recoveries、0 undefined**，到达 linked `0x1244`，写 UPP `0x08000008=0x37`；round 11 的原样 bank 仍为 9 次恢复后循环 `0x125c`
+- [ ] **B6a2** 建模 boot image/region 列表：linked `0x1244` 在 `0xc58` 用 KaeP payload（`0x80`）的 key `[0x80+0xc]=0xdff9ea00` 查 `0xfffff400` 的列表；该列表为空，`0x1a1c` 返回 `-1` 后进入 `0xc7c` 循环。需要确定列表格式（0x10 字节 entry）并从 ROM header/722 个 image/boot 模块表生成；也可能是 KaeP payload 的解压/解密步骤
+- [ ] **B6a2b** 重建 boot bank 的段 C/D 和两处间隙 code fragment：段 C bias `0x374`，linked base 未定；间隙里还有 ARM/Thumb 代码。loader 目前只执行到 linked `0x4300`，但下一步会用到
 - [ ] **B6a3** entry 第二个调用的 kernel 对象 / vtable（`[0x80000000]` 全局 + `0x503364b0` 的 `+0x14` slot）
 - [ ] **B6b** 解析 WD2 “ALGORITHM” header/bytecode，检查它是否描述 final layout / veneer / patch（容器 header 里尚未找到已知地址/大小值，需按格式解码）
 - [ ] **B6c** 为 `0x5030fbc6` / `0x5030807a` 找到真实 callee（+0x10000 落点都是函数中部）
@@ -644,6 +671,37 @@ entry：
 ---
 
 ## 9. 变更记录
+
+- 2026-10-25（本轮 12）：**boot bank 是分段链接的；linked view 零恢复启动**。
+  boot bank（flash 前 64 KiB）由多个“按不同基址链接的代码段”拼接，绝对
+  指针保留的是**链接地址**，所以按 flash 原样执行会让所有绝对跳转落进错误
+  段。`0x3b0` 的 `sub r1, pc, #0x308; add r0, r0, r1` 把 **重定位加数 0xb0** 加到 r0
+  （`linked = stored - 0xb0`），loader entry `0x3bc` 在 linked view 中是
+  `0x30c`、descriptor 是 `0x130-0xb0 = 0x80`。两个独立锚点验证：loader
+  最后 hand-off 的字面量 `0x1244` 对应 stored `0x12f4` 的真函数入口；第一个
+  switch table（`0x1238`/table `0x1240`）的 `0x11a8/0x11b0/...` 加 `0xb0`
+  正好是 `0x1258/0x1260/...` 的 case bodies。新增
+  [`recompiler/bootbank.py`](../recompiler/bootbank.py)：`analyze` 扫描 17 个
+  `ldrls pc,[pc,rN,lsl#2]` 表，用 `table_end - entry` 估计 drift（下界，同段
+  一致到 `0x20`）：段 A linked `0x0-0x2000` ← stored `0xb0-0x20b0`
+  （**0xb0**，7/7 精确）；段 B linked `0x2000-0x6000` ← stored
+  `0x219c-0x619c`（**0x19c**，8 个表 0x18c-0x19c）；段 C stored `0x6374`
+  （**0x374**，linked base 未定）。两处间隙 `0x20b0-0x219c`（0xec）和
+  `0x619c-0x6374`（0x1d8）里还有 ARM/Thumb 代码和 literal pool，**不是
+  padding**。`build` 把 A/B 搬到 linked 地址；boot harness 新增
+  `NK_LOW_ROM_IMAGE` 把 64 KiB linked view 映射到 0，从 `0x30c` 启动。
+  结果：**600,000 条、0 次 stale-call recovery、0 undefined**（round 11
+  的原样 bank 是 9 次恢复后循环在 `0x125c`），第一次执行到 linked
+  `0x1244` 的 image-loader 线程，并第一次写真实 UPP 寄存器
+  `0x08000008 = 0x37`（linked `0x4298`，由返回 `0xb8000` 的 size probe
+  `0x36a4` 调用）。新 frontier：`0xc58` 用 KaeP payload 的 key
+  `[0x80+0xc]=0xdff9ea00` 查 `0xfffff400` 的 boot-image/region 列表，但列表
+  为空（`[0xfffff400]=0`），`0x1a1c` 返回 `-1` 后调用者未检查，进入 `0xc7c`
+  循环。下一步是安装该列表（B6a2）而不是继续放大 snap 窗口。boot harness
+  另新增 `NK_DUMP`/`NK_DUMP_FILE`，可在结束时导出 guest 内存。验收：
+  `tools/test_bootbank.sh`、`tools/test_interp.sh`、`tools/test_loader.sh`、
+  `tools/test_romimage.sh`、`tools/test_layout.sh`、`tools/test_boot_recover.sh`、
+  `tools/test_relayout.sh` 全部通过。
 
 - 2026-10-25（本轮 11）：**padding-only drift 被定量否定 + mask-ROM loader 入口**。
   新增 `layout.py drift`：把“packed text = linked text 减去若干 2 字节 padding”

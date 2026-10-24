@@ -213,6 +213,22 @@ criteria and phased roadmap live in
   the big boot DLL gaps stay rodata).  `tools/test_layout.sh` pins the drift
   null test and the gap split; the interpreter self-test pins the opt-in
   low-alias window.
+- [x] **Boot bank is fragmented; the linked view runs clean (round 12)** —
+  the first 64 KiB of flash is not stored at its linked addresses.  It
+  concatenates code fragments linked for different bases, so every absolute
+  branch lands in the wrong fragment when the flash copy is run directly.
+  [`recompiler/bootbank.py`](recompiler/bootbank.py) reads the relocation addend from
+  `0x3b0` (`sub r1, pc, #0x308; add r0, r0, r1` → **0xb0**) and measures the other fragments
+  from the 17 compiler switch tables: **A** `0x0-0x2000` ← stored
+  `0xb0-0x20b0` (bias `0xb0`, 7/7 exact), **B** `0x2000-0x6000` ← stored
+  `0x219c-0x619c` (bias `0x19c`), **C** stored `0x6374` (bias `0x374`,
+  provisional).  The two gaps (`0xec` / `0x1d8`) contain further ARM/Thumb
+  code, not padding.  `build` moves A/B to their linked addresses and the boot
+  harness maps the result at 0 (`NK_LOW_ROM_IMAGE`, start `0x30c`): the loader
+  now runs **600,000 instructions with zero stale-call recoveries** (round 11
+  needed 9 and looped at `0x125c`), reaches the image-loader thread at
+  `0x1244`, and writes a real UPP register (`0x08000008 = 0x37`).
+  `tools/test_bootbank.sh` is the acceptance test.
 
 **← current frontier →**
 
@@ -272,14 +288,15 @@ criteria and phased roadmap live in
 - [ ] **Mask ROM** — the reset path at `0x00e00000` (entry `0x00e0ca39`) is in
   the UPP's internal boot ROM and is not in the flash dump.  Round 11 found the
   secondary loader entry it calls: **`0x500003bc` → `0x50001648`**, driven by
-  the **`KaeP`** descriptor at `0x50000124` (payload `0x130`).  With the
-  `NK_Rn` register overrides the loader executes 211 instructions before the
-  stale call sites are recovered.  The loader's jump tables are **0-based**,
-  so the boot bank has to run at address 0: `NK_LOW_ROM=1` copies it there and
-  installs the high vectors, and the loader then runs **299,991** instructions
-  to the `0x1248` high-vector/super-page frontier.  Modelling the
-  **boot image/super-page table** (`base=0`, `count≈0x80000000`) that the mask
-  ROM should have installed is the next boot step.
+  the **`KaeP`** descriptor at `0x50000124` (payload `0x130`).  Round 12 showed
+  the bank must be **unpacked**, not just copied: it is a concatenation of
+  fragments linked for different bases.  `bootbank.py build` +
+  `NK_LOW_ROM_IMAGE` runs the loader for **600,000 instructions with no stale
+  calls**, through the `0x1244` image-loader thread and into a real UPP write.
+  The new frontier is the **boot-image/region list** that thread expects at
+  `0xfffff400`: it is empty, so the descriptor lookup returns `-1` and the
+  loader loops at `0xc7c`.  Installing that list (or decompressing the `KaeP`
+  payload, key `0xdff9ea00`) is the next boot step.
 - [ ] **MMIO + display** — the sparse bus is in place; the entry already writes
   UPP registers around `0x58150000`, which is the first real device surface.
 - [ ] **First light** — the Nokia boot logo on a host window.
@@ -367,6 +384,17 @@ NK_LOW_ROM=1 NK_ENTRY=0x3bc NK_R11=0x80000000 NK_R10=0x80000000 \
   NK_RECOVER=1 NK_CODE_ONLY=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
   --rom-image out/6600_runtime.bin
+
+# round 12: measure the boot-bank fragments and boot the linked view
+.venv/bin/python recompiler/bootbank.py analyze 6600_mcu.bin
+.venv/bin/python recompiler/bootbank.py build 6600_mcu.bin \
+  out/6600_bootbank_linked.bin
+NK_LOW_ROM=1 NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=600000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+tools/test_bootbank.sh
 ```
 
 `6600_mcu.bin` is now the **23.3 MB raw EKA1 flash image** extracted from
@@ -413,7 +441,7 @@ full analysis and the relayout plan are in [`docs/BOOT.md`](docs/BOOT.md) and
 ## Toolchain
 
 - **Python 3 + Capstone** — the recompiler (`wd2.py`, `extract.py`, `lift.py`,
-  `gen_register.py`, `romimage.py`, `relayout.py`, `layout.py`);
+  `gen_register.py`, `romimage.py`, `relayout.py`, `layout.py`, `bootbank.py`);
   `dct4decrypt.py` remains for the older 6100 DCT4 chunks.
 - **IDA Pro 9.1 (headless)** — exact function boundaries on the EKA1 image
   (`extract_ida.py`).
