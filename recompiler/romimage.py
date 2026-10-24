@@ -561,6 +561,65 @@ def image_by_header_address(images: list[Image], va: int) -> Image | None:
     return None
 
 
+def scan_e32_files(rom: bytes) -> dict[int, int]:
+    """Map ROMFS file runtime addresses to packed E32Image file offsets.
+
+    Besides the ROM image records (TRomImageHeader) the flash also stores
+    plain E32Image *files* for the applications.  Their header layout starts
+    with the same UID1/UID2/UID3 words and `iCodeAddress = file_addr + 0x64`;
+    the ROMFS directory entry for `<App>.app` points at that header.  A
+    TRomImageHeader-only scan misses them because they are not followed by a
+    record boundary.  This loose scan recovers the 63 application binaries
+    (SnakeEx.app, mixpix.app, ...) without treating arbitrary data as code.
+    """
+    out: dict[int, int] = {}
+    for o in range(0, len(rom) - 0x64, 2):
+        uid1 = u32(rom, o)
+        if uid1 not in (UID_EXE, UID_DLL):
+            continue
+        (uid2, uid3, uidc, entry, code, data, csize, tsize, dsize,
+         bss) = struct.unpack_from("<10I", rom, o + 4)
+        if not (ROM_BASE <= code < ROM_BASE + ROM_SIZE):
+            continue
+        if csize == 0 or csize > 0x400000 or tsize > csize:
+            continue
+        if dsize > 0x100000 or bss > 0x100000:
+            continue
+        out.setdefault(code - 0x64, o)
+    return out
+
+
+def collect_romfs_files(rom: bytes, root_off: int) -> list[tuple[RomfsEntry, bool]]:
+    """All file entries we can name: Libs, Programs and the app tree.
+
+    The boolean marks an app-tree entry: `<App>.app` files are plain
+    E32Image files and must be copied whole, even when their header also
+    looks like a ROM image record.
+    """
+    hdr = find_rom_header(rom)
+    dirs = find_boot_dirs(rom, root_off, hdr["root_dir_list"])
+    out: list[tuple[RomfsEntry, bool]] = []
+    seen: set[tuple[str, int, int]] = set()
+
+    def add(entries: list[RomfsEntry], is_app: bool):
+        for e in entries:
+            if e.attr & 0x10 or not e.size:
+                continue
+            key = (e.name.lower(), e.addr, e.size)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((e, is_app))
+
+    add(dirs.libs_entries, False)
+    add(dirs.programs_entries, False)
+    tree = read_app_tree(rom, root_off)
+    if tree is not None:
+        for d in tree.apps.values():
+            add(d.entries, True)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # application tree
 #
@@ -833,6 +892,27 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
             f"romfs: {sum(1 for e in romfs if not e.attr & 0x10)} data files are "
             f"packed in the FS area, not at addr-{ROM_BASE:#x}; not placed")
 
+    # 5. ROMFS E32Image files (the applications).  `<App>.app` entries point
+    #    at a plain E32Image file header whose `iCodeAddress` is
+    #    `entry_addr + 0x64`; the packed bytes are contiguous from that file
+    #    offset.  The ROM-image entries are already placed by their sections
+    #    above, so only the non-image headers are copied here.
+    if not romfs_linear and root_off is not None:
+        e32 = scan_e32_files(rom)
+        image_hdrs = {im.code - 0x64 for im in images}
+        for e, is_app in collect_romfs_files(rom, root_off):
+            if not is_app and e.addr in image_hdrs:
+                continue
+            foff = e32.get(e.addr)
+            if foff is None:
+                continue
+            if foff + e.size > len(rom):
+                warnings.append(f"romfs: {e.name} E32 file at {foff:#x} "
+                                f"runs past the flash")
+                continue
+            put(e.addr, rom[foff:foff + e.size], f"romfs_e32_{e.name}", foff,
+                overlay=is_app)
+
     return bytes(buf), warnings, placed
 
 
@@ -1065,6 +1145,9 @@ def cmd_build(a):
     print(f"wrote {a.output}: {len(buf):#x} bytes at {ROM_BASE:#x}")
     print(f"  {len(placed)} sections from {len(place)} images, "
           f"{len(romfs)} ROMFS entries")
+    e32n = sum(1 for s in placed if s.name.startswith("romfs_e32_"))
+    if e32n:
+        print(f"  ROMFS E32Image files: {e32n} placed at their runtime addresses")
     for w in warnings[:40]:
         print(f"  ! {w}")
     if len(warnings) > 40:

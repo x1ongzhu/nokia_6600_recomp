@@ -106,6 +106,23 @@ else
     fail=1
 fi
 
+# The app E32Image files must be copied whole from their packed file records.
+"$PY" - "$LAYOUT" <<'EOF' || fail=1
+import json, sys
+d = json.load(open(sys.argv[1]))
+secs = {s["name"]: s for s in d["placed"]}
+for name, va, size in (("romfs_e32_SnakeEx.app", 0x5147f060, 0x7ddc),
+                       ("romfs_e32_mixpix.app", 0x514ace40, 0xd718)):
+    s = secs.get(name)
+    if not s:
+        print(f"FAIL: {name} not placed")
+        sys.exit(1)
+    if s["va"] != va or s["size"] != size:
+        print(f"FAIL: {name} at {s['va']:#x}+{s['size']:#x}, want {va:#x}+{size:#x}")
+        sys.exit(1)
+print("ok: SnakeEx.app and mixpix.app placed at their runtime addresses")
+EOF
+
 # No two non-overlay placed sections may overlap.
 "$PY" - "$LAYOUT" <<'EOF' || fail=1
 import json, sys

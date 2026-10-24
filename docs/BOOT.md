@@ -331,9 +331,13 @@ The rest of the tree is intact, and `romimage.py tree` recovers it by content:
 `\System\Apps` is the only directory whose entries are all subdirectories, and
 each app directory is the small directory holding `<App>.app`.  All **63**
 app directories resolve, including `snakeex` (`SnakeEx.app`, 0x7ddc) and
-`mixpix` (`mixpix.app`, 0xd718).  The app *data* (`SnakeEx.app`, `.r01`,
-`.mbm`, `.wav`) is still stored outside the flat image, so B3g is now the
-blocker for running an app, not tree enumeration.
+`mixpix` (`mixpix.app`, 0xd718).  `romimage.py build` also places the **76
+E32Image files** (63 `.app` binaries plus 13 plugin/driver files): a plain
+E32Image file header is at `entry_addr`, its `iCodeAddress` is
+`entry_addr + 0x64`, and the packed bytes from that header are the file.  The
+flat image has `SnakeEx.app` at 0x5147f060, byte-identical to the packed file
+record.  The companion data (`.aif`, `.mbm`, `.r01`, `.wav`) is stored in a
+different packed data area and is still the remaining B3g work.
 
 ```
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin
