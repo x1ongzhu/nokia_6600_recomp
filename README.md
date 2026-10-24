@@ -204,9 +204,10 @@ criteria and phased roadmap live in
   half (a separate parser/format question), 36 lower, 366 none.  The boot
   harness accepts `NK_Rn`; the mask-ROM secondary loader is
   **`0x500003bc` → `0x50001648`**, driven by the `KaeP` descriptor at
-  `0x50000124`.  It runs 211 instructions before stale calls are recovered, or
-  300k+ into a missing boot image/super-page table when the first call is
-  snapped.  `tools/test_layout.sh` pins the drift null test.
+  `0x50000124`.  It runs 211 instructions before stale calls are recovered;
+  snapping the first call (a bring-up aid, not proof of the real callee) lets
+  it run 300k+ into a missing boot image/super-page table at address 0.
+  `tools/test_layout.sh` pins the drift null test.
 
 **← current frontier →**
 
@@ -268,10 +269,10 @@ criteria and phased roadmap live in
   secondary loader entry it calls: **`0x500003bc` → `0x50001648`**, driven by
   the **`KaeP`** descriptor at `0x50000124` (payload `0x130`).  With the
   `NK_Rn` register overrides the loader executes 211 instructions before the
-  stale call sites are recovered; snapping the first one lets it run 300k+
-  instructions into a **boot image/super-page table** (`base=0`,
-  `count≈0x80000000`) that the mask ROM should have installed.  Modelling that
-  table is the next boot step.
+  stale call sites are recovered; snapping the first one (a bring-up aid) lets
+  it run 300k+ instructions into a **boot image/super-page table**
+  (`base=0`, `count≈0x80000000`) that the mask ROM should have installed.
+  Modelling that table is the next boot step.
 - [ ] **MMIO + display** — the sparse bus is in place; the entry already writes
   UPP registers around `0x58150000`, which is the first real device surface.
 - [ ] **First light** — the Nokia boot logo on a host window.

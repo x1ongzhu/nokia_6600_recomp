@@ -398,11 +398,13 @@ The `KaeP` block at `0x50000124` (`"KaeP"`, size `0x20`, value `0x1423dc`,
 payload at `0x130`) is the loader descriptor.  Without call repair the loader
 executes **211 instructions**, recovers 10 stale calls and returns to the
 sentinel.  With `NK_CALL_POLICY=3 NK_SNAP_WINDOW=0x400` the first stale call
-snaps to its real start and the loader runs **>300,000 instructions**, then
-scans a table whose base is 0 and whose count is about `0x80000000`.  That
-table is the **boot image/super-page state the mask ROM installs**; it is not
-present in the flash dump.  The next boot task is therefore concrete: model
-that table, not another snap window.
+(`0x50001664 -> 0x50002ae4`) snaps to the nearest prologue **`0x500029dc`**
+and the loader runs **>300,000 instructions**, then scans a table whose base
+is 0 and whose count is about `0x80000000`.  The snap is a bring-up aid, not a
+proof that `0x29dc` is the intended callee.  The scan itself is still
+informative: it wants the **boot image/super-page table** the mask ROM would
+install at address 0, which is not present in the flash dump.  The next boot
+task is therefore concrete: model that table, not another snap window.
 
 ```
 .venv/bin/python recompiler/layout.py drift 6600_mcu.bin \
