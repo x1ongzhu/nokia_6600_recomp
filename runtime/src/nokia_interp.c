@@ -756,8 +756,13 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
             return 0;
         }
 
-        /* Halfword / signed transfer: bits 7-4 = 1xx1 and bits 6-5 != 00. */
-        if ((op & 0x90) == 0x90 && (op & 0x60) != 0) {
+        /* Halfword / signed transfer: bits 7-4 = 1xx1, bits 6-5 != 00, and
+         * bit 25 = 0.  The bit-25 test is essential: extra load/store uses
+         * bit 22 as its immediate flag, so `and rd, rn, #0xff` (bit 25 = 1)
+         * has exactly the same bits 7-4 pattern and was decoded as LDRH/STRH
+         * before this check existed. */
+        if (!(op & (1u << 25)) && (op & 0x90) == 0x90 &&
+            (op & 0x60) != 0) {
             unsigned pbit = (op >> 24) & 1, ubit = (op >> 23) & 1;
             unsigned ibit = (op >> 22) & 1, wbit = (op >> 21) & 1;
             unsigned lbit = (op >> 20) & 1;

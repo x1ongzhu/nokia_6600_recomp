@@ -92,7 +92,9 @@ criteria and phased roadmap live in
   stack for mode restore and optional Thumb↔ARM inference. Earlier rounds fixed
   two real interpreter bugs: Thumb `BL` returned to `pc+2` instead of `pc+4`,
   and ARM PC-relative loads used `pc+4` instead of `pc+8`; both have regression
-  tests. Round 5 added the Thumb format-2 fix described below. The interpreter
+  tests. Round 5 added the Thumb format-2 fix described below, and round 13
+  stopped data-processing immediates (`and r0,r0,#0xff`) from being decoded as
+  extra loads/stores. The interpreter
   also self-checks against the lifted `func_5031308c` (`stop=returned`,
   `r2=0x58000000`).
 - [x] **EKA1 image loader / import binding** — `boot_kernel.c` reconstructs the
@@ -229,6 +231,18 @@ criteria and phased roadmap live in
   needed 9 and looped at `0x125c`), reaches the image-loader thread at
   `0x1244`, and writes a real UPP register (`0x08000008 = 0x37`).
   `tools/test_bootbank.sh` is the acceptance test.
+- [x] **ARM immediate decode fixed; boot-region table modeled (round 13)** — the
+  interpreter's extra-load/store test ignored bit 25, so a data-processing
+  immediate such as `and r0, r0, #0xff` (bits 7-4 = 1111) was executed as a
+  bogus `LDRH/STRH`.  ARMv4T extra loads/stores require bit 25 = 0; the
+  regression is pinned in `interp_selftest`.  The mask ROM's boot-region table
+  is now explicit: [`recompiler/bootregions.py`](recompiler/bootregions.py)
+  derives boot/ROM/RAM banks from `TRomHeader` (count + `0x10`-byte entries:
+  `base/size/attr/linbase`), and `NK_REGIONS` installs it in the boot harness.
+  With the table the super page moves from the `0xfffff000` fallback to
+  `0x802ff000` and the compacted list at `0x802ff400` has the three banks.
+  `tools/test_bootregions.sh` is the acceptance test.  The remaining KaeP
+  frontier is now inside the payload lookup, not an empty list.
 
 **← current frontier →**
 
@@ -293,10 +307,13 @@ criteria and phased roadmap live in
   fragments linked for different bases.  `bootbank.py build` +
   `NK_LOW_ROM_IMAGE` runs the loader for **600,000 instructions with no stale
   calls**, through the `0x1244` image-loader thread and into a real UPP write.
-  The new frontier is the **boot-image/region list** that thread expects at
-  `0xfffff400`: it is empty, so the descriptor lookup returns `-1` and the
-  loader loops at `0xc7c`.  Installing that list (or decompressing the `KaeP`
-  payload, key `0xdff9ea00`) is the next boot step.
+  Round 13 models the boot-region table (boot/ROM/RAM banks, `0x4000` on RAM):
+  the super page becomes `0x802ff000`, and the compacted list at `0x802ff400`
+  is populated.  The thread then asks the table to translate the KaeP
+  descriptor's vector address `0xf018e59f`, which is outside every bank; the
+  KaeP block at `0x50000124` (`0x20`, value `0x1423dc`, and the repeated
+  `0xdff9ea00` words) therefore has to be unpacked, not just mapped.  That
+  unpack step is the next boot task.
 - [ ] **MMIO + display** — the sparse bus is in place; the entry already writes
   UPP registers around `0x58150000`, which is the first real device surface.
 - [ ] **First light** — the Nokia boot logo on a host window.
@@ -395,6 +412,19 @@ NK_LOW_ROM=1 NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
   --rom-image out/6600_runtime.bin
 tools/test_bootbank.sh
+
+# round 13: the mask-ROM boot-region (bank) table
+.venv/bin/python recompiler/bootregions.py build 6600_mcu.bin \
+  out/6600_bootregions.bin
+.venv/bin/python recompiler/bootregions.py explain out/6600_bootregions.bin
+.venv/bin/python recompiler/bootregions.py verify 6600_mcu.bin
+NK_LOW_ROM=1 NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
+  NK_REGIONS=out/6600_bootregions.bin@0x80000000 \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=600000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+tools/test_bootregions.sh
 ```
 
 `6600_mcu.bin` is now the **23.3 MB raw EKA1 flash image** extracted from

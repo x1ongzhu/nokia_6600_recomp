@@ -83,6 +83,13 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   addresses; `verify` pins the measurements.  The boot harness maps the result
   at 0 with `NK_LOW_ROM_IMAGE` and starts at linked `0x30c`
   (`../tools/test_bootbank.sh`).
+- **`bootregions.py`** — derive and inspect the mask-ROM boot-region (bank)
+  table the secondary loader receives in `r0/fp`.  Entries are 0x10 bytes
+  (`base`, `size`, `attr`, `linbase`, with `count` at `+0` and entries from
+  `+8`); `attr & 0x1f` is the bank type and `0x4000` marks the RAM bank whose
+  top becomes the super page.  `build` emits boot/ROM/RAM from `TRomHeader`,
+  `explain` decodes a file and `verify` pins the derived values.  Install it
+  with `NK_REGIONS=path[@addr]` (`../tools/test_bootregions.sh`).
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

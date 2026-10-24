@@ -527,6 +527,80 @@ concrete successor of round 11's "super-page table" task.
 tools/test_bootbank.sh
 ```
 
+### Round 13: an ARM immediate bug; the boot-region table becomes explicit (2026-10-25)
+
+**1. `and r0, r0, #0xff` was executing as `LDRH`.**  The extra load/store
+decoder tested only bits 7-4 (`1xx1`) and bits 6-5.  ARMv4T extra loads/stores
+also require **bit 25 = 0** (bit 22 is their immediate flag); data-processing
+instructions use bit 25.  A data-processing immediate whose low byte has bit 7
+and bit 4 set therefore fell into the extra-transfer branch.  In the linked
+boot bank `0x2b40`:
+
+```
+0xe20000ff  and r0, r0, #0xff
+```
+
+turned `r0 = 0x00000504` into `0xffffd9c0`, which then became the KaeP
+descriptor's fourth argument.  With the bit-25 guard it returns `4` (the CPU
+revision) as intended.  `interp_selftest` pins both sides: an `and/orr`
+immediate and a real `ldrh`.
+
+No other trace moved: kernel entry 197, assisted 364, relaid 315, raw bank
+399,991 instructions.  The fix removes a silent wrong-value class from every
+future boot run.
+
+**2. The mask ROM's bank table is now an explicit input.**  The loader consumes
+the table at `r0/fp` as:
+
+```
++0x00 count (u32), +0x04 zero
++0x08 entry[0] = { base, size, attr, linbase }   (0x10 bytes each)
+```
+
+* `0x2a34` finds the bank containing an address (called with 0 for the boot
+  bank);
+* `0x2a7c` finds the bank with `attr & 0x4000`; its end minus `0x1000` is the
+  super page;
+* `0x1a1c` translates **linear -> physical** through `linbase` (and back
+  through banks whose byte `+0xb` has bit 3);
+* `0x1958` compacts the table into the super-page list; types 2/4 expand
+  through a page mask; `0x21d0` marks types 1/4;
+* `0x1b34` maps a byte offset to an address, but only through type 2 banks.
+
+`recompiler/bootregions.py` derives the table from `TRomHeader`: boot bank
+`0..0x10000`, ROM `0x50000000+0x1600000`, RAM `0x80000000+0x300000`
+(attr `0x4000`).  `NK_REGIONS=path[@addr]` installs it.
+
+| | round 12 (no table) | round 13 (derived table) |
+|---|---|---|
+| super page | `0xfffff000` fallback | **`0x802ff000`** (RAM top) |
+| thread stack | `0xfffff3fc` | **`0x802ff3fc`** |
+| list at super-page+0x400 | empty | **3 banks** |
+| recoveries / undefined | 0 / 0 | 0 / 0 |
+| UPP write | `0x08000008 = 0x37` | unchanged |
+
+```
+.venv/bin/python recompiler/bootregions.py build 6600_mcu.bin \
+  out/6600_bootregions.bin
+NK_LOW_ROM=1 NK_LOW_ROM_IMAGE=out/6600_bootbank_linked.bin \
+  NK_REGIONS=out/6600_bootregions.bin@0x80000000 \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=600000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+tools/test_bootregions.sh
+```
+
+**3. The frontier moved inside the KaeP payload.**  The table works, but the
+loader thread at `0x1244` calls `0xc58` with the payload at `0x80`; `0xc58`
+asks the table to translate `[0x80+0x20] = 0xf018e59f`, which no bank covers.
+The region `0x10000..0x2a0000` has 7.998 bits/byte entropy, and the `KaeP`
+header at `0x124` (`"KaeP"`, size `0x20`, value `0x1423dc`, repeated
+`0xdff9ea00` words at `0x130`) points into it.  That value is therefore not a
+linear address to map: the 0x20-byte payload is a packed/obfuscated blob that
+must be **unpacked first**.  Guessing more banks cannot fix it; the next task
+is the KaeP unpacker.
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):
@@ -579,6 +653,7 @@ The bring-up stack now has five layers:
 | call ring / watch | `NK_WATCH=addr`, `NK_WATCH_LOG=n` | on a watched PC, print registers and the last n BL/BLX sites with their arguments and resolved targets |
 | entry/register injection | `NK_ENTRY=addr`, `NK_Rn=value` (n=0..12), `NK_SP`, `NK_LR` | reproduce a mask-ROM entry without writing a new harness; `NK_R11` is `fp`, `NK_R10` is `sl` |
 | boot-bank alias | `NK_LOW_ROM=1` (`NK_LOW_ROM_SIZE=0x10000`) | copy the first ROM bank to address 0, register it as code, install the 16 high vectors and enable the interpreter's low-alias window |
+| boot-region table | `NK_REGIONS=path[@addr]` (`recompiler/bootregions.py`) | install the mask-ROM bank table (`count` + 16-byte `{base,size,attr,linbase}` entries) the secondary loader expects in `r0/fp` |
 
 Measured with `tools/test_boot_recover.sh` **after the Thumb fix**:
 

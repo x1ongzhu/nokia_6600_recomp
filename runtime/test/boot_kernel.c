@@ -73,6 +73,11 @@
  *   NK_LOW_ROM_IMAGE=path   with NK_LOW_ROM: map this 64 KiB *linked* view
  *                           instead of the raw flash bytes (recompiler/
  *                           bootbank.py build); start at linked 0x30c
+ *   NK_REGIONS=path[@addr]  install a mask-ROM boot-region table (count +
+ *                           0x10-byte segments, see recompiler/bootregions.py) at
+ *                           addr (default 0x80000000) and report it; pass the
+ *                           same addr in NK_R11 to reproduce the mask-ROM
+ *                           hand-off
  *   NK_DUMP=a:l[,a:l...]    append guest memory ranges to NK_DUMP_FILE at the
  *                           end of the run (default out/memdump.bin)
  */
@@ -539,6 +544,30 @@ int main(int argc, char** argv) {
         nk_code_range_add(&ip, NK_HIGH_VECTORS, hv);
         printf("low ROM alias: %u bytes at 0x00000000, %u high-vector bytes\n",
                n, hv);
+    }
+
+    /* The UPP mask ROM leaves a boot-region table (count + 0x10-byte
+     * segments) in RAM and passes its address in fp/r11.  The secondary
+     * loader copies that table to the super page and uses it for address
+     * translation.  Installing one from a file keeps the stand-in explicit
+     * and lets recompiler/bootregions.py evolve the table format independently. */
+    const char* regions = getenv("NK_REGIONS");
+    if (regions) {
+        char path[512];
+        snprintf(path, sizeof path, "%s", regions);
+        uint32_t at = 0x80000000u;
+        char* atmark = strrchr(path, '@');
+        if (atmark) {
+            *atmark++ = '\0';
+            at = (uint32_t)strtoul(atmark, NULL, 0);
+        }
+        long rlen = 0;
+        uint8_t* rbuf = read_file(path, &rlen);
+        if (!rbuf) return 1;
+        nk_poke(&cpu, at, rbuf, (uint32_t)rlen);
+        printf("boot-region table %s: %ld bytes at %#010x (%u entries)\n",
+               path, rlen, at, rlen >= 4 ? u32(rbuf) : 0);
+        free(rbuf);
     }
 
     uint32_t entry_override = (uint32_t)env_ulong("NK_ENTRY", 0);

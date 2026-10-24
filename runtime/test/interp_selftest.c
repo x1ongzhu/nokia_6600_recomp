@@ -101,6 +101,25 @@ int main(void) {
     CHECK(c.r[1] == 3, "ARM add immediate");
     CHECK(c.r[2] == 1, "ARM conditional move (eq)");
 
+    /* ---- ARM: data-processing immediates are not extra loads/stores ----
+     * `and rd, rn, #0xff` sets bit 25 (the data-processing immediate flag)
+     * and has bits 7-4 = 1111, the same nibble pattern the halfword/signed
+     * transfer decoder looks for.  The extra-load/store space requires
+     * bit 25 = 0; without that check the mask becomes a bogus LDRH and
+     * silently corrupts every "& 0xff" in the boot bank. */
+    poke32(&c, 0x80000040u, 0xe3a000ffu);   /* mov  r0, #0xff      */
+    poke32(&c, 0x80000044u, 0xe20010f0u);   /* and  r1, r0, #0xf0  */
+    poke32(&c, 0x80000048u, 0xe380200fu);   /* orr  r2, r0, #0x0f  */
+    poke32(&c, 0x8000004cu, 0xe1d430b0u);   /* ldrh r3, [r4]       */
+    poke32(&c, 0x80000050u, 0xe12fff1eu);   /* bx   lr             */
+    poke16(&c, 0x80000200u, 0x1234);        /* halfword operand    */
+    memset(&c.r, 0, sizeof c.r);
+    c.r[4] = 0x80000200u;
+    r = run(&c, 0x80000040u, 0);
+    CHECK(r == NK_STOP_RETURN && c.r[1] == 0xf0 && c.r[2] == 0xff &&
+          c.r[3] == 0x1234,
+          "ARM and/orr immediate vs extra load/store");
+
     /* ---- pre-MMU low alias: the boot bank really executes at 0 ---- */
     if (nk_alloc_ram(&c, 0x00000000u, 0x20000u) != 0) return 1;
     poke32(&c, 0x00001000u, 0xe3a00007u);   /* mov  r0, #7        */
