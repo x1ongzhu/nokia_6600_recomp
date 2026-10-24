@@ -34,10 +34,14 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
 - **`romimage.py`** — recover the runtime ROM layout from the packed records.
   `scan` lists every `TRomImageHeader`, its `.text`/`.data`/`.edata`/dll-ref
   sections and the header-less rodata block; `build` writes the flat 22 MiB
-  runtime image (`out/6600_runtime.bin`) with the kernel, its two referenced
-  DLLs, the packed ROMFS directory block and the 171 linearly-stored ROMFS
-  files; `calls` classifies every direct ARM `BL` by how far its target is
-  biased into the callee.  `build --patch FILE` applies bring-up text repairs
+  runtime image (`out/6600_runtime.bin`) with all 722 packed images and the
+  ROMFS directory block; `tree` recovers the S60 app tree by content
+  (`\System\Apps` has 63/63 app directories, including `snakeex`/`mixpix`);
+  `names` prints the boot-module table and now validates every `TRomDir`
+  entry (ASCII name, address in the ROM window, sane size) and reports the
+  truncated `\System\Programs` tail instead of inventing entries; `calls`
+  classifies every direct ARM `BL` by how far its target is biased into the
+  callee.  `build --patch FILE` applies bring-up text repairs
   (`<va> <hex bytes>` per line) and records them in the layout JSON;
   `../tools/build_rom_image.sh` / `../tools/build_bringup_image.sh` and
   `../tools/test_romimage.sh` wrap the raw and patched builds.
@@ -54,13 +58,15 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
 - **`layout.py`** — audit the packed image layout with the export directory as
   ground truth.  `census` reports, per image, how many `iExportDir` entries
   are in the text, 4-byte aligned, Thumb-tagged and actually land on a
-  function start, plus the same number for random addresses (the baseline)
-  and the best constant shift.  `pools` reports literal-pool alignment and
+  function start (including a pool-aware walk-back for leaf functions after a
+  literal pool), plus the same number for random addresses (the baseline) and
+  the best constant shift.  `pools` reports literal-pool alignment and
   adjacent/duplicate pool starts for the kernel.  `verify` is the machine
   check used by `../tools/test_layout.sh`.  The result: small images are
   stored in their linked layout (the 5-export Thumb DLL is 5/5) but the
-  kernel and the big DLLs are not — this is the B1g evidence, and it shows
-  that padding alone cannot recover the linked layout.
+  kernel and the big DLLs are not — pool-aware detection reaches 104/478
+  (21.8%) against a 17.2% baseline, so padding alone cannot recover the
+  linked layout.
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

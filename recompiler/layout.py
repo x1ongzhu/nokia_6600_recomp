@@ -96,11 +96,27 @@ class TextView:
         return self.code <= va < self.limit
 
 
-def start_kind(tv: TextView, v: int) -> str | None:
+def _literalish(v: int | None) -> bool:
+    """True for words that can sit between a function and the next entry."""
+    if v is None:
+        return False
+    return (v in (0, 0xFFFFFFFF) or v < 0x100000 or
+            0x80000000 <= v < 0x80400000 or
+            0x50000000 <= v < 0x51700000 or
+            0x00040000 <= v < 0x00400000)
+
+
+def start_kind(tv: TextView, v: int, pool_aware: bool = False) -> str | None:
     """Classify `v` as a function start in the stored text.
 
     The parity selects the ISA the way the ROM exports it: odd and 2-mod-4
     addresses can only be Thumb function starts; 4-aligned exports are ARM.
+
+    `pool_aware` walks back through the literal pool that follows a function's
+    terminator.  Leaf functions after a pool are real starts, but their
+    immediately-preceding word is a literal, not a terminator; without this
+    path the census silently undercounts them (the kernel export rate rises
+    from 17.2% to 21.8%).
     """
     if not tv.contains(v & ~1):
         return None
@@ -118,6 +134,19 @@ def start_kind(tv: TextView, v: int) -> str | None:
         return "prologue"
     if _is_arm_terminator(tv.u32(v - 4) or 0):
         return "after-term"
+    if pool_aware:
+        q = v - 4
+        n = 0
+        while q >= tv.code and n <= 0x60:
+            w = tv.u32(q)
+            if w is None:
+                return None
+            if _is_arm_terminator(w):
+                return "after-pool" if n else "after-term"
+            if not _literalish(w):
+                return None
+            q -= 4
+            n += 4
     return None
 
 
@@ -133,7 +162,8 @@ def export_entries(rom: bytes, img: romimage.Image) -> list[int]:
 def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
     tv = TextView(rom, img)
     entries = export_entries(rom, img)
-    in_text = aligned4 = thumb = prologue = after_term = start = 0
+    in_text = aligned4 = thumb = prologue = after_term = after_pool = 0
+    start = start_legacy = 0
     for v in entries:
         if v & 1:
             thumb += 1
@@ -144,24 +174,29 @@ def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
         if not tv.contains(v & ~1):
             continue
         in_text += 1
-        kind = start_kind(tv, v)
+        kind = start_kind(tv, v, pool_aware=True)
         if kind == "prologue":
             prologue += 1
         elif kind == "after-term":
             after_term += 1
+        elif kind == "after-pool":
+            after_pool += 1
         if kind:
             start += 1
+        if start_kind(tv, v):
+            start_legacy += 1
 
     # How often a *random* text address (same parity class as the exports)
     # looks like a start.  This is the null hypothesis for "the exports are
-    # aligned with the stored text".
+    # aligned with the stored text".  Use the same detector as `start`, or
+    # the comparison would be biased in favour of the packed text.
     density = None
     if len(entries) >= 64 and img.text_size >= 0x1000:
         step = 2 if thumb else 4
         probed = hits = 0
         for o in range(0, img.text_size - 4, step):
             probed += 1
-            if start_kind(tv, img.code + o):
+            if start_kind(tv, img.code + o, pool_aware=True):
                 hits += 1
         density = hits / probed if probed else None
 
@@ -172,7 +207,7 @@ def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
             hits = 0
             for v in entries:
                 p = ((v & ~1) - shift) | (v & 1)
-                if start_kind(tv, p):
+                if start_kind(tv, p, pool_aware=True):
                     hits += 1
             if hits > best["hits"]:
                 best = {"shift": shift, "hits": hits}
@@ -188,8 +223,11 @@ def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
         "thumb": thumb,
         "prologue": prologue,
         "after_term": after_term,
+        "after_pool": after_pool,
         "start": start,
+        "start_legacy": start_legacy,
         "start_rate": (start / len(entries)) if entries else None,
+        "start_rate_legacy": (start_legacy / len(entries)) if entries else None,
         "base_rate": density,
         "best": best,
     }
@@ -212,33 +250,38 @@ def cmd_census(a):
 
     print(f"# export-table census: {len(rows)} images with exports")
     print(f"{'uid3':>12} {'exports':>7} {'in-text':>7} {'al4':>5} {'thumb':>5} "
-          f"{'pro':>4} {'after':>5} {'start':>5} {'rate':>6} {'base':>6} "
-          f"{'x':>5} {'best-shift':>10} {'hits':>5}")
+          f"{'pro':>4} {'after':>5} {'pool':>5} {'start':>5} {'rate':>6} "
+          f"{'legacy':>6} {'base':>6} {'x':>5} {'best-shift':>10} {'hits':>5}")
     for r in rows:
         best = r["best"] or {"shift": 0, "hits": 0}
         rate = 100.0 * r["start_rate"] if r["start_rate"] is not None else 0.0
+        legacy = (100.0 * r["start_rate_legacy"]
+                  if r["start_rate_legacy"] is not None else 0.0)
         base = 100.0 * r["base_rate"] if r["base_rate"] is not None else 0.0
         ratio = (rate / base) if base else 0.0
         print(f"{r['uid3']:>12} {r['exports']:7d} {r['in_text']:7d} "
               f"{r['aligned4']:5d} {r['thumb']:5d} {r['prologue']:4d} "
-              f"{r['after_term']:5d} {r['start']:5d} {rate:5.1f}% "
-              f"{base:5.1f}% {ratio:5.2f} {best['shift']:#10x} "
-              f"{best['hits']:5d}")
+              f"{r['after_term']:5d} {r['after_pool']:5d} {r['start']:5d} "
+              f"{rate:5.1f}% {legacy:5.1f}% {base:5.1f}% {ratio:5.2f} "
+              f"{best['shift']:#10x} {best['hits']:5d}")
 
     total = sum(r["exports"] for r in rows)
     start = sum(r["start"] for r in rows)
+    legacy = sum(r["start_legacy"] for r in rows)
     linked = [r for r in rows if r["start_rate"] is not None
               and r["start_rate"] >= 0.8]
     partial = [r for r in rows if r["start_rate"] is not None
                and 0.3 <= r["start_rate"] < 0.8]
     print(f"\n{start}/{total} export entries land on a function start at shift 0 "
-          f"({100.0 * start / total:.1f}%)")
+          f"({100.0 * start / total:.1f}%; legacy detector {legacy}/{total})")
     print(f"images with >=80% exports on a start (stored linked): {len(linked)}")
     for r in linked[:10]:
         print(f"  {r['uid3']}  {r['start']}/{r['exports']}")
     print(f"images with 30-80%: {len(partial)}")
+    print("'start' walks back through a literal pool to the terminator, so leaf "
+          "functions after a pool count.")
     print("'base' is the chance that a random text address of the same parity "
-          "looks like a start.")
+          "looks like a start (same detector).")
     print("The kernel and the boot DLLs sit close to their base rate, so their "
           "export tables do")
     print("not describe the stored text layout (B1g).  Small images can be "

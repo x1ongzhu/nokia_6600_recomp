@@ -181,7 +181,7 @@ Two things were wrong with the flat image, and both were silent:
    | root | `0x32639c` | `0x5030fa78` | 2 (`\System`, `\Nokia`) |
    | `\System` | `0x325aa4` | `0x5030f180` | 23 |
    | `\System\Libs` | `0x3162bc` | `0x50301ec0` | 171 |
-   | `\System\Programs` | `0x318170` | `0x50307964` | 236 |
+   | `\System\Programs` | `0x318170` | `0x50307964` | 9 valid (declared `0x5608`; tail overwritten) |
 
    `\System\Programs` is the boot module table: `ekern.exe` (the kernel,
    uid3 `0x100058e8`, code `0x50310000`), `ecust.dll`, `ecomm.ldd`,
@@ -279,6 +279,67 @@ Consequences for the bring-up:
 .venv/bin/python recompiler/layout.py pools 6600_mcu.bin
 .venv/bin/python recompiler/layout.py verify 6600_mcu.bin
 tools/test_layout.sh
+```
+
+### Round 10: pool-aware census and the truncated Programs directory (2026-10-25)
+
+Two corrections to the round-9 picture, neither of which rescues the packed
+text, plus one new hard limit on the ROMFS.
+
+**1. The start detector was undercounting leaf functions.**  A leaf function
+after a literal pool is a real function start, but its immediately preceding
+word is a literal, not a terminator.  `layout.py` now has a `pool_aware`
+walk-back (up to 0x60 bytes of address-like words, then a terminator).  The
+kernel's export score rises from 82/478 (17.2%) to **104/478 (21.8%)**; the
+random baseline rises in the same way (13.1% → 17.2%), so the ratio *falls*
+to **1.27x**.  The best constant shift becomes `0x128` with 112/478, still
+far from a linked image.  Round 9's conclusion stands: the stored text is not
+the linked text at function granularity.
+
+**2. The entry's literal loads are locally consistent after relayout.**  The
+three `ldr`s at `0x50310070`, `0x5031007a` and `0x50310084` all resolve to the
+packed pool at `0x5031008e`.  Only after the relayout pad before the entry
+`push` (`0x50310056`) do they read the intended `0x00046564` / `0x00046fca` /
+`0x00000c03` (the B ldr needs the 4-byte PC-base change caused by the shift).
+This validates the entry repair, but it does not validate the BL targets: the
+same callee is called with different biases from different sites, so the
+targets are stale per call site.  Plausible true callees for the entry calls
+are the vtable thunk at `0x50312c3c` (+0x2e) and the leaf at `0x503134f0`
+(+0x32), not the nearest prologue.  This is why a "nearest prologue" snap
+window cannot recover the real function map.
+
+**3. The packed `\System\Programs` directory is truncated.**  Its `TRomDir`
+declares `0x5608` bytes, but only **9 entries / 0x114 bytes** are present; the
+next packed image record overwrites the remaining `0x54f4` bytes with code.
+The nine real entries are the boot-critical set:
+
+```
+ekern.exe  ecust.dll  ecomm.ldd  ramdrive.pdd  rtc.dll
+nosstarter.ext  pnmsg.dll  isimsg.dll  isaapi.dll
+```
+
+The old parser read the code that follows as more entries and produced 236
+plausible-looking names (`EStart.exe`, `EFile.exe`, `EFSrv.dll`, ...); those
+entries are **not in this dump**.  `\System\Libs` (171), `\System` (23) and
+the root (2) are complete.  `romimage.py` now validates every entry (ASCII
+name, address inside the ROM window, sane size) and reports the truncation in
+`scan`, `names` and `build` instead of inventing entries.  This is a hard
+limit on B3e/B3g: the app directory tail must come from the final flash
+layout (B6b), a linear ROM dump, or another partition.
+
+The rest of the tree is intact, and `romimage.py tree` recovers it by content:
+`\System\Apps` is the only directory whose entries are all subdirectories, and
+each app directory is the small directory holding `<App>.app`.  All **63**
+app directories resolve, including `snakeex` (`SnakeEx.app`, 0x7ddc) and
+`mixpix` (`mixpix.app`, 0xd718).  The app *data* (`SnakeEx.app`, `.r01`,
+`.mbm`, `.wav`) is still stored outside the flat image, so B3g is now the
+blocker for running an app, not tree enumeration.
+
+```
+.venv/bin/python recompiler/romimage.py names 6600_mcu.bin
+.venv/bin/python recompiler/romimage.py tree 6600_mcu.bin --verbose
+tools/test_layout.sh
+tools/test_romimage.sh
 ```
 
 ### Historical results (rounds 3-4, before the Thumb fix)

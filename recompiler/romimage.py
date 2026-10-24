@@ -361,26 +361,77 @@ class RomfsEntry:
     attr: int
 
 
-def read_rom_dir(rom: bytes, off: int) -> tuple[list[RomfsEntry], int]:
-    """Parse a packed TRomDir.  Returns (entries, end_offset)."""
-    if off + 4 > len(rom):
-        return [], off
+@dataclass
+class RomDir:
+    """One packed TRomDir plus how much of its declared size is usable.
+
+    The 6600 flash is a *packed* image: after the last valid entry of
+    \\System\\Programs the next image record's code begins, although the
+    directory's `iSize` still claims several kilobytes.  Treating the bytes
+    that follow as directory entries produces garbage names and absurd
+    addresses (and can consume the following image).  Keep the truncation
+    explicit so callers can report it instead of inventing entries.
+    """
+
+    entries: list[RomfsEntry]
+    off: int
+    end: int                 # declared end: off + 4 + iSize
+    parsed_end: int          # first byte after the last valid entry
+    truncated: bool
+
+    @property
+    def missing(self) -> int:
+        return max(0, self.end - self.parsed_end)
+
+
+def _romfs_entry_ok(sz: int, addr: int, attr: int, name: str) -> bool:
+    """Reject the bytes that follow a truncated directory.
+
+    A real entry is an ASCII file/directory name and a runtime address in the
+    ROM window.  The packed record that overwrites the directory tail fails
+    both tests immediately.
+    """
+    if not name or len(name) > 200:
+        return False
+    if any(ord(c) < 0x20 or ord(c) > 0x7E for c in name):
+        return False
+    if not (ROM_BASE <= addr < ROM_BASE + ROM_SIZE):
+        return False
+    if sz > 0x04000000:
+        return False
+    return True
+
+
+def read_rom_dir_full(rom: bytes, off: int) -> RomDir:
+    """Parse a packed TRomDir and report whether its tail is present."""
+    if off < 0 or off + 4 > len(rom):
+        return RomDir([], off, off, off, True)
     size = u32(rom, off)
     p = off + 4
     end = p + size
     if size == 0 or end > len(rom):
-        return [], off
-    out = []
+        return RomDir([], off, min(end, len(rom)), p, True)
+    out: list[RomfsEntry] = []
+    last = p
     while p + 10 <= end:
         sz, addr = u32(rom, p), u32(rom, p + 4)
         attr, nlen = rom[p + 8], rom[p + 9]
-        if nlen == 0 or nlen > 255 or p + 10 + 2 * nlen > end:
+        if nlen == 0 or nlen > 200 or p + 10 + 2 * nlen > end:
             break
         name = rom[p + 10:p + 10 + 2 * nlen].decode("utf-16le", "replace")
+        if not _romfs_entry_ok(sz, addr, attr, name):
+            break
         out.append(RomfsEntry(name, sz, addr, attr))
         p += 10 + 2 * nlen
         p = (p + 3) & ~3
-    return out, end
+        last = p
+    return RomDir(out, off, end, last, last < end)
+
+
+def read_rom_dir(rom: bytes, off: int) -> tuple[list[RomfsEntry], int]:
+    """Backwards-compatible wrapper around read_rom_dir_full()."""
+    d = read_rom_dir_full(rom, off)
+    return d.entries, d.end
 
 
 def parse_romfs(rom: bytes, root_off: int) -> list[RomfsEntry]:
@@ -450,6 +501,26 @@ class BootDirs:
     libs_entries: list[RomfsEntry]
     programs_off: int
     programs_entries: list[RomfsEntry]
+    root_dir: RomDir | None = None
+    system_dir: RomDir | None = None
+    libs_dir: RomDir | None = None
+    programs_dir: RomDir | None = None
+
+    def dir_reports(self) -> list[tuple[str, RomDir | None]]:
+        return [("root", self.root_dir), ("\\System", self.system_dir),
+                ("\\System\\Libs", self.libs_dir),
+                ("\\System\\Programs", self.programs_dir)]
+
+    def truncation_warnings(self) -> list[str]:
+        out = []
+        for name, d in self.dir_reports():
+            if d is not None and d.truncated:
+                out.append(
+                    f"romfs: {name} directory declares {d.end - d.off - 4:#x} "
+                    f"bytes but only {d.parsed_end - d.off - 4:#x} are present "
+                    f"({d.missing:#x} bytes overwritten by the next packed "
+                    f"record); {len(d.entries)} valid entries")
+        return out
 
 
 def find_boot_dirs(rom: bytes, root_off: int, root_va: int) -> BootDirs:
@@ -471,7 +542,15 @@ def find_boot_dirs(rom: bytes, root_off: int, root_va: int) -> BootDirs:
         rom, root_off, root_off + 0x30000, {"ekern.exe", "ecust.dll"})
     return BootDirs(root_off, root_va, root_dir_off, root_entries,
                     system_off, system_entries, libs_off, libs_entries,
-                    programs_off, programs_entries)
+                    programs_off, programs_entries,
+                    root_dir=read_rom_dir_full(rom, root_dir_off)
+                    if root_dir_off >= 0 else None,
+                    system_dir=read_rom_dir_full(rom, system_off)
+                    if system_off >= 0 else None,
+                    libs_dir=read_rom_dir_full(rom, libs_off)
+                    if libs_off >= 0 else None,
+                    programs_dir=read_rom_dir_full(rom, programs_off)
+                    if programs_off >= 0 else None)
 
 
 def image_by_header_address(images: list[Image], va: int) -> Image | None:
@@ -480,6 +559,90 @@ def image_by_header_address(images: list[Image], va: int) -> Image | None:
         if im.code - 0x64 == va:
             return im
     return None
+
+
+# ---------------------------------------------------------------------------
+# application tree
+#
+# The packed 64 KiB block below the kernel contains the whole ROMFS directory
+# tree, not just t\System\Libs / Programs.  Directory records are not ordered
+# by runtime address in the file, so the tree is recovered by content:
+# \System\Apps is the only directory whose entries are all subdirectories, and
+# each app directory is the small directory holding "<App>.app".  This makes
+# the S60 2nd Edition app list (including SnakeEx and MixPix) enumerable even
+# though the Programs directory tail is overwritten.
+# ---------------------------------------------------------------------------
+
+def find_dir_candidates(rom: bytes, lo: int, hi: int,
+                        max_size: int = 0x4000) -> list[RomDir]:
+    """Every validated TRomDir in [lo, hi).  Truncated tails are kept: the
+    parsed prefix is still enough to identify an app directory."""
+    out: list[RomDir] = []
+    hi = min(hi, len(rom) - 8)
+    for o in range(max(0, lo), hi, 2):
+        d = read_rom_dir_full(rom, o)
+        if len(d.entries) < 2:
+            continue
+        if d.end - d.off - 4 > max_size:
+            continue
+        out.append(d)
+    return out
+
+
+def find_apps_dir(cands: list[RomDir]) -> RomDir | None:
+    """The \\System\\Apps directory: many entries, all subdirectories."""
+    best = None
+    for d in cands:
+        if len(d.entries) < 10:
+            continue
+        if not all(e.attr & 0x10 for e in d.entries):
+            continue
+        if best is None or len(d.entries) > len(best.entries):
+            best = d
+    return best
+
+
+def find_app_dir(cands: list[RomDir], app: str,
+                 used: set[int]) -> RomDir | None:
+    """Find the packed directory that holds `<app>.app`, `<app>.aif`, ..."""
+    want = (app + ".app").lower()
+    hits = []
+    for d in cands:
+        if d.off in used or len(d.entries) > 24:
+            continue
+        names = [e.name.lower() for e in d.entries]
+        if want not in names:
+            continue
+        # prefer a directory whose first entry carries the app name (the
+        # About/SnakeEx/... layout) and that has the fewest unrelated names
+        prefix = d.entries[0].name.lower().startswith(app.lower())
+        hits.append((0 if prefix else 1, len(d.entries), d))
+    if not hits:
+        return None
+    hits.sort(key=lambda t: (t[0], t[1]))
+    return hits[0][2]
+
+
+@dataclass
+class AppTree:
+    apps_dir: RomDir
+    apps: dict[str, RomDir]
+
+
+def read_app_tree(rom: bytes, romfs_root: int) -> AppTree | None:
+    cands = find_dir_candidates(rom, romfs_root, romfs_root + 0x30000)
+    apps_dir = find_apps_dir(cands)
+    if apps_dir is None:
+        return None
+    used = {apps_dir.off}
+    apps: dict[str, RomDir] = {}
+    for e in apps_dir.entries:
+        d = find_app_dir(cands, e.name, used)
+        if d is not None:
+            apps[e.name] = d
+            used.add(d.off)
+    return AppTree(apps_dir, apps)
+
 
 
 
@@ -624,6 +787,7 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
             if not parse_romfs(rom, root_off):
                 warnings.append("romfs: directory block did not parse")
             dirs = find_boot_dirs(rom, root_off, hdr["root_dir_list"])
+            warnings.extend(dirs.truncation_warnings())
 
             def place_dir(off: int, va: int, name: str):
                 if off < 0 or not va:
@@ -847,6 +1011,8 @@ def cmd_scan(a):
     show("system", dirs.system_off, dirs.system_entries)
     show("libs", dirs.libs_off, dirs.libs_entries)
     show("programs", dirs.programs_off, dirs.programs_entries)
+    for w in dirs.truncation_warnings():
+        print(f"  ! {w}")
     by_hdr = {im.code - 0x64: im for im in good}
     for es in (dirs.programs_entries, dirs.libs_entries):
         for e in es:
@@ -962,6 +1128,8 @@ def cmd_names(a):
         print(f"\n\\System\\Programs: file {dirs.programs_off:#x}, "
               f"{len(dirs.programs_entries)} entries")
         dump("\\System\\Programs", dirs.programs_entries)
+    for w in dirs.truncation_warnings():
+        print(f"  ! {w}")
     if a.all and dirs.libs_off >= 0:
         print(f"\n\\System\\Libs: file {dirs.libs_off:#x}, "
               f"{len(dirs.libs_entries)} entries")
@@ -970,6 +1138,48 @@ def cmd_names(a):
         print(f"  ({mapped}/{len(dirs.libs_entries)} entries map to packed images)")
 
 
+
+
+def cmd_tree(a):
+    r"""Recover the S60 app tree (\System\Apps\<App>\*) by content."""
+    rom = open(a.rom, "rb").read()
+    hdr = find_rom_header(rom)
+    root = find_romfs_root(rom, hdr["root_dir_list"])
+    if root is None:
+        raise SystemExit("ROMFS root list not found")
+    tree = read_app_tree(rom, root)
+    if tree is None:
+        raise SystemExit("\\System\\Apps directory not found in the packed block")
+    print(f"\\System\\Apps: packed file {tree.apps_dir.off:#x}, "
+          f"{len(tree.apps_dir.entries)} app directories, "
+          f"{len(tree.apps)} resolved")
+    by_hdr = {im.code - 0x64: im for im in plausible_images(scan_images(rom))}
+    for e in tree.apps_dir.entries:
+        d = tree.apps.get(e.name)
+        if d is None:
+            print(f"  {e.name:22s} @ {e.addr:#010x}  (directory bytes not located)")
+            continue
+        files = [x for x in d.entries if not x.attr & 0x10]
+        images = sum(1 for x in files if x.addr in by_hdr)
+        print(f"  {e.name:22s} @ {e.addr:#010x}  packed {d.off:#08x}  "
+              f"{len(files)} files, {images} images")
+        if a.verbose:
+            for x in files:
+                im = by_hdr.get(x.addr)
+                tail = f"  -> uid3 {im.uid3:#010x}" if im else ""
+                print(f"      {x.name:34s} {x.size:#08x}{tail}")
+    if a.json:
+        payload = {
+            "apps_dir": {"file_off": tree.apps_dir.off,
+                         "entries": [asdict(e) for e in tree.apps_dir.entries]},
+            "apps": {
+                name: {"file_off": d.off,
+                       "entries": [asdict(x) for x in d.entries]}
+                for name, d in tree.apps.items()
+            },
+        }
+        open(a.json, "w").write(json.dumps(payload, indent=1))
+        print(f"-> {a.json}")
 
 
 def cmd_calls(a):
@@ -1032,6 +1242,13 @@ def main():
     n.add_argument("--all", action="store_true",
                    help="also dump \\System\\Libs")
     n.set_defaults(func=cmd_names)
+
+    t = sub.add_parser("tree")
+    t.add_argument("rom")
+    t.add_argument("--verbose", action="store_true",
+                   help="list every file in each app directory")
+    t.add_argument("--json")
+    t.set_defaults(func=cmd_tree)
 
     a = ap.parse_args()
     a.func(a)

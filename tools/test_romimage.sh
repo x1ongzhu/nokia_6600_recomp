@@ -35,6 +35,10 @@ LOG=out/romimage_test.log
 "$PY" recompiler/romimage.py scan "$ROM" >"$LOG" 2>&1
 "$PY" recompiler/romimage.py build "$ROM" "$IMG" --json "$LAYOUT" \
     >>"$LOG" 2>&1
+NAMES_LOG=out/romimage_names.log
+"$PY" recompiler/romimage.py names "$ROM" >"$NAMES_LOG" 2>&1
+TREE_LOG=out/romimage_tree.log
+"$PY" recompiler/romimage.py tree "$ROM" >"$TREE_LOG" 2>&1
 
 fail=0
 check() {
@@ -54,6 +58,35 @@ check "ekern.exe -> uid3 0x100058e8" "ekern.exe maps to the kernel record"
 check "root       file" "packed root directory located"
 check "programs   file" "\\System\\Programs directory located"
 check "kernel entry 0x50310054" "kernel entry placed"
+check "Programs directory declares" "truncated Programs directory reported"
+check "programs   file 0x318170    9 entries" \
+    "Programs directory stops at the 9 intact boot entries"
+if grep -q "ekern.exe" "$NAMES_LOG"; then
+    echo "ok: Programs names include ekern.exe"
+else
+    echo "FAIL: Programs names lost ekern.exe"
+    fail=1
+fi
+if grep -q "EStart.exe" "$NAMES_LOG"; then
+    echo "FAIL: truncated Programs tail was invented as entries"
+    fail=1
+else
+    echo "ok: no entries are invented from the overwritten tail"
+fi
+if grep -q "63 app directories, 63 resolved" "$TREE_LOG"; then
+    echo "ok: full \\System\\Apps tree recovered (63/63)"
+else
+    echo "FAIL: app tree is incomplete"
+    fail=1
+fi
+for app in snakeex mixpix About; do
+    if grep -q "  $app " "$TREE_LOG"; then
+        echo "ok: app directory $app located"
+    else
+        echo "FAIL: app directory $app not located"
+        fail=1
+    fi
+done
 
 # Image placement must cover the whole boot set, not just the reachable three.
 imgs=$(sed -n 's/.*sections from \([0-9][0-9]*\) images.*/\1/p' "$LOG" | head -1)

@@ -15,6 +15,8 @@
 #   - the kernel/DLL export tables nevertheless sit close to the base rate of
 #     "random address looks like a function start", which is the B1g evidence
 #     that the stored text is not the linked text
+#   - the pool-aware detector (round 10) finds more leaf starts (104/478) and
+#     raises the baseline in step (17.2%), so the ratio stays near 1.3x
 #
 # Run tools/test_romimage.sh as well: that one checks the assembled flat image.
 set -eu
@@ -79,10 +81,14 @@ if k["exports"] != 478 or k["in_text"] != 478:
 if k["start_rate"] is None or k["base_rate"] is None:
     print("FAIL: kernel census has no start/base rate (text too small?)")
     raise SystemExit(1)
+if k["start"] < 100 or k.get("after_pool", 0) < 10:
+    print(f"FAIL: pool-aware detector regressed: start={k['start']} "
+          f"after_pool={k.get('after_pool')}")
+    raise SystemExit(1)
 ratio = k["start_rate"] / k["base_rate"] if k["base_rate"] else 0
 print(f"ok: kernel exports on stored starts {k['start']}/478 "
-      f"({100*k['start_rate']:.1f}%), base {100*k['base_rate']:.1f}% "
-      f"({ratio:.2f}x)")
+      f"({100*k['start_rate']:.1f}%, pool {k.get('after_pool', 0)}), "
+      f"base {100*k['base_rate']:.1f}% ({ratio:.2f}x)")
 if ratio > 2.0:
     print("FAIL: kernel export table unexpectedly matches the stored text; "
           "update B1g and this test")

@@ -224,7 +224,8 @@ py recompiler/romimage.py names 6600_mcu.bin
     dir  \System\Programs @ 0x50307964
     dir  \System\Libs     @ 0x50301ec0
     ...
-  \System\Programs: file 0x318170, 236 entries
+  \System\Programs: file 0x318170, 9 valid entries (declared size 0x5608;
+                    the rest is overwritten by the next packed record)
     file \System\Programs\ekern.exe  0x02974c @ 0x5030ff9c  -> uid3 0x100058e8
     file \System\Programs\ecust.dll  0x002320 @ 0x50339750  -> uid3 0x100058e7
     ...
@@ -235,13 +236,25 @@ records, 4-byte aligned.  The `attr & 0x10` bit marks a subdirectory; its
 `addr_lin` is the runtime address of another `TRomDir`, so the tree can be
 walked.  `iSize` is the number of bytes after the 4-byte size word.
 
+The packed block below the kernel contains the whole directory tree.  It is
+not ordered by runtime address, so the tree is recovered by content:
+`\System\Apps` is the only directory whose entries are all subdirectories,
+and each app directory is the small directory holding `<App>.app`.  All
+**63** app directories resolve, including `snakeex` (`SnakeEx.app`, `0x7ddc`)
+and `mixpix` (`mixpix.app`, `0xd718`).  `\System\Programs` is the exception:
+its `TRomDir` declares `0x5608` bytes but only **9 entries / 0x114 bytes**
+are present (the next packed record overwrites the tail), so only the boot
+modules `ekern.exe`, `ecust.dll`, `ecomm.ldd`, `ramdrive.pdd`, `rtc.dll`,
+`nosstarter.ext`, `pnmsg.dll`, `isimsg.dll` and `isaapi.dll` survive.
+
 | structure | packed file | runtime VA | entries |
 |---|---|---|---|
 | root list | `0x3162b0` | `0x50300000` | 1 |
 | root dir | `0x32639c` | `0x5030fa78` | 2 |
 | `\System` | `0x325aa4` | `0x5030f180` | 23 |
 | `\System\Libs` | `0x3162bc` | `0x50301ec0` | 171 |
-| `\System\Programs` | `0x318170` | `0x50307964` | 236 |
+| `\System\Programs` | `0x318170` | `0x50307964` | 9 valid (truncated) |
+| `\System\Apps` | `0x324a0c` | `0x5030e0e8` | 63 dirs |
 
 The stored `addr_lin` values are *final-layout* addresses, while the packed
 bytes were written after the ROM build removed alignment gaps, so a single

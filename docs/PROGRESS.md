@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-24  
+最后更新：2026-10-25
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的 6600；
 最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -52,6 +52,7 @@
 | M16 | **完整 image map + ROMFS 目录树（第 7 轮）**：修正 2 字节对齐扫描、放置全部 image、定位启动模块表 | `recompiler/romimage.py` 的 header 扫描从 4 字节步进改为 **2 字节**（`TRomImageHeader` 可以位于 2 mod 4，例如 `MmfAudioController.dll` 的 header 在 file `0x7271ca`），并加入 record plausibility 过滤（declared sections 必须落在 next header 之前且 rodata 间隙合理）。结果：**722 个 image**（781 个候选，59 个误报），text 区间两两不重叠，覆盖 `0x5030ff9c..0x515978dc`；`build` 默认放置全部 722 个 image（1,580 个 section，**无重叠**），而不是仅 3 个 reachable。ROMFS 目录树按内容定位：root file `0x32639c`、`\System` `0x325aa4`、`\System\Libs` `0x3162bc`（171 项）、`\System\Programs` `0x318170`（236 项）。`names` 命令输出启动模块表：`ekern.exe`（kernel，uid3 `0x100058e8`）、`ecust.dll`、`ecomm.ldd`、`EStart.exe`、`EFile.exe`、`EFSrv.dll` 等；`\System\Libs` 有 73/171、`\System\Programs` 有 193/236 项映射到 packed image record。同时修正：ROMFS **数据文件并不在** `addr - 0x50000000`，旧 build 往 17 MB 扁平镜像里塞的是无关代码；数据文件按 packed FS 顺序存放（0xff 填充），现在默认不再从线性地址复制。验收：`tools/test_romimage.sh` |
 | M17 | **第 8 轮：call ring / spin watchdog / PC 空间守卫；重新确认 entry frontier** | 解释器新增 `NK_WATCH`（命中 PC 时打印寄存器 + 最近 64 次 BL/BLX 的调用环）、`NK_SPIN`/`NK_SPIN_MAX`（同一 PC 被访问 N 次即视为死循环，走 recovery 回滚）、`NK_CODE_ONLY`（PC 在 RAM / ROM / low alias / high vectors 之外时视为坏返回）、`NK_ENTRY`（覆盖启动地址）。用它们重新核对：faithful image（无 patch）的 2,000,000 条 trace 是 **0x5039adcc 缺失 `pop` 造成的垃圾路径**；bringup image 仍然 **197 条返回**。kernel entry 的第三个调用（snap 到 `0x50313518`）真实写入 UPP `0x5815053a/0x5815053c/0x5815056a/0x58150200/0x58150508/0x5815004a`，第五个调用访问 `0x58120308`/`0x59e00040`。从 ROM 向量 `0x50000000` 启动可执行 **16,396 条 ARM 指令**、打开 MMU/cache（CP15 c1）、写 `0x580047e0`/`0x580047dc`、安装 high vectors，最后跳到 0 —— 这是异常向量分发代码，不是 reset 路径。修正 `wd2.py`/`romimage.py` 的 UID1 常量：`0x1000007a` 是 EXE（kernel），`0x10000079` 是 DLL（`e32uid.h`）。 |
 | M18 | **第 9 轮：export 表作为 layout oracle；packed text 不是 linked text** | 新增 `recompiler/layout.py` 与 `tools/test_layout.sh`。确认 `TRomImageHeader.iExportDir` 就是**按 ordinal 索引的、已 fixed-up 的函数地址数组**（不是名字表；Thumb 函数带 bit 0）；用 5 个 export 的小 DLL `0x101f6e00` 做正对照：5/5 都是 `push {..,lr}` 起点。**关键反证**：kernel 的 478 个 export 全部在 text 内且 4 字节对齐，但只有 82 个（17.2%）落在 stored text 的函数起点上，而随机 4 字节对齐地址的 baseline 就有 13.1%（1.31×）；DLL `0x100039e5` 是 258/1788 = 14.4%，baseline 5.9%（2.44×）。应用当前 relayout（44 pads / 0x58）后 kernel 仍只有 58/478；常数 shift 最好 0xb0 也只有 93/478；线性 drift 也没有改善。packed text 的 1420/1430 个 ARM prologue 都 4 字节对齐、759/787 个 pool 4 字节对齐，所以“只补 2 字节 padding”不可能解释这个差距。结论：**stored text 的 function layout 与 linked layout 不同（不只是对齐）**；`relayout` 只是局部修复（pool/入口验证），不能恢复跨函数调用/export 语义。 |
+| M19 | **第 10 轮：pool-aware 起点检测 + Programs 目录截断 + entry literal 方程** | (1) `layout.py` 的起点检测现在会**穿过 literal pool 回溯到 terminator**，从而识别 pool 后的 leaf 函数；kernel export 命中从 82/478（17.2%）升到 **104/478（21.8%）**，但同一检测器的随机 baseline 也升到 **17.2%**（1.27×），结论不变。(2) `romimage.py` 的 `TRomDir` 解析加入条目校验（ASCII 名、地址在 ROM 窗口、size 上限）并显式报告截断：`\System\Programs` 声明 `0x5608` 字节，实际只有 **9 个有效条目 / 0x114 字节**，其余 `0x54f4` 字节被下一个 packed record 覆盖。旧文档中的 236 项（`EStart.exe`、`EFile.exe` 等）是越过目录尾后把代码当条目的**误报**。`\System\Libs`（171 项）、`\System`（23 项）、root（2 项）完整。(3) entry `0x50310054` 的三条 `ldr` 方程证明 packed pool 在 `0x5031008e`，linked pool 在 `0x50310090`；当前 relayout 把 pad 放在 entry push 前（`0x50310056`）后三条 literal 都正确，relaid entry 局部是自洽的。(4) 新增 `romimage.py tree`：64 KiB packed 目录块里其实有**整棵 ROMFS 树**；`\System\Apps` 是唯一“所有条目都是子目录”的 `TRomDir`，按 `<App>.app` 内容匹配可恢复 **63/63 个 app 目录**，包括 `snakeex`（SnakeEx.app 0x7ddc）和 `mixpix`（mixpix.app 0xd718）。这为 P3 提供了完整的应用清单；文件数据仍待 B3g。 |
 
 ### 可复现命令
 
@@ -133,7 +134,7 @@ tools/test_layout.sh
 | `0x32639c` | packed **root directory**（2 项：`\System`、`\Nokia`），运行时 VA `0x5030fa78` |
 | `0x325aa4` | packed **`\System` directory**（23 项），运行时 VA `0x5030f180` |
 | `0x3162bc` | packed **`\System\Libs` directory**（171 项），运行时 VA `0x50301ec0` |
-| `0x318170` | packed **`\System\Programs` directory**（236 项），运行时 VA `0x50307964`；`ekern.exe` 的 ROMFS entry 指到 `0x5030ff9c` |
+| `0x318170` | packed **`\System\Programs` directory**：声明 `0x5608` 字节，实际只有 **9 个有效条目**（`ekern.exe`、`ecust.dll`、`ecomm.ldd`、`ramdrive.pdd`、`rtc.dll`、`nosstarter.ext`、`pnmsg.dll`、`isimsg.dll`、`isaapi.dll`），其余 `0x54f4` 字节被下一个 packed record 覆盖；运行时 VA `0x50307964`；`ekern.exe` 的 ROMFS entry 指到 `0x5030ff9c` |
 | `0x5030ff9c` | `ekern.exe` / kernel `TRomImageHeader` 的运行时地址（code `0x50310000`，size `0x2974c`） |
 | `0x50339750` | `ecust.dll` 的 header（code `0x503397b4`）——kernel 的 dllref 表只引用 `0x5037c614` / `0x5037d154` 两个 DLL，但启动目录还列出 `ecomm.ldd`、`EStart.exe`、`EFile.exe` 等模块 |
 | `0x50314c0c` | 真正的 ARM IRQ-lock helper（`push {r0,r1}; mrs r1,apsr; ...`） |
@@ -337,7 +338,7 @@ tools/test_layout.sh
   - `0x50300000..0x5030ff9c`：ROMFS 目录区。packed 目录块从文件 `0x3162b0`
     开始（root list 的存储值就是 `0x50300000`）；目录本身按内容定位：
     root file `0x32639c`、`\System` `0x325aa4`、`\System\Libs` `0x3162bc`
-    （171 项）、`\System\Programs` `0x318170`（236 项）；
+    （171 项）、`\System\Programs` `0x318170`（声明 236 项，实际只有 9 个有效条目，见第 10 轮修正）；
   - `0x50310000`：kernel text；`0x50338ac0` data；`0x50338fc0` export dir；
     `0x50339738` dll-ref；kernel 的 `TRomImageHeader` 在扁平 image 中位于
     `0x5030ff9c`；
@@ -389,11 +390,14 @@ tools/test_layout.sh
   - export entry 是**已 fixed-up 的函数地址**：小 DLL `0x101f6e00` 的 5 个
     entry 全部是 odd（Thumb bit），且 5/5 落在 `push {..,lr}`；`0x10001844`
     8 个 entry 中 6 个被检测为 prologue/after-terminator（另 2 个是 leaf）。
-  - kernel：`82/478 = 17.2%` 落在 stored text 的函数起点；
-    **随机 4 字节对齐地址的 baseline 是 13.1%**，只有 `1.31×`。
+  - kernel：legacy 检测器 `82/478 = 17.2%`；第 10 轮的 pool-aware 检测器
+    （穿过 literal pool 回溯 terminator）升到 **`104/478 = 21.8%`**，但同一
+    检测器的随机 baseline 也从 13.1% 升到 **17.2%**，因此比值仍只有
+    **`1.27×`**。
   - DLL `0x100039e5`：`258/1788 = 14.4%`，baseline 5.9% (`2.44×`)。
   - 应用当前 relayout 的 variable shift 后：kernel `58/478`，DLL2 不变；
-    最优**常数** shift `0xb0` 也只有 `93/478`；线性/放大 drift 模型没有改善。
+    最优**常数** shift `0xb0`（pool-aware 下 `0x128`）也只有约 `112/478`；
+    线性/放大 drift 模型没有改善。
   - packed kernel text 的 **1420/1430** 个 ARM 函数起点 4 字节对齐
     （0 个 ARM prologue 在 2 mod 4），**759/787** 个 literal pool 4 字节对齐。
     因此“移除/补回 2 字节 padding”最多只能解释 `0x58` 的 drift，不能解释
@@ -401,6 +405,22 @@ tools/test_layout.sh
   - 结论：**stored text 的 function layout 与 linked layout 不同**，不是
     padding 级别的差异。`relayout` 只能修复 pool 对齐和入口 literal，不能恢复
     跨函数的 real target/export 语义。
+- **entry 的 literal 方程（第 10 轮）**：entry 的三条 `ldr` 都指向同一个
+  packed pool `0x5031008e`：`ldr r0(0x50310070,imm 0x1c)`、
+  `ldr r7(0x5031007a,imm 0x14)`、`ldr r0(0x50310084,imm 0x10)`。packed 下前两条
+  都算到 `0x50310090`，但只有把 pad 放在 entry push 前（`0x50310056`）让整段
+  Thumb 代码右移 2 字节，三条才分别读到 `0x00046564`、`0x00046fca`、
+  `0x00000c03`。这说明 relayout 的入口修复是**局部自洽**的；也说明 BL target
+  上的 `+2/+0xa/+0x18` 不能简单当成“callee 的累计 padding”（round 4 已证明
+  同一 callee 在不同调用点的 bias 不同）。第 10 轮找到的合理 callee 候选是
+  `0x50312c3c`（vtable thunk，+0x2e）和 `0x503134f0`（leaf，+0x32），说明
+  “最近 prologue”不是正确的 callee 识别方法。
+- **ROMFS 截断（第 10 轮）**：`\System\Programs` 的 `TRomDir` 声明 `0x5608`
+  字节，但 packed 文件里只有 **9 个有效条目 / 0x114 字节**，其余 `0x54f4`
+  字节被下一个 packed record 覆盖。旧解析把代码字节当成条目，产生 236 个
+  “像模像样”的名字（`EStart.exe`、`EFile.exe` 等）——这些条目**不在本 dump
+  中**。`\System\Libs`（171）、`\System`（23）、root（2）完整。`romimage.py`
+  现在校验名字/地址并在 `scan` / `names` / `build` 中报告截断。
 - 直接后果：
   1. 不要再靠放大 `NK_SNAP_WINDOW` 或继续调 padding 来推进；
   2. 运行时 call repair/snap 仍是有界 bring-up 手段，但**不是** faithful
@@ -547,9 +567,10 @@ entry：
 - [x] **B3a** 确认 EKA1 头部尺寸（0x64）/ TRomDir 格式 / packed record 布局
 - [x] **B3b** runtime ROM 组装：`romimage.py build` → `out/6600_runtime.bin`，`--rom-image` 可启动
 - [x] **B3d** 2 字节对齐 header 扫描 + record plausibility：722 个 image，text 区间不重叠；`build` 默认放置全部 image（1,580 section，无重叠），boot harness 注册 kernel + dllref 的 code range（`NK_RANGE_ALL=1` 接受全部）
-- [x] **B3e** ROMFS 目录树定位（root / `\System` / `\System\Libs` / `\System\Programs`）+ `romimage.py names` 启动模块表；`ekern.exe -> uid3 0x100058e8`
+- [x] **B3e** ROMFS 目录树定位（root / `\System` / `\System\Libs` / `\System\Programs`）+ `romimage.py names` 启动模块表；`ekern.exe -> uid3 0x100058e8`。第 10 轮修正：`\System\Programs` 实际只有 **9 个有效条目**（其余 `0x54f4` 字节被下一个 packed record 覆盖）；旧“236 项 / 193 映射”是误报
 - [x] **B3f** 停止把 ROMFS 数据文件从 `addr - 0x50000000` 线性复制（它们按 packed FS 顺序存放）；`--romfs-linear` 仅保留作实验
-- [ ] **B3g** 重建 ROMFS 数据文件的 packed 顺序（目录 → 文件偏移），并填入扁平镜像
+- [ ] **B3h** 恢复/取得被覆盖的 `\System\Programs` 目录尾部（`0x54f4` 字节）：本 dump 里没有；可能需要 WD2/flash tool 的最终布局、线性 ROM dump，或从 PPM/其他分区补全
+- [ ] **B3g** 重建 ROMFS 数据文件的 packed 顺序（目录 → 文件偏移），并填入扁平镜像。第 10 轮定位到第一层障碍：目录尾已截断，且数据文件不在 `addr - ROM_BASE`，需要先解决 B3h/B6b
 - [x] **B1g1** `recompiler/layout.py` + `tools/test_layout.sh`：把 export dir 当 layout oracle 做 census（stored-start rate vs random baseline、常数 shift、pool 对齐），确认 packed text 与 linked text 不是同一套 function layout
 - [ ] **B1g2** layout 级恢复：用 export（478 个绝对 anchor）+ call graph + literal 中的 code pointer 解全局单调 drift，重建 linked function 顺序/地址；或者从 WD2 容器 / ROM build 描述中取得 linked layout
 - [ ] **B1g3** 用 B1g2 的结果重新生成 flat image，验收标准：kernel 的 478 个 export 全部落在 relaid 函数起点，BL target 的 exact rate 从 27% 提升到 >90%
@@ -585,7 +606,7 @@ entry：
 - [ ] **P2-1** LCD framebuffer → host window
 - [ ] **P2-2** timer + IRQ + keypad
 - [ ] **P3-1** ROMFS 文件服务 + SWI/HLE
-- [ ] **P3-2** window server / fonts / first app
+- [ ] **P3-2** window server / fonts / first app。第 10 轮已恢复 `\System\Apps` 的 63 个 app 目录（含 `snakeex`、`mixpix`），下一步是把 app 的 `.app`/`.r01`/`.mbm` 数据按 B3g 放入扁平镜像
 - [ ] **P4** radio/audio stubs + 性能与打包
 
 ---
@@ -614,6 +635,29 @@ entry：
 ---
 
 ## 9. 变更记录
+
+- 2026-10-25（本轮 10）：**pool-aware 起点检测 + Programs 目录截断 + entry literal
+  方程**。`layout.py` 的 `start_kind` 新增 `pool_aware`：从候选地址向前穿过
+  literal pool 回溯到 terminator，从而识别 pool 后的 leaf 函数。kernel 的 478
+  个 export 命中从 `82/478 = 17.2%` 升到 **`104/478 = 21.8%`**，但同一检测器的
+  随机 baseline 也从 13.1% 升到 **17.2%**，比值反而降到 **1.27×**；常数 shift
+  最好 `0x128`（112/478），仍远低于 linked image。结论不变：packed text 与
+  linked text 不是同一套 function layout。第 10 轮还逐条验证 entry 的三条
+  `ldr`：只有把 pad 放在 `0x50310056`（entry push 前）才能同时读到
+  `0x00046564 / 0x00046fca / 0x00000c03`，说明当前 relayout 的入口修复是
+  局部自洽的；BL target 的 bias 仍然不能当累计 padding（round 4 已证明是
+  per-call-site），合理 callee 候选是 `0x50312c3c`（vtable thunk，+0x2e）
+  和 `0x503134f0`（leaf，+0x32）。
+  `romimage.py` 的 `TRomDir` 解析加入条目校验（ASCII 名字、地址在 ROM 窗口、
+  size 上限）并显式报告截断：`\System\Programs` 声明 `0x5608` 字节，实际只有
+  **9 个有效条目 / 0x114 字节**，其余 `0x54f4` 字节被下一个 packed record
+  覆盖。旧解析读到的 236 项（`EStart.exe`、`EFile.exe` 等）是把代码当条目的
+  误报；`\System\Libs`（171）、`\System`（23）、root（2）完整。新增
+  `B3h`（恢复被覆盖的 Programs 尾部）。同时新增 `romimage.py tree`：在 64 KiB
+  packed 目录块中按内容恢复整棵 ROMFS 树，`\System\Apps` 的 **63/63** 个 app
+  目录全部定位，包括 `snakeex`（SnakeEx.app 0x7ddc）和 `mixpix`
+  （mixpix.app 0xd718），为 P3 提供完整应用清单。验收：
+  `tools/test_layout.sh`、`tools/test_romimage.sh` 通过。
 
 - 2026-10-24（本轮 9）：**export 表作为 layout oracle；确认 packed text 不是
   linked text**。新增 `recompiler/layout.py`（`census` / `pools` / `verify`）

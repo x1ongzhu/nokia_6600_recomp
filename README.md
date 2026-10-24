@@ -174,31 +174,53 @@ criteria and phased roadmap live in
   address lists (Thumb entries carry bit 0; a 5-export DLL scores 5/5 on
   `push` prologues).  The kernel's 478 entries prove that the stored text is
   not the linked text: only 82 (17.2%) land on a start versus a 13.1% random
-  baseline; the big DLL is 14.4% versus 5.9%.  Padding cannot close that gap
-  (the stored text is already 4-byte aligned for 1,420/1,430 ARM starts and
-  759/787 pools).  [`recompiler/layout.py`](recompiler/layout.py) +
+  baseline; a pool-aware detector (round 10) reaches 104/478 (21.8%) but the
+  baseline rises to 17.2% in step (1.27x).  Padding cannot close the gap (the
+  stored text is already 4-byte aligned for 1,420/1,430 ARM starts and 759/787
+  pools).  [`recompiler/layout.py`](recompiler/layout.py) +
   [`tools/test_layout.sh`](tools/test_layout.sh) make the audit repeatable and
   re-frame B1g; details under the frontier below.
+- [x] **App tree recovered (round 10)** — the packed 64 KiB block below the
+  kernel holds the whole ROMFS directory tree.  `romimage.py tree` finds
+  `\System\Apps` (the only all-directory `TRomDir`) and all **63 app
+  directories**, including **`snakeex`** (SnakeEx.app, 0x7ddc) and
+  **`mixpix`** (mixpix.app, 0xd718).  The `\System\Programs` directory itself
+  is truncated after nine boot entries (the rest is overwritten by the next
+  packed record); `romimage.py` now validates entries and reports this instead
+  of inventing names.  The app resource **data** still needs B3g.
 
 **← current frontier →**
 
 - [ ] **Packed text vs. export table** — the kernel's 478 export addresses are
   all 4-byte aligned and inside the text, but only 82 (17.2%) land on a
-  function start in the stored text, while a random 4-byte-aligned address
-  scores 13.1% (1.31x).  The DLL `0x100039e5` is 14.4% against a 5.9% baseline
-  (2.44x).  Export entries are real fixed-up function addresses — a small
-  Thumb DLL (`\System\Libs` 0x101f6e00) scores 5/5, with the Thumb bit set —
-  so the failure is the stored layout, not the table.  The current relayout
-  (44 pads, `0x58`) leaves only 58/478 kernel entries aligned; the best
-  constant shift (`0xb0`) gives 93/478; a linear drift model gives nothing
-  better.  Since the stored text already keeps 1,420/1,430 ARM starts and
-  759/787 pools 4-byte aligned, padding cannot explain the gap.  The packed
-  text is therefore *not* the linked text at function granularity: recovering
-  the linked layout needs global drift recovery from the export table, the
-  3,854 call sites and the ~7,000 literal code pointers (B1g2), or the layout
-  from the container/ROM build description (B6b).  `recompiler/layout.py`
+  function start in the stored text; a pool-aware detector that walks back
+  through a literal pool to the preceding terminator raises this to **104
+  (21.8%)**, and raises the random baseline in the same way (13.1% → 17.2%),
+  so the ratio stays at **1.27x**.  The DLL `0x100039e5` is 14.4% against a
+  5.9% baseline (2.44x).  Export entries are real fixed-up function addresses
+  — a small Thumb DLL (`\System\Libs` 0x101f6e00) scores 5/5, with the Thumb
+  bit set — so the failure is the stored layout, not the table.  The current
+  relayout (44 pads, `0x58`) leaves only 58/478 kernel entries aligned; the
+  best constant shift (`0xb0`, now `0x128` with the pool-aware detector) gives
+  at most ~112/478; a monotone drift model over the export order does not fit.
+  Since the stored text already keeps 1,420/1,430 ARM starts and 759/787 pools
+  4-byte aligned, padding cannot explain the gap.  The packed text is
+  therefore *not* the linked text at function granularity: recovering the
+  linked layout needs global drift recovery from the export table, the 3,854
+  call sites and the ~7,000 literal code pointers (B1g2), or the layout from
+  the container/ROM build description (B6b).  `recompiler/layout.py`
   (`census` / `pools` / `verify`) and `tools/test_layout.sh` make this
   measurable and reproducible.
+- [ ] **Packed ROMFS is truncated** — the packed `\System\Programs`
+  `TRomDir` declares `0x5608` bytes but only **9 entries / 0x114 bytes** are
+  present; the next packed image record overwrites the rest (`0x54f4` bytes).
+  The old parser read those code bytes as entries and produced 236
+  plausible-looking names (`EStart.exe`, `EFile.exe`, ...); those entries are
+  **not in this dump**.  `\System\Libs` (171), `\System` (23) and the root
+  (2) are complete, and the first nine Programs entries (`ekern.exe`,
+  `ecust.dll`, `ecomm.ldd`, ...) are the boot-critical set.  `romimage.py`
+  now validates names/addresses and reports the truncation instead of
+  inventing entries; see `tools/test_romimage.sh`.
 - [ ] **Boot continuation** — the kernel entry still returns to the mask-ROM
   stand-in.  The old claim that recovery + the full image map runs into
   `euser.dll` and loops at `0x50389330` was a faithful-image artifact (missing
@@ -261,6 +283,10 @@ NK_CALL_INFER=1 ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin --all
 #   722 images placed; ekern.exe -> uid3 0x100058e8, \System\Programs tables
+
+# the S60 app tree (63 app directories, including SnakeEx and MixPix)
+.venv/bin/python recompiler/romimage.py tree 6600_mcu.bin
+.venv/bin/python recompiler/romimage.py tree 6600_mcu.bin --verbose
 
 # bring-up image (missing Tail patched) + call-site map + crash recovery
 tools/build_bringup_image.sh
