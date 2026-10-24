@@ -12,6 +12,9 @@
 
 #define TRAP 0x90000000u
 
+/* The low-alias test opts in; every other test keeps the normal guard. */
+static int g_allow_low_alias;
+
 static int run(nk_cpu_t* c, uint32_t pc, int thumb) {
     c->r[13] = 0x80010000u;
     c->r[14] = TRAP;
@@ -22,6 +25,7 @@ static int run(nk_cpu_t* c, uint32_t pc, int thumb) {
     ip.return_pc = TRAP;
     ip.return_thumb = (uint8_t)thumb;
     ip.budget = 64;
+    ip.allow_low_alias = g_allow_low_alias;
     nk_interp_run(c, &ip);
     return ip.st.stop_reason;
 }
@@ -96,6 +100,17 @@ int main(void) {
     CHECK(r == NK_STOP_RETURN, "ARM returns through bx lr");
     CHECK(c.r[1] == 3, "ARM add immediate");
     CHECK(c.r[2] == 1, "ARM conditional move (eq)");
+
+    /* ---- pre-MMU low alias: the boot bank really executes at 0 ---- */
+    if (nk_alloc_ram(&c, 0x00000000u, 0x20000u) != 0) return 1;
+    poke32(&c, 0x00001000u, 0xe3a00007u);   /* mov  r0, #7        */
+    poke32(&c, 0x00001004u, 0xe12fff1eu);   /* bx   lr            */
+    memset(&c.r, 0, sizeof c.r);
+    g_allow_low_alias = 1;
+    r = run(&c, 0x00001000u, 0);
+    g_allow_low_alias = 0;
+    CHECK(r == NK_STOP_RETURN && c.r[0] == 7,
+          "ARM runs from the pre-MMU low alias");
 
     /* ---- ARM: stmdb/ldm sp! round-trip ---- */
     poke32(&c, 0x80000100u, 0xe92d0003u);   /* push {r0,r1}       */
@@ -181,7 +196,13 @@ int main(void) {
     poke32(&c, 0x80000304u, 0xeb00003du);   /* bl  0x80000400      */
     poke32(&c, 0x80000308u, 0xe2801029u);   /* add r1, r0, #0x29   */
     poke32(&c, 0x8000030cu, 0xe8bd8000u);   /* pop {pc}            */
-    poke32(&c, 0x80000400u, 0xe3a0f000u);   /* mov pc, #0 (escape) */
+    /* The pre-MMU low alias makes address 0 executable, so a `mov pc,#0`
+     * escape is no longer a fault.  Jump to 0x20000000 instead: it is below
+     * the ROM/RAM windows but outside the low alias, so the PC-space guard
+     * treats it as a corrupted return. */
+    poke32(&c, 0x80000400u, 0xe59ff000u);   /* ldr pc, [pc, #0]    */
+    poke32(&c, 0x80000404u, 0x00000000u);
+    poke32(&c, 0x80000408u, 0x20000000u);   /* invalid target      */
     poke32(&c, 0x80010000u, TRAP);          /* return address      */
     memset(&c.r, 0, sizeof c.r);
     unsigned long rec = 0;

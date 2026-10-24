@@ -499,6 +499,26 @@ int main(int argc, char** argv) {
         nk_poke(&cpu, code_base, code_img + text_shift, load_len);
     }
 
+    /* The UPP mask ROM can execute the first ROM bank through the low
+     * physical alias (address 0).  The secondary loader's jump tables are
+     * 0-based offsets (e.g. 0x2908 -> 0x50002908 when executing at
+     * 0x50000000, which is wrong), so the loader only works when its code is
+     * reachable at address 0.  Copy the first 64 KiB there for comparison. */
+    if (getenv("NK_LOW_ROM")) {
+        uint32_t n = (uint32_t)env_ulong("NK_LOW_ROM_SIZE", 0x10000);
+        if ((long)n > rom_len) n = (uint32_t)rom_len;
+        nk_poke(&cpu, 0x00000000u, rom_copy, n);
+        nk_code_range_add(&ip, 0x00000000u, n);
+        /* The mask ROM's high-vector page is a copy of the boot bank's
+         * exception vectors.  Without it, the loader's exception path
+         * executes zero pages at 0xffff0000. */
+        uint32_t hv = n < 0x40u ? n : 0x40u;
+        nk_poke(&cpu, NK_HIGH_VECTORS, rom_copy, hv);
+        nk_code_range_add(&ip, NK_HIGH_VECTORS, hv);
+        printf("low ROM alias: %u bytes at 0x00000000, %u high-vector bytes\n",
+               n, hv);
+    }
+
     uint32_t entry_override = (uint32_t)env_ulong("NK_ENTRY", 0);
     if (entry_override) {
         entry = entry_override;
@@ -550,6 +570,7 @@ int main(int argc, char** argv) {
     ip.spin_max = (uint32_t)env_ulong("NK_SPIN", 0) ?
         (uint32_t)env_ulong("NK_SPIN_MAX", 20000) : 0;
     ip.require_code = (int)env_ulong("NK_CODE_ONLY", 1);
+    ip.allow_low_alias = getenv("NK_LOW_ROM") ? 1 : 0;
     const char* callmap = getenv("NK_CALLMAP");
     if (callmap) load_callmap(&ip, callmap);
     ip.hle_heap = (uint32_t)env_ulong("NK_HLE_HEAP", 0x80400000);

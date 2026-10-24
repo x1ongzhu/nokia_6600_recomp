@@ -205,9 +205,11 @@ criteria and phased roadmap live in
   harness accepts `NK_Rn`; the mask-ROM secondary loader is
   **`0x500003bc` → `0x50001648`**, driven by the `KaeP` descriptor at
   `0x50000124`.  It runs 211 instructions before stale calls are recovered;
-  snapping the first call (a bring-up aid, not proof of the real callee) lets
-  it run 300k+ into a missing boot image/super-page table at address 0.
-  `tools/test_layout.sh` pins the drift null test.
+  its type-switch table is **0-based**, so the boot bank must execute at
+  address 0 (`NK_LOW_ROM=1`), not at `0x50000000`.  In that view it runs
+  **299,991** instructions and reaches the high-vector/super-page frontier at
+  `0x1248`.  `tools/test_layout.sh` pins the drift null test; the interpreter
+  self-test pins the opt-in low-alias window.
 
 **← current frontier →**
 
@@ -269,10 +271,12 @@ criteria and phased roadmap live in
   secondary loader entry it calls: **`0x500003bc` → `0x50001648`**, driven by
   the **`KaeP`** descriptor at `0x50000124` (payload `0x130`).  With the
   `NK_Rn` register overrides the loader executes 211 instructions before the
-  stale call sites are recovered; snapping the first one (a bring-up aid) lets
-  it run 300k+ instructions into a **boot image/super-page table**
-  (`base=0`, `count≈0x80000000`) that the mask ROM should have installed.
-  Modelling that table is the next boot step.
+  stale call sites are recovered.  The loader's jump tables are **0-based**,
+  so the boot bank has to run at address 0: `NK_LOW_ROM=1` copies it there and
+  installs the high vectors, and the loader then runs **299,991** instructions
+  to the `0x1248` high-vector/super-page frontier.  Modelling the
+  **boot image/super-page table** (`base=0`, `count≈0x80000000`) that the mask
+  ROM should have installed is the next boot step.
 - [ ] **MMIO + display** — the sparse bus is in place; the entry already writes
   UPP registers around `0x58150000`, which is the first real device surface.
 - [ ] **First light** — the Nokia boot logo on a host window.
@@ -352,6 +356,12 @@ tools/test_layout.sh
 # round 11: mask-ROM secondary loader entry (registers via NK_Rn)
 NK_ENTRY=0x500003bc NK_R11=0x80000000 NK_R10=0 \
   NK_RECOVER=1 NK_CODE_ONLY=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+
+# ... and the same loader in its real physical view: boot bank at address 0
+NK_LOW_ROM=1 NK_ENTRY=0x3bc NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
   --rom-image out/6600_runtime.bin
 ```

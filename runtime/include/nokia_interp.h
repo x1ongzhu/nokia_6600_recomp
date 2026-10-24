@@ -201,6 +201,10 @@ typedef struct nk_interp {
     /* Reject a PC outside the ROM/low-alias/high-vector windows.  A corrupted
      * return otherwise runs the heap as Thumb code for the rest of the budget. */
     int require_code;
+    /* The mask-ROM/boot path runs the first ROM bank through the low physical
+     * alias (address 0).  Off by default: a stale kernel call target of 0
+     * must stay a fault/skip, not start executing low RAM. */
+    int allow_low_alias;
 } nk_interp_t;
 
 void        nk_interp_init(nk_interp_t* ip);

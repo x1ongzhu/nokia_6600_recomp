@@ -1288,10 +1288,10 @@ void nk_interp_init(nk_interp_t* ip) {
  * 0x80000000 holds data and stacks only; a PC there after a bad return is
  * data being executed as code.  The dispatcher uses this to turn that into
  * a recovery instead of spending millions of instructions in the heap. */
-static int pc_in_code_space(uint32_t pc) {
+static int pc_in_code_space(uint32_t pc, int allow_low_alias) {
     pc &= ~1u;
     return (pc >= 0x50000000u && pc < 0x51000000u) ||
-           pc < 0x00300000u ||
+           (allow_low_alias && pc < 0x00300000u) ||
            (pc >= 0xffff0000u && pc < 0xffff1000u);
 }
 
@@ -1322,16 +1322,19 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
             return 1;
         }
         /* The 6600 maps ROM at 0x50000000, RAM at 0x80000000 and high
-         * vectors at 0xffff0000.  A PC below 1 GiB means a corrupted
-         * return/frame, not real code; stop at the boundary instead of
-         * disassembling zero pages for the rest of the budget. */
-        if (c->r[15] < 0x40000000u) {
+         * vectors at 0xffff0000.  A PC below 1 GiB normally means a corrupted
+         * return/frame; the exception is the pre-MMU low alias
+         * (0x00000000..0x002fffff), where the mask ROM executes the boot
+         * bank.  Keep the guard for every other low address. */
+        if (c->r[15] < 0x40000000u &&
+            !pc_in_code_space(c->r[15], ip->allow_low_alias)) {
             ip->st.stop_reason = NK_STOP_OUT_OF_IMAGE;
             ip->st.stop_pc = c->r[15];
             if (recover_call(ip, c, NK_STOP_OUT_OF_IMAGE)) continue;
             return 1;
         }
-        if (ip->require_code && !pc_in_code_space(c->r[15])) {
+        if (ip->require_code &&
+            !pc_in_code_space(c->r[15], ip->allow_low_alias)) {
             ip->st.stop_reason = NK_STOP_OUT_OF_IMAGE;
             ip->st.stop_pc = c->r[15];
             if (recover_call(ip, c, NK_STOP_OUT_OF_IMAGE)) continue;

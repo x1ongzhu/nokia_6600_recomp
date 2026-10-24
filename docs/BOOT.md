@@ -406,6 +406,26 @@ informative: it wants the **boot image/super-page table** the mask ROM would
 install at address 0, which is not present in the flash dump.  The next boot
 task is therefore concrete: model that table, not another snap window.
 
+**4. The boot bank is linked at 0, not at 0x50000000.**  The loader's type
+switch is `ldr pc, [pc, r3, lsl #2]` over a table of **0-based** targets
+(`0x2908`, `0x28bc`, ...).  Executed at `0x500003bc`, those targets resolve to
+low RAM (`0x00002908`), which is why the loader failed there.  The mask-ROM
+physical view is: **boot code at 0**, ROM data/literals at `0x50000000`, RAM at
+`0x80000000`.  `NK_LOW_ROM=1` now copies the first 64 KiB of the ROM to `0x0`,
+registers that range as code, copies the 16 exception vectors to
+`0xffff0000`, and lets the interpreter execute the low alias (the CPU guard
+still rejects every other address below `0x40000000`; `allow_low_alias` is
+opt-in).  With this view the loader runs **299,991 instructions** without
+call repair, then loops at `0x1248` after 9 high-vector exceptions.  That is
+the next frontier: the exception/super-page state, not the loader entry.
+
+```
+NK_LOW_ROM=1 NK_ENTRY=0x3bc NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+```
+
 ```
 .venv/bin/python recompiler/layout.py drift 6600_mcu.bin \
   --json out/layout_drift.json
@@ -467,6 +487,7 @@ The bring-up stack now has five layers:
 | code-space guard | `NK_CODE_ONLY=1` | a PC in RAM (or outside ROM/low alias/high vectors) is a corrupted return, not code |
 | call ring / watch | `NK_WATCH=addr`, `NK_WATCH_LOG=n` | on a watched PC, print registers and the last n BL/BLX sites with their arguments and resolved targets |
 | entry/register injection | `NK_ENTRY=addr`, `NK_Rn=value` (n=0..12), `NK_SP`, `NK_LR` | reproduce a mask-ROM entry without writing a new harness; `NK_R11` is `fp`, `NK_R10` is `sl` |
+| boot-bank alias | `NK_LOW_ROM=1` (`NK_LOW_ROM_SIZE=0x10000`) | copy the first ROM bank to address 0, register it as code, install the 16 high vectors and enable the interpreter's low-alias window |
 
 Measured with `tools/test_boot_recover.sh` **after the Thumb fix**:
 

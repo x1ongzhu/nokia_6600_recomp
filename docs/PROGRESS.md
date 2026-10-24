@@ -53,7 +53,7 @@
 | M17 | **第 8 轮：call ring / spin watchdog / PC 空间守卫；重新确认 entry frontier** | 解释器新增 `NK_WATCH`（命中 PC 时打印寄存器 + 最近 64 次 BL/BLX 的调用环）、`NK_SPIN`/`NK_SPIN_MAX`（同一 PC 被访问 N 次即视为死循环，走 recovery 回滚）、`NK_CODE_ONLY`（PC 在 RAM / ROM / low alias / high vectors 之外时视为坏返回）、`NK_ENTRY`（覆盖启动地址）。用它们重新核对：faithful image（无 patch）的 2,000,000 条 trace 是 **0x5039adcc 缺失 `pop` 造成的垃圾路径**；bringup image 仍然 **197 条返回**。kernel entry 的第三个调用（snap 到 `0x50313518`）真实写入 UPP `0x5815053a/0x5815053c/0x5815056a/0x58150200/0x58150508/0x5815004a`，第五个调用访问 `0x58120308`/`0x59e00040`。从 ROM 向量 `0x50000000` 启动可执行 **16,396 条 ARM 指令**、打开 MMU/cache（CP15 c1）、写 `0x580047e0`/`0x580047dc`、安装 high vectors，最后跳到 0 —— 这是异常向量分发代码，不是 reset 路径。修正 `wd2.py`/`romimage.py` 的 UID1 常量：`0x1000007a` 是 EXE（kernel），`0x10000079` 是 DLL（`e32uid.h`）。 |
 | M18 | **第 9 轮：export 表作为 layout oracle；packed text 不是 linked text** | 新增 `recompiler/layout.py` 与 `tools/test_layout.sh`。确认 `TRomImageHeader.iExportDir` 就是**按 ordinal 索引的、已 fixed-up 的函数地址数组**（不是名字表；Thumb 函数带 bit 0）；用 5 个 export 的小 DLL `0x101f6e00` 做正对照：5/5 都是 `push {..,lr}` 起点。**关键反证**：kernel 的 478 个 export 全部在 text 内且 4 字节对齐，但只有 82 个（17.2%）落在 stored text 的函数起点上，而随机 4 字节对齐地址的 baseline 就有 13.1%（1.31×）；DLL `0x100039e5` 是 258/1788 = 14.4%，baseline 5.9%（2.44×）。应用当前 relayout（44 pads / 0x58）后 kernel 仍只有 58/478；常数 shift 最好 0xb0 也只有 93/478；线性 drift 也没有改善。packed text 的 1420/1430 个 ARM prologue 都 4 字节对齐、759/787 个 pool 4 字节对齐，所以“只补 2 字节 padding”不可能解释这个差距。结论：**stored text 的 function layout 与 linked layout 不同（不只是对齐）**；`relayout` 只是局部修复（pool/入口验证），不能恢复跨函数调用/export 语义。 |
 | M19 | **第 10 轮：pool-aware 起点检测 + Programs 目录截断 + entry literal 方程** | (1) `layout.py` 的起点检测现在会**穿过 literal pool 回溯到 terminator**，从而识别 pool 后的 leaf 函数；kernel export 命中从 82/478（17.2%）升到 **104/478（21.8%）**，但同一检测器的随机 baseline 也升到 **17.2%**（1.27×），结论不变。(2) `romimage.py` 的 `TRomDir` 解析加入条目校验（ASCII 名、地址在 ROM 窗口、size 上限）并显式报告截断：`\System\Programs` 声明 `0x5608` 字节，实际只有 **9 个有效条目 / 0x114 字节**，其余 `0x54f4` 字节被下一个 packed record 覆盖。旧文档中的 236 项（`EStart.exe`、`EFile.exe` 等）是越过目录尾后把代码当条目的**误报**。`\System\Libs`（171 项）、`\System`（23 项）、root（2 项）完整。(3) entry `0x50310054` 的三条 `ldr` 方程证明 packed pool 在 `0x5031008e`，linked pool 在 `0x50310090`；当前 relayout 把 pad 放在 entry push 前（`0x50310056`）后三条 literal 都正确，relaid entry 局部是自洽的。(4) 新增 `romimage.py tree`：64 KiB packed 目录块里其实有**整棵 ROMFS 树**；`\System\Apps` 是唯一“所有条目都是子目录”的 `TRomDir`，按 `<App>.app` 内容匹配可恢复 **63/63 个 app 目录**，包括 `snakeex`（SnakeEx.app 0x7ddc）和 `mixpix`（mixpix.app 0xd718）。`build` 进一步把 **76 个 E32Image 文件**（63 个 `.app` + 13 个 plugin/driver）按 `iCodeAddress-0x64` 映射从 packed file 原样复制到其 runtime 地址，并用 AIF/MBM UID 在 app packed run 内定位 **84 个 AIF/MBM** 伴随文件；`SnakeEx.app` 已在 flat image `0x5147f060` 验证逐字节一致。这为 P3 提供了完整的应用清单、app 二进制和图标/位图；`.r01`/`.wav` 数据仍待 B3g。 |
-| M20 | **第 11 轮：padding-only drift 被否定；mask ROM loader 入口定位** | (1) 新增 `layout.py drift`：最强的“packed text + 非递减 2 字节 drift”模型允许 export `V` 匹配任意 `c <= V` 的 stored start，且可跳过 entry。kernel 在 `0x60/0xc0/0x200` 预算下最长单调链为 **149/183/225**，随机地址 null 为 **140.4/168.6/217.2**，比值 **1.06/1.09/1.04**——padding-only 模型与随机无差别。B1g2 的 monotone drift 分支关闭，剩余只能是显式 function-order/relocation 表或符号级置换。(2) `census` 新增 `in-code%`：692 个有 export 的 image 中 **135** 个 entry 全在自身 code 内（kernel/大 DLL）、**155** 个约一半、**36** 个更低、**366** 个为 0；kernel 是真实 export 表 + 错误 layout，不是解析错位。(3) boot harness 支持 `NK_Rn`（n=0..12）；定位 mask-ROM 二级 loader 入口 **`0x500003bc`** → **`0x50001648`**，`KaeP` 描述符在 `0x50000124`（payload `0x130`）。无 call repair 时执行 **211** 条、10 次 stale-call recovery 后返回 sentinel；`NK_CALL_POLICY=3 NK_SNAP_WINDOW=0x400` 时首个 stale call（`0x50001664 -> 0x50002ae4`）snap 到最近 prologue **`0x500029dc`**，运行 **>300,000** 条后进入 base 0、count≈`0x80000000` 的表扫描。snap 只是 bring-up 手段，不能证明 `0x29dc` 就是目标 callee；但扫描本身说明 loader 需要 mask ROM 应安装在地址 0 的 **boot image/super-page 表**，flash 中不存在。下一步是建模该表。`tools/test_layout.sh` 已加入 drift 回归（ratio < 1.2）。 |
+| M20 | **第 11 轮：padding-only drift 被否定；mask ROM loader 入口定位** | (1) 新增 `layout.py drift`：最强的“packed text + 非递减 2 字节 drift”模型允许 export `V` 匹配任意 `c <= V` 的 stored start，且可跳过 entry。kernel 在 `0x60/0xc0/0x200` 预算下最长单调链为 **149/183/225**，随机地址 null 为 **140.4/168.6/217.2**，比值 **1.06/1.09/1.04**——padding-only 模型与随机无差别。B1g2 的 monotone drift 分支关闭，剩余只能是显式 function-order/relocation 表或符号级置换。(2) `census` 新增 `in-code%`：692 个有 export 的 image 中 **135** 个 entry 全在自身 code 内（kernel/大 DLL）、**155** 个约一半、**36** 个更低、**366** 个为 0；kernel 是真实 export 表 + 错误 layout，不是解析错位。(3) boot harness 支持 `NK_Rn`（n=0..12）；定位 mask-ROM 二级 loader 入口 **`0x500003bc`** → **`0x50001648`**，`KaeP` 描述符在 `0x50000124`（payload `0x130`）。无 call repair 时执行 **211** 条、10 次 stale-call recovery 后返回 sentinel；`NK_CALL_POLICY=3 NK_SNAP_WINDOW=0x400` 时首个 stale call（`0x50001664 -> 0x50002ae4`）snap 到最近 prologue **`0x500029dc`**，运行 **>300,000** 条后进入 base 0、count≈`0x80000000` 的表扫描。snap 只是 bring-up 手段，不能证明 `0x29dc` 就是目标 callee；但扫描本身说明 loader 需要 mask ROM 应安装在地址 0 的 **boot image/super-page 表**，flash 中不存在。下一步是建模该表。(4) 发现 boot bank 的跳转表是 **0-based**（`0x2908` 等），所以 mask-ROM 物理视图是 **boot code at 0**、ROM 字面量 at `0x50000000`、RAM at `0x80000000`；新增 `NK_LOW_ROM=1` 把前 64 KiB 复制到 0、登记为 code、复制 16 个 high vectors，并让解释器只在 opt-in 时允许 low alias。该视图下 loader 无 snap 运行 **299,991** 条，随后在 high-vector 异常路径循环于 `0x1248`；下一 frontier 是异常/super-page state。`tools/test_layout.sh` 已加入 drift 回归（ratio < 1.2），`interp_selftest` 新增 low-alias 回归。 |
 
 ### 可复现命令
 
@@ -601,6 +601,7 @@ entry：
 - [x] **M17d** 重新核对 faithful vs bringup：2M trace 是缺 `pop` 的垃圾路径；bringup 197 条返回
 - [x] **M17e** `NK_ENTRY` 覆盖启动地址；ROM 向量 `0x50000000` 跑 16,396 条并打开 MMU
 - [x] **M17f** 修正 UID1 常量（`0x1000007a` = EXE，`0x10000079` = DLL）
+- [x] **B6a0** mask-ROM 物理视图：boot bank 的跳转表是 0-based，代码必须在地址 0 执行。`NK_LOW_ROM=1`（copy 64 KiB + high vectors + opt-in low alias）下 loader 运行 299,991 条，循环于 `0x1248`
 - [x] **B6a1** mask-ROM 二级 loader 入口：`0x500003bc` → `0x50001648`，输入是 `0x50000130` 的 KaeP 描述符；boot harness 支持 `NK_Rn` 注入。无 repair 时 211 条 / 10 次 recovery；`NK_CALL_POLICY=3` 时进入表扫描
 - [ ] **B6a2** 建模 boot image/super-page 表：loader 在 base=0、count≈`0x80000000` 的表上扫描；该表应由 mask ROM 从 ROM header/ROMFS 安装，flash 中不存在。先确定表格式（16 字节 entry），再从 722 个 image + boot 模块表生成它
 - [ ] **B6a3** entry 第二个调用的 kernel 对象 / vtable（`[0x80000000]` 全局 + `0x503364b0` 的 `+0x14` slot）
@@ -667,9 +668,17 @@ entry：
   base=0、count≈`0x80000000` 的表上扫描。snap 只是 bring-up 手段，不能
   证明 `0x29dc` 就是目标 callee；但扫描本身说明 loader 需要 mask ROM 应
   安装在地址 0 的 boot image/super-page 表，flash dump 中没有；下一步是
-  建模该表（B6a2），而不是继续放大 snap 窗口。验收：
-  `tools/test_layout.sh`、`tools/test_interp.sh`、`tools/test_loader.sh`、
-  `tools/test_boot_recover.sh`、`tools/test_relayout.sh` 全部通过。
+  建模该表（B6a2），而不是继续放大 snap 窗口。进一步发现 boot bank 的
+  类型跳转表是 **0-based**（`0x2908` 等），因此 mask-ROM 物理视图是
+  **boot code at 0 / ROM 字面量 at 0x50000000 / RAM at 0x80000000**。
+  新增 `NK_LOW_ROM=1`：复制前 64 KiB 到 0、登记 code range、复制 16 个
+  high vectors，并让解释器在 opt-in 时允许 low alias（默认仍把
+  `0x00000000` 的 stale call 视为 fault，避免破坏 bring-up 路径）。
+  该视图下 loader 无 call repair 运行 **299,991** 条，随后在 high-vector
+  异常路径循环于 `0x1248`；下一 frontier 是异常/super-page state。
+  验收：`tools/test_layout.sh`、`tools/test_interp.sh`、
+  `tools/test_loader.sh`、`tools/test_boot_recover.sh`、
+  `tools/test_relayout.sh` 全部通过。
 
 - 2026-10-25（本轮 10）：**pool-aware 起点检测 + Programs 目录截断 + entry literal
   方程**。`layout.py` 的 `start_kind` 新增 `pool_aware`：从候选地址向前穿过
