@@ -185,10 +185,13 @@ Two things were wrong with the flat image, and both were silent:
 
    `\System\Programs` is the boot module table: `ekern.exe` (the kernel,
    uid3 `0x100058e8`, code `0x50310000`), `ecust.dll`, `ecomm.ldd`,
-   `EStart.exe`, `EFile.exe`, `EFSrv.dll`, ...  `romimage.py names` prints it
-   and maps each entry to its packed record (`ekern.exe` is at file
-   `0x3268c0`).  193/236 Programs entries and 73/171 Libs entries map to
-   packed images; the rest are resources (`.rsc`, `.mbm`, `.r01`, ...).
+   `ramdrive.pdd`, `rtc.dll`, `nosstarter.ext`, `pnmsg.dll`, `isimsg.dll`,
+   `isaapi.dll`.  `romimage.py names` prints it and maps each entry to its
+   packed record (`ekern.exe` is at file `0x3268c0`).  Round 10 corrected the
+   old "236 entries / 193 mapped" figure: the declared directory tail is
+   overwritten by the next packed record, so only those nine entries and
+   6 Programs image records are present.  `\System\Libs` keeps 73/171 image
+   records; the rest are resources (`.rsc`, `.mbm`, `.r01`, ...).
 
    The data files themselves are stored in packed FS order with `0xff`
    padding, not at `addr - 0x50000000`.  The old build copied from the linear

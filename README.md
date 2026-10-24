@@ -147,12 +147,14 @@ criteria and phased roadmap live in
   registers their text as code.  The ROMFS is a tree, and its directories are
   now located by content: root file `0x32639c`, `\System` `0x325aa4`,
   `\System\Libs` `0x3162bc` (171 entries) and `\System\Programs` `0x318170`
-  (236 entries).  This gives the boot module table — `ekern.exe` (the kernel,
-  uid3 `0x100058e8`), `ecust.dll`, `ecomm.ldd`, `EStart.exe`, `EFile.exe`,
-  `EFSrv.dll`, ... — via the new `romimage.py names`.  Also fixed: ROMFS
-  **data** files are not stored at `addr - 0x50000000`; the old build spliced
-  unrelated code into 17 MB of the flat image.  They are packed in FS order
-  (0xff-padded), so `build` no longer copies them from the linear address.
+  (9 valid boot entries; the declared 0x5608-byte tail is overwritten by the
+  next packed record — corrected in round 10).  This gives the boot module
+  table — `ekern.exe` (the kernel, uid3 `0x100058e8`), `ecust.dll`,
+  `ecomm.ldd`, `ramdrive.pdd`, `rtc.dll`, ... — via the new
+  `romimage.py names`.  Also fixed: ROMFS **data** files are not stored at
+  `addr - 0x50000000`; the old build spliced unrelated code into 17 MB of the
+  flat image.  They are packed in FS order (0xff-padded), so `build` no longer
+  copies them from the linear address.
 - [x] **Debugging the frontier (round 8)** — the interpreter now has a
   **call ring** (`NK_WATCH=addr` prints the registers plus the last 64 calls,
   their raw/resolved targets and arguments), a **tight-loop watchdog**
