@@ -1,0 +1,48 @@
+# nokia-recomp per-target configuration — Nokia 6600 (NHL-10, GSM, 2003)
+# DCT4 / UPP_WD2 (ARM920T), Symbian OS 7.0s, S60 2nd Edition.
+
+[input]
+# The original download is the WD2 container fw/NHL105530.C1.
+# recompiler/wd2.py extract turns it into the raw EKA1 ROM 6600_mcu.bin.
+#   fw/NHL105530.C1 -> 6600_mcu.bin (22 MiB EKA1 ROM, linked at 0x50000000)
+#   kernel           -> fw/6600_kernel.bin (code copied to its link address)
+container   = "fw/NHL105530.C1"
+image       = "6600_mcu.bin"
+kernel      = "fw/6600_kernel.bin"
+source      = "NHL105530.C1 (NHL-10 v5.53.0, WD2 BT2 / WD2 ALGORITHM)"
+cpu         = "armv4t"
+
+[platform]
+family = "DCT4"
+asic   = "UPP_WD2"                 # 104 MHz ARM920T, PDA variant of the UPP
+ui     = "S60 2nd Edition (Symbian OS 7.0s)"
+
+[memory]
+rom_base       = 0x50000000        # EKA1 ROM link address
+rom_size       = 0x01600000        # 22 MiB, from the ROM header
+ram_base       = 0x80000000        # kernel data / RAM (kern_data .. kern_limit)
+ram_size       = 0x00300000        # 3 MiB, from the ROM header
+high_vectors   = 0xffff0000
+fs_base_bias   = 0x162b0           # stored ROMFS pointers need this bias
+fs_entry_bias  = 0x16538           # directory-entry file addresses need this bias
+
+[rom]
+header_offset  = 0x7c              # 6600 EKA1 header starts at +0x7c
+root_list      = 0x503162b0        # ROMFS root-directory list
+kernel_header  = 0x503268c0        # E32Image header (uid3 0x100058e8)
+kernel_code    = 0x50310000        # link address of the kernel code
+kernel_entry   = 0x50310054        # Thumb entry; code is stored at file +0x32692c
+maskrom_entry  = 0x00e0ca39        # boot/mask-ROM entry, not part of the ROM image
+
+[display]
+width  = 176
+height = 208
+color  = true                      # 176x208 16-bit TFT
+
+[output]
+dir     = "out/"
+context = "n6600_cpu_t"
+
+[functions]
+# entry = 0x50310054               # kernel entry (Thumb), after loading code at 0x50310000
+# hints = []

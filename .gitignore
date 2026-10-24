@@ -1,0 +1,51 @@
+# NEVER commit firmware or anything derived from a phone dump.
+# This is a tool. You bring your own legally-obtained Nokia firmware.
+*.exe
+*.ldp
+*.pri
+*.fls
+*.mcusw
+*.ppm
+*.cnt
+*_mcu.bin
+6600_mcu.bin
+# WD2 firmware containers (never commit a phone dump)
+*.C1
+NHL105530.*
+npl2__*
+*.800
+*.cab
+*.hdr
+*.zip
+Header.txt
+/fw/
+/_fw/
+manifest.json
+
+# Build / generated output
+/build/
+/out/
+/recompiler/out/
+/recompiler/_rt/
+*.o
+*.obj
+*.exe
+*.dll
+*.a
+*.lib
+generated*.c
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local agent configuration (machine-specific MCP/editor settings)
+opencode.json
