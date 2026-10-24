@@ -630,6 +630,7 @@ int main(int argc, char** argv) {
     ip.watch_pc = (uint32_t)env_ulong("NK_WATCH", 0);
     ip.watch_hits = (int)env_ulong("NK_WATCH_HITS", 1);
     ip.watch_log = (int)env_ulong("NK_WATCH_LOG", 16);
+    ip.stop_selfb = (int)env_ulong("NK_STOP_SELFB", 1);
     ip.spin_max = (uint32_t)env_ulong("NK_SPIN", 0) ?
         (uint32_t)env_ulong("NK_SPIN_MAX", 20000) : 0;
     ip.require_code = (int)env_ulong("NK_CODE_ONLY", 1);
@@ -660,6 +661,10 @@ int main(int argc, char** argv) {
     printf("mmio: %lu reads, %lu writes\n", nk_mmio_reads(), nk_mmio_writes());
     printf("regs: r0=%#010x r1=%#010x r2=%#010x r3=%#010x sp=%#010x lr=%#010x pc=%#010x\n",
            cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[13], cpu.r[14], cpu.r[15]);
+    printf("regs: r4=%#010x r5=%#010x r6=%#010x r7=%#010x r8=%#010x "
+           "r9=%#010x r10=%#010x r11=%#010x r12=%#010x\n",
+           cpu.r[4], cpu.r[5], cpu.r[6], cpu.r[7], cpu.r[8], cpu.r[9],
+           cpu.r[10], cpu.r[11], cpu.r[12]);
     printf("cpsr=%#010x\n", cpu.cpsr);
     printf("last pcs:");
     int start = ip.last_n > 16 ? ip.last_n - 16 : 0;

@@ -29,11 +29,14 @@ loops at ``0x1248``".  The mapping is actually deterministic:
   =========  ===================  ===================  =======
   A          ``0x0000-0x2000``    ``0x00b0-0x20b0``   ``0xb0``
   B          ``0x2000-0x6000``    ``0x219c-0x619c``   ``0x19c``
-  C*         ``0x6000-...``       ``0x6374-...``      ``0x374``
+  C          ``0x6000-0x8000``    ``0x6374-0x8374``   ``0x374``
   =========  ===================  ===================  =======
 
-  ``C`` is measured by its switch tables but its linked base is not yet pinned
-  down; ``build`` only relocates A and B, the fragments the loader executes.
+  ``C`` is pinned by the 16-bit CPU/board table at linked ``0x74b8``: the
+  correct halfwords (including the CPU value ``0x3b``) are stored at file
+  ``0x782c``, exactly ``linked + 0x374``.  ``build`` now relocates A, B and C;
+  before that the CPU lookup compared ``0x3b`` with instruction bytes and
+  halted in the ``b .`` panic at linked ``0x3d44``.
 
 The reconstruction is the biggest single-step boot advance since the Thumb
 decoder fix: the loader now runs 600,000 instructions on the real path with
@@ -57,13 +60,22 @@ LOADER_ENTRY = 0x3BC            # `mov r0, fp; sub r1, pc, #imm; ...; b loader`
 LINKED_ENTRY = 0x30C            # LOADER_ENTRY - 0xB0
 
 # Fragments whose stored->linked mapping is verified.  Each tuple is
-# (linked_start, linked_end, stored_start, name, provisional).
+# (linked_start, linked_end, stored_start, name).
+#
+# Fragment C is pinned by the 16-bit CPU/board table consumed at linked
+# 0x3d10: the table lives at linked 0x74b8, and the correct halfwords
+# (0x0000, 0x002a, 0x0029, ..., 0x003b) are stored at file 0x782c.  That is
+# exactly linked + 0x374, the bias measured from C's switch tables.  Before
+# this relocation the loader compared the CPU value 0x3b against instruction
+# bytes and halted in the `b .` panic at linked 0x3d44.
 MODULES = (
-    (0x0000, 0x2000, 0x00B0, "A", False),
-    (0x2000, 0x6000, 0x219C, "B", False),
+    (0x0000, 0x2000, 0x00B0, "A"),
+    (0x2000, 0x6000, 0x219C, "B"),
+    (0x6000, 0x8000, 0x6374, "C"),
 )
-# Measured but not relocated by `build`: the linked base is not pinned yet.
-PROVISIONAL = (0x6000, 0x6374, "C")
+# The two inter-fragment gaps (0x20b0..0x219c and 0x619c..0x6374) still hold
+# code linked for another base; they are not relocated yet.
+GAPS = ((0x20B0, 0x219C), (0x619C, 0x6374))
 
 
 def u32(b: bytes, o: int) -> int:
@@ -138,7 +150,7 @@ def switch_tables(bank: bytes) -> list[dict]:
 
 def module_for_stored(off: int) -> tuple[int, int, str] | None:
     """Return (drift, linked_base, name) for a stored offset, if mapped."""
-    for ls, le, ss, name, _ in MODULES:
+    for ls, le, ss, name in MODULES:
         if ss <= off < ss + (le - ls):
             return ss - ls, ls, name
     return None
@@ -164,8 +176,7 @@ def analyze(rom: bytes) -> dict:
         "reloc_addend": base,
         "loader": entry,
         "tables": tables,
-        "modules": [(ls, le, ss, nm, prov) for ls, le, ss, nm, prov in MODULES],
-        "provisional": PROVISIONAL,
+        "modules": [(ls, le, ss, nm) for ls, le, ss, nm in MODULES],
         "measured": summary,
     }
 
@@ -179,9 +190,7 @@ def build(rom: bytes) -> bytes:
     """
     bank = bytearray(rom[:BANK])
     out = bytearray(bank)
-    for ls, le, ss, name, provisional in MODULES:
-        if provisional:
-            continue
+    for ls, le, ss, name in MODULES:
         n = le - ls
         out[ls:le] = bank[ss:ss + n]
     return bytes(out)
@@ -205,7 +214,7 @@ def cmd_analyze(a):
               f"{r['end']:#8x} {r['bias_max']:#7x} {r['module'] or '-':>4} {exp:>7}")
     print()
     print("measured fragments (max table bias is a lower bound, ±0x20):")
-    for ls, le, ss, name, prov in info["modules"]:
+    for ls, le, ss, name in info["modules"]:
         print(f"  {name}: linked {ls:#06x}-{le:#06x} <- stored {ss:#06x} "
               f"(bias {ss - ls:#x})")
     m = info["measured"]
@@ -214,8 +223,9 @@ def cmd_analyze(a):
     print(f"  A bias: {('0x%x' % a_bias) if a_bias is not None else '?'}  "
           f"(anchor: 0x3b0 helper)")
     print(f"  B bias: {('0x%x' % b_bias) if b_bias is not None else '?'}")
-    ls, ss, name = info["provisional"]
-    print(f"  {name}: stored {ss:#06x} (provisional; linked base not pinned)")
+    c_bias = m.get("C")
+    print(f"  C bias: {('0x%x' % c_bias) if c_bias is not None else '?'}  "
+          f"(anchor: CPU table 0x74b8 -> file 0x782c)")
     return 0
 
 
@@ -228,9 +238,8 @@ def cmd_build(a):
     with open(a.out, "wb") as f:
         f.write(buf)
     print(f"wrote {a.out}: {BANK:#x}-byte linked boot bank")
-    for ls, le, ss, name, prov in MODULES:
-        if not prov:
-            print(f"  {name}: linked {ls:#06x}-{le:#06x} <- stored {ss:#06x}")
+    for ls, le, ss, name in MODULES:
+        print(f"  {name}: linked {ls:#06x}-{le:#06x} <- stored {ss:#06x}")
     print(f"map it at address 0 and start at linked {LINKED_ENTRY:#x}:")
     print(f"  NK_LOW_ROM=1 NK_LOW_ROM_IMAGE={a.out} NK_ENTRY={LINKED_ENTRY:#x} \\")
     print("    NK_R11=0x80000000 NK_R10=0x80000000 NK_RECOVER=1 NK_CODE_ONLY=1 \\")
@@ -259,6 +268,19 @@ def cmd_verify(a):
           f"fragment B switch bias measures ~0x19c (got {b})")
     n_b = sum(1 for r in info["tables"] if r["module"] == "B")
     check(n_b >= 8, f"fragment B has {n_b} measured switch tables")
+    # Fragment C: the CPU/board table at linked 0x74b8.  The value 0x3b is
+    # what 0x37a0 asks 0x3d10 for; a mis-relocated C makes the scan compare it
+    # against ARM instruction bytes and halt in the 0x3d44 `b .`.
+    stored_table = 0x782C
+    linked_table = stored_table - 0x374
+    check(linked_table == 0x74B8,
+          f"C relocation maps stored 0x782c to linked 0x74b8 (got {linked_table:#x})")
+    check(rom[stored_table:stored_table + 2] == b"\x00\x00" and
+          rom[stored_table + 0x20:stored_table + 0x22] == b"\x3b\x00",
+          "the C table at stored 0x782c contains the CPU value 0x3b")
+    built = build(rom)
+    check(built[0x74B8:0x74BA] == rom[stored_table:stored_table + 2],
+          "the built linked view installs the C table at 0x74b8")
     # Every table inside A must agree with the anchor, and B within 0x20.
     for r in info["tables"]:
         if r["module"] == "A":

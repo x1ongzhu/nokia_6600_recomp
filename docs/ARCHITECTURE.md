@@ -57,7 +57,10 @@ The image recovered from `NHL105530.C1` tells us the important addresses:
 `runtime/include/nokia_cpu.h` models this as a **sparse 64 KiB page map**, not
 a single `mem + address` blob.  `nk_r32`/`nk_w32` take a one-page fast path;
 anything else (cross-page or unmapped) goes through `nokia_rt.c`, which is
-where the MMIO device shims live.
+where the MMIO device shims live.  Round 15 adds the first three boot-time
+stubs: UPP `0x58150422` returns bit `0x400`, `0x58120a08` returns non-zero, and
+the RAM probe `0x41001400` returns bit 0.  They are enough for the secondary
+loader to finish its UPP handshake; they are not a display/timer/keypad model.
 
 `runtime/src/nokia_interp.c` adds a native **ARMv4T interpreter** (ARM + Thumb)
 on top of the same bus.  It is the bring-up engine (P0) and the hybrid fallback:
@@ -72,9 +75,16 @@ The boot image is **paged**: the first 7 MiB carry a six-byte page tag
 describes a boot-image payload the mask ROM normally installs.  The boot-region
 table is therefore modelled with explicit type/flag bits: `0x1a1c` needs type
 5..8 plus attr `0x04000000`, while `0x1b34` needs type 2.  `recompiler/kaep.py`
-measures the page grid and `bootregions.py --profile linear` emits the
-linear-capable table; with it the original linked boot bank passes the old KaeP
-lookup and reaches the page-table builder at `0x2fe4`.
+measures the page grid.  `bootbank.py` now relocates all three boot-bank
+fragments A/B/C (C carries the CPU/board table at linked `0x74b8`), and
+`bootregions.py --profile staging` uses the `0xffffffff` no-expand sentinel for
+the type-2 RAM bank plus type-5 kernel code/data section banks.
+`bootbringup.py` combines that with an explicit KaeP descriptor/boot-image
+node list and a one-word skip of the compressed-image parser; the real loader
+then programs UPP, builds page tables and reaches the **boot-image handoff at
+linked `0x80`** after 36,732 instructions.  That target is where the real mask
+ROM would have installed the decompressed boot image; the KaeP unpack itself
+is still open.
 
 For the packed-image bring-up it also has:
 

@@ -123,6 +123,18 @@ static uint32_t mmio_read(nk_cpu_t* c, uint32_t a, unsigned size) {
     mmio_init();
     unsigned long n = g_mmio_reads++;
     if (mmio_log(n)) fprintf(stderr, "[mmio] read  %#010x (%u)\n", a, size);
+    /* The secondary boot bank polls UPP 0x58150422 for bit 0x400 before it
+     * continues (linked 0x3ec0..0x3ec8).  The bus has no UPP device model
+     * yet, so an unmapped read returning 0 turns that handshake into a
+     * 500k-read spin.  Report the ready bit; this is a device stub, not a
+     * property of the CPU. */
+    if (a == 0x58150422u && size == 2) return 0x0400u;
+    /* The same handshake then polls UPP 0x58120a08 until it becomes
+     * non-zero (linked 0x3a9c..0x3aa4).  Report a pending event. */
+    if (a == 0x58120a08u && size == 4) return 1u;
+    /* RAM size probe at linked 0x3c04 reads 0x41001400 and requires bit 0
+     * (memory controller present) to continue; bit 1 means "halt" there. */
+    if (a == 0x41001400u && size == 4) return 1u;
     return 0;
 }
 

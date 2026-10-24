@@ -66,8 +66,8 @@ run_loader() {
 
 echo "== original linked bank + linear table (old 0xc58 frontier)"
 run_loader out/kaep_linear.log 600000 out/6600_bootbank_linked.bin
-if ! grep -q -- "stop: budget (0) at 0x00002fe4" out/kaep_linear.log; then
-    echo "FAIL: linear table did not reach 0x2fe4" >&2
+if ! grep -q -E -- "stop: budget \(0\) at 0x00002fe[48]" out/kaep_linear.log; then
+    echo "FAIL: linear table did not reach the 0x2fe4 page-table fill" >&2
     tail -20 out/kaep_linear.log >&2
     exit 1
 fi

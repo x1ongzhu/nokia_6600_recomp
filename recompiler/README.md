@@ -78,10 +78,11 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   different bases, so its absolute pointers are not at the stored offsets.
   `analyze` reads the relocation addend from `0x3b0` (`sub r1, pc, #0x308; add r0, r0, r1` → `0xb0`)
   and measures the other fragments from the compiler's
-  `ldrls pc,[pc,rN,lsl#2]` switch tables (A `0xb0`, B `0x19c`, C `0x374`
-  provisional); `build` writes the 64 KiB image with A/B moved to their linked
-  addresses; `verify` pins the measurements.  The boot harness maps the result
-  at 0 with `NK_LOW_ROM_IMAGE` and starts at linked `0x30c`
+  `ldrls pc,[pc,rN,lsl#2]` switch tables (A `0xb0`, B `0x19c`, C `0x374`);
+  `build` writes the 64 KiB image with **A/B/C** moved to their linked
+  addresses; `verify` pins the measurements and the C CPU/board table (linked
+  `0x74b8` <- file `0x782c`, including CPU value `0x3b`).  The boot harness
+  maps the result at 0 with `NK_LOW_ROM_IMAGE` and starts at linked `0x30c`
   (`../tools/test_bootbank.sh`).
 - **`bootregions.py`** — derive and inspect the mask-ROM boot-region (bank)
   table the secondary loader receives in `r0/fp`.  Entries are 0x10 bytes
@@ -92,10 +93,15 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   emits boot/ROM/RAM with `attr=1`, which satisfies the super-page/list
   consumers but is invisible to `0x1a1c`/`0x1b34`.  The `linear` profile puts a
   type-2 RAM bank first (offset mapping, 6 MiB), then type-5 ROM and boot
-  banks for linear translation; it is the table that moves the KaeP frontier.
-  `explain` decodes a file and `verify` pins both profiles.  Install it with
-  `NK_REGIONS=path[@addr]` and `NK_RAM_EXTRA=0x300000` for the 6 MiB bank
-  (`../tools/test_bootregions.sh`, `../tools/test_kaep.sh`).
+  banks for linear translation; it is the round-14 control.  The `staging`
+  profile is the round-15 bring-up table: type-2 RAM with the `0xffffffff`
+  no-expand sentinel (`0x18b0`), a type-5 kernel code bank starting at the
+  packed header (`base+size-section_size = 0x50310000`) and a type-5 kernel
+  data bank at `0x50338ac0`.  `explain` decodes a file and `verify` pins all
+  three profiles.  Install it with `NK_REGIONS=path[@addr]` and
+  `NK_RAM_EXTRA=0x300000` for the 6 MiB bank
+  (`../tools/test_bootregions.sh`, `../tools/test_kaep.sh`,
+  `../tools/test_bootbringup.sh`).
 - **`kaep.py`** — measure the KaeP block (`0x124`: magic, size 0x20, value
   `0x1423dc`) and the paged boot image.  The first 7 MiB carry a six-byte page
   tag (`20 00 00 00 dc 23`) every `0x20ec` bytes: first at `0x20b0`, last at
@@ -108,6 +114,13 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   structure (`../tools/test_kaep.sh`).  The tag semantics (and the real KaeP
   unpack) are still unknown; the despanned view does **not** fix the export
   layout by itself.
+- **`bootbringup.py`** — the explicit round-15 mask-ROM stand-in.  It takes
+  the linked boot bank, writes a KaeP descriptor at `0x80`, a
+  `head -> node -> terminator` list at `0xfd00 -> 0xfd10` (node type
+  `0x05040000`, `next = 0`), skips the compressed-image parser at `0xfb8`
+  with `mov pc,lr`, and emits the `staging` region table.  The real loader
+  then programs UPP and reaches the boot-image handoff at linked `0x80`; this
+  is not a KaeP reconstruction (`../tools/test_bootbringup.sh`).
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

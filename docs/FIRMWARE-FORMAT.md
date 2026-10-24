@@ -239,9 +239,24 @@ so the page tags and the function-order mismatch are independent.
 `KaeP` is a 12-byte header followed by a 32-byte payload at file `0x130`
 (linked `0x80`).  The mask ROM normally turns it into the boot-image list the
 secondary loader consumes; the payload in this dump is the repeated
-`0xdff9ea00` block, not the final descriptor.  `kaep.py synth` writes an
-explicit bring-up descriptor/list node into a linked boot-bank view; it does
-not implement the real KaeP unpack.
+`0xdff9ea00` block, not the final descriptor.
+
+The boot bank itself is a concatenation of fragments linked for different
+bases.  `bootbank.py` relocates **A** (`0x0..0x2000 <- 0xb0`), **B**
+(`0x2000..0x6000 <- 0x219c`) and **C** (`0x6000..0x8000 <- 0x6374`).  C is
+pinned by the 16-bit CPU/board table at linked `0x74b8`: the correct entries
+(including CPU `0x3b`) are at file `0x782c` (`linked + 0x374`).  Without that
+relocation the loader compares `0x3b` with instruction bytes and halts in the
+`0x3d44` self-branch.
+
+`bootbringup.py` writes an explicit descriptor at linked `0x80`, a
+**head -> node -> terminator** boot-image list at `0xfd00 -> 0xfd10`, and a
+staging region table (type-2 RAM with `linbase = 0xffffffff`, type-5 kernel
+code/data banks).  The code and data sections then resolve to `0x50310000`
+and `0x80000000`.  The parser at `0xfb8` is skipped with `mov pc,lr` because
+the real KaeP compressed-image stream is not decoded yet; the run stops at
+the boot-image handoff `0x80`, where the mask ROM would have installed the
+decompressed image.
 
 ## ROM file system
 

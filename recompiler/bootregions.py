@@ -59,14 +59,27 @@ The ``linear`` profile is the mask-ROM stand-in that moved the KaeP frontier:
 Its RAM bank is first so ``0x1b34(table, 0)`` maps offset 0 to RAM, not to the
 boot bank; that is what the loader expects when it builds its heap/page tables.
 
+Round 15 adds a third profile, ``staging``.  It keeps the type-2 RAM bank but
+sets ``linbase = 0xffffffff``: ``0x18b0`` treats a real linear base in a type-2
+bank as a page mask, while the all-ones value is its explicit "do not expand"
+sentinel.  Two type-5 banks then describe the kernel record: a code bank that
+starts at the packed header and ends one aligned code size later (so the
+loader's ``base + size - section_size`` arithmetic yields ``0x50310000``), and
+a data bank covering the ROM copy at ``0x50338ac0``.  The loader's section
+finder selects them by the ``0x4000`` / ``0x8000`` flags before it maps the
+kernel code and data sections.
+
 Commands::
 
     py recompiler/bootregions.py build   6600_mcu.bin out/6600_bootregions.bin
     py recompiler/bootregions.py build   6600_mcu.bin \
         out/6600_bootregions_linear.bin --profile linear
+    py recompiler/bootregions.py build   6600_mcu.bin \
+        out/6600_bootregions_staging.bin --profile staging
     py recompiler/bootregions.py explain out/6600_bootregions_linear.bin
     py recompiler/bootregions.py verify  6600_mcu.bin
     py recompiler/bootregions.py verify  6600_mcu.bin --profile linear
+    py recompiler/bootregions.py verify  6600_mcu.bin --profile staging
 """
 from __future__ import annotations
 
@@ -79,11 +92,24 @@ ATTR_TYPE = 0x1F
 ATTR_SUPERPAGE = 0x4000
 ATTR_LINEAR = 0x04000000    # 0x1a1c first pass: [entry+0xb] bit 2
 ATTR_PHYS = 0x08000000      # 0x1a1c second pass: [entry+0xb] bit 3
+ATTR_CODE_SEGMENT = 0x4000  # type-5 staging bank consumed by 0xde0 flag 0x4000
+ATTR_DATA_SEGMENT = 0x8000  # type-5 staging bank consumed by 0xde0 flag 0x8000
 # Types 2 and 4 are expanded through the page mask in `linbase` by 0x1958.
 TYPE_EXPAND = (2, 4)
 TYPE_OFFSET = 2             # 0x1b34 offset -> address
 TYPE_LINEAR = 5             # 0x1a1c first pass accepts types 5..8
 DEFAULT_RAM_SIZE = 0x00600000   # physical RAM for the linear bring-up profile
+LINBASE_NONE = 0xFFFFFFFF   # 0x18b0 sentinel: do not expand this type-2 bank
+
+# The kernel E32Image and its packed record in this firmware.  These are the
+# values the staging profile needs; they are asserted by `verify`.
+KERNEL_CODE = 0x50310000
+KERNEL_ENTRY = 0x50310054
+KERNEL_CODE_SIZE = 0x28AC0
+KERNEL_DATA_ROM = 0x50338AC0
+KERNEL_DATA_SIZE = 0x500
+KERNEL_BSS_SIZE = 0x1C58
+KERNEL_HEADER = 0x5030FF9C
 
 
 def u32(b: bytes, o: int) -> int:
@@ -135,6 +161,50 @@ def linear_regions(rom: bytes,
          "linbase": h["kern_data"]},
         {"name": "rom", "base": h["rom_base"], "size": h["rom_size"],
          "attr": TYPE_LINEAR | ATTR_LINEAR, "linbase": h["rom_base"]},
+        {"name": "boot", "base": 0, "size": BANK,
+         "attr": TYPE_LINEAR | ATTR_LINEAR, "linbase": 0},
+    ]
+
+
+def _align4k(v: int) -> int:
+    return (v + 0xFFF) & ~0xFFF
+
+
+def staging_regions(rom: bytes,
+                    ram_size: int = DEFAULT_RAM_SIZE) -> list[dict]:
+    """The bring-up table that lets the loader map the kernel sections.
+
+    This is the successor of ``linear``.  The type-2 RAM bank keeps
+    ``linbase = -1`` (the ``0x18b0`` "do not expand" sentinel) because a real
+    linear base in that field is interpreted as a page mask by the compaction
+    pass.  Two type-5 banks describe the kernel record:
+
+    * the code bank starts at the packed kernel header (``0x5030ff9c``) and
+      ends one aligned code size later, so the section builder's
+      ``base + size - section_size`` calculation yields the real code
+      address ``0x50310000``;
+    * the data bank covers the ROM copy of ``.data``/``.bss`` at
+      ``0x50338ac0``.
+
+    The loader's section finder (``0xde0``) selects the banks by the
+    ``0x4000``/``0x8000`` flags, then maps them to the addresses in the
+    kernel ``TRomImageHeader``.
+    """
+    h = rom_header(rom)
+    code_size = _align4k(KERNEL_CODE_SIZE)
+    data_size = _align4k(KERNEL_DATA_SIZE + KERNEL_BSS_SIZE)
+    code_bank_base = KERNEL_CODE - 0x64          # packed TRomImageHeader
+    return [
+        {"name": "ram", "base": h["kern_data"], "size": ram_size,
+         "attr": TYPE_OFFSET | ATTR_SUPERPAGE | ATTR_LINEAR,
+         "linbase": LINBASE_NONE},
+        {"name": "kcode", "base": code_bank_base,
+         "size": code_size + 0x64,
+         "attr": TYPE_LINEAR | ATTR_CODE_SEGMENT | ATTR_LINEAR,
+         "linbase": code_bank_base},
+        {"name": "kdata", "base": KERNEL_DATA_ROM, "size": data_size,
+         "attr": TYPE_LINEAR | ATTR_DATA_SEGMENT | ATTR_LINEAR,
+         "linbase": KERNEL_DATA_ROM},
         {"name": "boot", "base": 0, "size": BANK,
          "attr": TYPE_LINEAR | ATTR_LINEAR, "linbase": 0},
     ]
@@ -199,6 +269,8 @@ def cmd_build(a):
     rom = open(a.rom, "rb").read()
     if a.profile == "linear":
         rows = linear_regions(rom, a.ram_size)
+    elif a.profile == "staging":
+        rows = staging_regions(rom, a.ram_size)
     else:
         rows = regions(rom)
     buf = encode(rows)
@@ -224,7 +296,7 @@ def cmd_build(a):
     print(f"wrote {a.out}: {len(buf)} bytes; super page {sp:#x}, "
           f"table copy at {sp + 0x400:#x}")
     print("install it with:")
-    if a.profile == "linear":
+    if a.profile in ("linear", "staging"):
         print("  NK_RAM_EXTRA=0x300000  # for the 6 MiB RAM bank")
     print(f"  NK_REGIONS={a.out}@0x80000000 NK_R11=0x80000000 ...")
     return 0
@@ -245,8 +317,12 @@ def cmd_explain(a):
 def cmd_verify(a):
     rom = open(a.rom, "rb").read()
     h = rom_header(rom)
-    rows = linear_regions(rom, a.ram_size) if a.profile == "linear" \
-        else regions(rom)
+    if a.profile == "linear":
+        rows = linear_regions(rom, a.ram_size)
+    elif a.profile == "staging":
+        rows = staging_regions(rom, a.ram_size)
+    else:
+        rows = regions(rom)
     t = decode(encode(rows))
     ok = True
 
@@ -254,6 +330,46 @@ def cmd_verify(a):
         nonlocal ok
         print(("ok: " if cond else "FAIL: ") + msg)
         ok = ok and cond
+
+    if a.profile == "staging":
+        check(h["rom_base"] == 0x50000000, "ROM linear base is 0x50000000")
+        check(h["kern_data"] == 0x80000000, "RAM starts at 0x80000000")
+        check(t["count"] == 4, "four banks: RAM, kernel code, kernel data, boot")
+        check((rows[0]["attr"] & ATTR_TYPE) == TYPE_OFFSET,
+              "RAM bank is type 2 (0x1b34 offset mapping)")
+        check(rows[0]["attr"] & ATTR_SUPERPAGE,
+              "RAM bank carries the 0x4000 super-page flag")
+        check(rows[0]["linbase"] == LINBASE_NONE,
+              "RAM linbase uses the 0x18b0 no-expand sentinel")
+        check((rows[1]["attr"] & ATTR_TYPE) == TYPE_LINEAR and
+              (rows[1]["attr"] & ATTR_CODE_SEGMENT),
+              "kernel code bank is type 5 with the code flag")
+        check(rows[1]["base"] == KERNEL_HEADER,
+              f"kernel code bank starts at the packed header {KERNEL_HEADER:#x}")
+        check(rows[1]["base"] + rows[1]["size"] - _align4k(KERNEL_CODE_SIZE)
+              == KERNEL_CODE,
+              "code section builder resolves to 0x50310000")
+        check((rows[2]["attr"] & ATTR_TYPE) == TYPE_LINEAR and
+              (rows[2]["attr"] & ATTR_DATA_SEGMENT),
+              "kernel data bank is type 5 with the data flag")
+        check(rows[2]["base"] == KERNEL_DATA_ROM,
+              "kernel data bank starts at the ROM .data copy")
+        check((rows[3]["attr"] & ATTR_TYPE) == TYPE_LINEAR,
+              "boot bank is type 5")
+        check(offset_lookup(rows, 0) == 0x80000000,
+              "offset 0 maps to RAM at 0x80000000")
+        check(offset_lookup(rows, 0xB8000) == 0x800B8000,
+              "offset 0xb8000 maps into RAM")
+        check(linear_lookup(rows, KERNEL_HEADER) == KERNEL_HEADER,
+              "the kernel code bank translates the packed header")
+        check(linear_lookup(rows, KERNEL_CODE) == KERNEL_CODE,
+              "the kernel code bank translates the code address")
+        check(linear_lookup(rows, KERNEL_DATA_ROM) == KERNEL_DATA_ROM,
+              "the kernel data bank translates the .data ROM copy")
+        sp = super_page(rows)
+        check(sp == 0x805FF000,
+              f"super page is 0x805ff000 with 6 MiB RAM (got {sp:#x})")
+        return 0 if ok else 1
 
     if a.profile == "linear":
         check(h["rom_base"] == 0x50000000, "ROM linear base is 0x50000000")
@@ -324,10 +440,10 @@ def main():
     bd = sub.add_parser("build", help="write the boot-region table")
     bd.add_argument("rom", nargs="?", default="6600_mcu.bin")
     bd.add_argument("out", nargs="?", default="out/6600_bootregions.bin")
-    bd.add_argument("--profile", choices=("legacy", "linear"),
+    bd.add_argument("--profile", choices=("legacy", "linear", "staging"),
                     default="legacy",
-                    help="legacy attr=1 table or the linear-capable bring-up "
-                         "table (default: legacy)")
+                    help="legacy attr=1 table, the linear bring-up table, or "
+                         "the kernel-section staging table (default: legacy)")
     bd.add_argument("--ram-size", type=lambda s: int(s, 0),
                     default=DEFAULT_RAM_SIZE,
                     help="RAM bank size for --profile linear (default 6 MiB)")
@@ -337,7 +453,7 @@ def main():
     ex.set_defaults(func=cmd_explain)
     vf = sub.add_parser("verify", help="assert the derived table invariants")
     vf.add_argument("rom", nargs="?", default="6600_mcu.bin")
-    vf.add_argument("--profile", choices=("legacy", "linear"),
+    vf.add_argument("--profile", choices=("legacy", "linear", "staging"),
                     default="legacy")
     vf.add_argument("--ram-size", type=lambda s: int(s, 0),
                     default=DEFAULT_RAM_SIZE)

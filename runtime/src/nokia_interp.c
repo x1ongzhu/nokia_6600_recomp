@@ -882,6 +882,14 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
             int32_t off = (int32_t)(op & 0x00ffffffu);
             if (off & 0x00800000) off |= (int32_t)0xff000000;
             uint32_t target = pc + 8 + ((uint32_t)off << 2);
+            if (ip->stop_selfb && !(op & (1u << 24)) && target == pc) {
+                /* A branch to its own address is a firmware panic/halt.  Do
+                 * not burn the instruction budget on it; report the address
+                 * so the last call ring shows how the boot got there. */
+                ip->st.stop_reason = NK_STOP_SELF_BRANCH;
+                ip->st.stop_pc = pc;
+                return 1;
+            }
             if (op & (1u << 24)) {
                 c->r[14] = pc + 4;
                 push_call(ip, c, pc + 4, pc, target);
@@ -1210,7 +1218,13 @@ static int thumb_step(nk_cpu_t* c, nk_interp_t* ip) {
         if (cond_true(c, cc)) {
             int32_t off = (int32_t)(h & 0xff);
             if (off & 0x80) off |= (int32_t)0xffffff00;
-            c->r[15] = pc + 4 + ((uint32_t)off << 1);
+            uint32_t target = pc + 4 + ((uint32_t)off << 1);
+            if (ip->stop_selfb && target == pc) {
+                ip->st.stop_reason = NK_STOP_SELF_BRANCH;
+                ip->st.stop_pc = pc;
+                return 1;
+            }
+            c->r[15] = target;
         }
         return 0;
     }
@@ -1219,7 +1233,13 @@ static int thumb_step(nk_cpu_t* c, nk_interp_t* ip) {
     if ((h & 0xf800) == 0xe000) {
         int32_t off = (int32_t)(h & 0x7ff);
         if (off & 0x400) off |= (int32_t)0xfffff800;
-        c->r[15] = pc + 4 + ((uint32_t)off << 1);
+        uint32_t target = pc + 4 + ((uint32_t)off << 1);
+        if (ip->stop_selfb && target == pc) {
+            ip->st.stop_reason = NK_STOP_SELF_BRANCH;
+            ip->st.stop_pc = pc;
+            return 1;
+        }
+        c->r[15] = target;
         return 0;
     }
 
@@ -1310,6 +1330,15 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
                     "sp=%#x lr=%#x cpsr=%#x\n",
                     c->r[15], thumb(c), c->r[0], c->r[1], c->r[2], c->r[3],
                     c->r[13], c->r[14], c->cpsr);
+            fprintf(stderr,
+                    "[watch] r4=%#x r5=%#x r6=%#x r7=%#x r8=%#x r9=%#x "
+                    "r10=%#x r11=%#x r12=%#x\n",
+                    c->r[4], c->r[5], c->r[6], c->r[7], c->r[8], c->r[9],
+                    c->r[10], c->r[11], c->r[12]);
+            fprintf(stderr, "[watch] stack:");
+            for (int wi = 0; wi < 6; wi++)
+                fprintf(stderr, " %#x", nk_r32(c, c->r[13] + 4u * (uint32_t)wi));
+            fprintf(stderr, "\n");
             dump_call_ring(ip, ip->watch_log);
             if (ip->watch_hits > 0) ip->watch_hits--;
         }
@@ -1390,6 +1419,7 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
                 }
             }
             if (ip->recover && ip->st.stop_reason != NK_STOP_RETURN &&
+                ip->st.stop_reason != NK_STOP_SELF_BRANCH &&
                 recover_call(ip, c, ip->st.stop_reason))
                 continue;
             break;
@@ -1423,6 +1453,7 @@ const char* nk_interp_stop_name(int reason) {
     case NK_STOP_IAT:       return "unbound import (IAT)";
     case NK_STOP_OUT_OF_IMAGE: return "pc left the image";
     case NK_STOP_SPIN:      return "spin loop";
+    case NK_STOP_SELF_BRANCH: return "self-branch (panic halt)";
     default:                return "host";
     }
 }

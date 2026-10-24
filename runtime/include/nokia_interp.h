@@ -43,6 +43,7 @@ enum {
     NK_STOP_IAT,        /* unbound import: ldr pc,[ip] slot is null */
     NK_STOP_OUT_OF_IMAGE, /* PC left the mapped ROM/RAM windows */
     NK_STOP_SPIN,       /* tight loop with no progress (bring-up watchdog) */
+    NK_STOP_SELF_BRANCH,/* `b .` / `b pc`: a firmware panic/halt loop */
     NK_STOP_HOST
 };
 
@@ -147,6 +148,7 @@ typedef struct nk_interp {
     int      iat_fake_return;/* unresolved imports return 0 instead of stopping */
     int      iat_log;       /* log the first N unbound imports */
     int      stop_on_swi;   /* stop at the first SWI instead of continuing */
+    int      stop_selfb;    /* stop at `b .` (firmware panic/halt loop) */
     /* Bring-up recovery: when a callee faults (undefined instruction, PC
      * escape), roll back to the most recent BL/BLX and continue as if that
      * call had returned 0.  Logs the skipped call.  Off by default. */

@@ -223,9 +223,10 @@ criteria and phased roadmap live in
   `0x3b0` (`sub r1, pc, #0x308; add r0, r0, r1` → **0xb0**) and measures the other fragments
   from the 17 compiler switch tables: **A** `0x0-0x2000` ← stored
   `0xb0-0x20b0` (bias `0xb0`, 7/7 exact), **B** `0x2000-0x6000` ← stored
-  `0x219c-0x619c` (bias `0x19c`), **C** stored `0x6374` (bias `0x374`,
-  provisional).  The two gaps (`0xec` / `0x1d8`) contain further ARM/Thumb
-  code, not padding.  `build` moves A/B to their linked addresses and the boot
+  `0x219c-0x619c` (bias `0x19c`), **C** `0x6000-0x8000` ← stored
+  `0x6374-0x8374` (bias `0x374`, pinned in round 15).  The two gaps
+  (`0xec` / `0x1d8`) contain further ARM/Thumb code, not padding.  `build`
+  moves A/B/C to their linked addresses and the boot
   harness maps the result at 0 (`NK_LOW_ROM_IMAGE`, start `0x30c`): the loader
   now runs **600,000 instructions with zero stale-call recoveries** (round 11
   needed 9 and looped at `0x125c`), reaches the image-loader thread at
@@ -262,17 +263,44 @@ criteria and phased roadmap live in
   acceptance test.  This is a new frontier, not a finished boot; the real
   KaeP unpack, the `linbase` base-vs-page-mask ambiguity and the page-table
   target are the next tasks.
+- [x] **Fragment C, the CPU table and the boot-image handoff (round 15)** —
+  the boot bank's third fragment (**C**) was measured but not relocated.  Its
+  16-bit CPU/board table lives at linked `0x74b8`; the correct halfwords
+  (including the CPU value `0x3b`) are stored at file `0x782c`, exactly
+  `linked + 0x374`.  `bootbank.py build` now relocates C, so the loader's CPU
+  lookup at `0x3d10` succeeds instead of comparing `0x3b` against instruction
+  bytes and halting in the `b .` panic at `0x3d44`.  Two more pieces make the
+  loader reach its real handoff: [`recompiler/bootbringup.py`](recompiler/bootbringup.py)
+  writes an explicit KaeP descriptor plus a **list head → node → terminator**
+  chain (`0xfd00 → 0xfd10`, node type `0x05040000`), and
+  `bootregions.py --profile staging` supplies type-5 code/data banks whose
+  `base + size - section_size` resolves the kernel code section to
+  `0x50310000` and the `.data` section to `0x80000000`.  The interpreter now
+  stops on `b .` as a panic halt (`NK_STOP_SELF_BRANCH`), and the MMIO bus
+  stubs the two UPP handshake reads (`0x58150422` bit `0x400`, `0x58120a08`
+  non-zero).  Result: **36,732 instructions, 12 MMIO reads, 46 writes, one
+  recovered stale call, zero undefined**, stopping at the **boot-image
+  handoff `0x80`**.  `tools/test_bootbringup.sh` is the acceptance test.  This
+  is still a stand-in — the packed KaeP stream is skipped with a one-word
+  `mov pc,lr` at `0xfb8` — but the handoff is the point the mask ROM would
+  decompress the boot image to.
 
 **← current frontier →**
 
-- [ ] **Boot-region page tables (round 14)** — the corrected `linear` profile
-  lets the original linked boot bank pass the KaeP lookup and reach the
-  page-table builder.  At a 600,000-instruction budget it is filling a
-  second-level table at `0x2fe4` (`r2 ≈ 0x65802`); with a larger budget the
-  next table targets addresses around `0x7e...`, so the `linbase`
-  base-address/page-mask dual role is not modelled correctly yet.  The real
-  KaeP unpack (the `0xdff9ea00` payload) is still open.  See
-  `docs/BOOT.md` round 14 and `tools/test_kaep.sh`.
+- [ ] **KaeP boot-image payload (round 15)** — the loader now reaches the
+  handoff at linked `0x80` with the kernel code/data banks mapped.  That
+  address is the boot image the real mask ROM would decompress; in the
+  stand-in it still contains the synthetic descriptor, so executing it is not
+  meaningful.  The next task is the real KaeP transform (or a decompressor
+  stand-in that installs executable boot code at `0x80`/`0x8000`).  The
+  `0x3ae8 → 0x5bb4` call is also stale and is what walks into the handoff in
+  the synthetic run.  See `docs/BOOT.md` round 15 and
+  `tools/test_bootbringup.sh`.
+- [ ] **Boot-region page tables (round 14 control)** — the old `linear`
+  profile still reaches the `0x2fe4` page-table fill because its type-2 RAM
+  bank's `linbase` is a base address where the compaction pass expects a page
+  mask.  It is kept as a control; `--profile staging` uses the `0xffffffff`
+  no-expand sentinel for that bank.
 - [ ] **Packed text vs. export table** — the kernel's 478 export addresses are
   all 4-byte aligned and inside the text, but only 82 (17.2%) land on a
   function start in the stored text; a pool-aware detector that walks back
@@ -474,6 +502,24 @@ NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
 .venv/bin/python recompiler/kaep.py synth \
   out/6600_bootbank_linked.bin out/6600_bootbank_kaep.bin
 tools/test_kaep.sh
+
+# round 15: relocate fragment C, map the kernel sections and reach the handoff
+.venv/bin/python recompiler/bootbank.py build 6600_mcu.bin \
+  out/6600_bootbank_linked.bin
+.venv/bin/python recompiler/bootregions.py build 6600_mcu.bin \
+  out/6600_bootregions_staging.bin --profile staging
+.venv/bin/python recompiler/bootbringup.py build 6600_mcu.bin \
+  out/6600_bootbank_bringup.bin \
+  --regions out/6600_bootregions_staging.bin
+NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
+  NK_LOW_ROM_IMAGE=out/6600_bootbank_bringup.bin \
+  NK_REGIONS=out/6600_bootregions_staging.bin@0x80000000 \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=1500000 NK_STOP_PC=0x80 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+# ... 36,732 instructions, UPP programmed, stop at the boot-image handoff 0x80
+tools/test_bootbringup.sh
 ```
 
 `6600_mcu.bin` is now the **23.3 MB raw EKA1 flash image** extracted from
@@ -521,8 +567,8 @@ full analysis and the relayout plan are in [`docs/BOOT.md`](docs/BOOT.md) and
 
 - **Python 3 + Capstone** — the recompiler (`wd2.py`, `extract.py`, `lift.py`,
   `gen_register.py`, `romimage.py`, `relayout.py`, `layout.py`, `bootbank.py`,
-  `bootregions.py`, `kaep.py`); `dct4decrypt.py` remains for the older 6100
-  DCT4 chunks.
+  `bootregions.py`, `kaep.py`, `bootbringup.py`); `dct4decrypt.py` remains for
+  the older 6100 DCT4 chunks.
 - **IDA Pro 9.1 (headless)** — exact function boundaries on the EKA1 image
   (`extract_ida.py`).
 - **clang** — compiles the generated C + runtime.

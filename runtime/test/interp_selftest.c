@@ -26,6 +26,7 @@ static int run(nk_cpu_t* c, uint32_t pc, int thumb) {
     ip.return_thumb = (uint8_t)thumb;
     ip.budget = 64;
     ip.allow_low_alias = g_allow_low_alias;
+    ip.stop_selfb = 1;
     nk_interp_run(c, &ip);
     return ip.st.stop_reason;
 }
@@ -256,6 +257,17 @@ int main(void) {
     nk_call(&c, 0x80000200u);
     CHECK(c.r[0] == 0x42 && c.r[15] == 0x80000210u,
           "nk_call falls back to the interpreter");
+
+    /* ---- `b .` is reported as a panic halt, not run until the budget ---- */
+    poke32(&c, 0x80000340u, 0xeafffffeu);   /* b .                 */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000340u, 0);
+    CHECK(r == NK_STOP_SELF_BRANCH,
+          "ARM `b .` stops with self-branch panic reason");
+
+    /* ---- UPP boot handshake stub: 0x58150422 reports ready bit 0x400 ---- */
+    CHECK(nk_r16(&c, 0x58150422u) == 0x0400u,
+          "UPP 0x58150422 reports the boot ready bit");
 
     nk_mem_free(&c);
     if (fails) { printf("%d test(s) failed\n", fails); return 1; }

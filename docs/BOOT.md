@@ -10,6 +10,7 @@ what is executed, and the exact frontier.
 | UPP mask ROM | `0x00e0ca39` | Thumb | **no** — internal boot ROM |
 | EKA1 ROM reset vector | `0x50000000` | ARM | yes (the image's exception table) |
 | Kernel E32Image | `0x50310054` | Thumb | yes, at ROM `0x326924` (link `0x50310000`) |
+| Boot-image handoff | `0x00000080` | ARM | target of the secondary loader; in the round-15 stand-in it still holds the synthetic KaeP descriptor |
 
 The ROM header's `entry` field is the **mask-ROM** entry.  The kernel is
 separate: its EKA1 `TRomImageHeader` (`uid3 0x100058e8`) is at ROM `0x3268c0`,
@@ -478,12 +479,12 @@ within `0x20`.  `recompiler/bootbank.py` finds 17 tables in the first 64 KiB:
 |---|---|---|---|---|
 | A | `0x0000-0x2000` | `0x00b0-0x20b0` | **0xb0** | 7, all exactly `0xb0` |
 | B | `0x2000-0x6000` | `0x219c-0x619c` | **0x19c** | 8 (`0x18c`-`0x19c`) |
-| C | `0x6000-?` | `0x6374-?` | **0x374** | 2 (provisional) |
+| C | `0x6000-0x8000` | `0x6374-0x8374` | **0x374** | 2 (pinned in round 15 by the CPU table) |
 
 The gaps `0x20b0-0x219c` (`0xec`) and `0x619c-0x6374` (`0x1d8`) are **not**
 padding: they contain further ARM/Thumb code and literal pools, linked for yet
-another base.  Fragment C's linked base is not pinned down, so `build` only
-relocates A and B.
+another base.  Round 12 could only pin A and B, so its `build` moved just
+those two; round 15 pins C with the CPU/board table and moves all three.
 
 **3. The reconstructed view boots on the real path.**  `bootbank.py build`
 moves A and B to their linked addresses; `boot_kernel` maps the result at 0 via
@@ -680,6 +681,103 @@ NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
 tools/test_kaep.sh
 ```
 
+### Round 15: fragment C, the CPU table and the boot-image handoff (2026-10-25)
+
+**1. The boot bank's third fragment was never relocated.**  Round 12 measured
+fragment C's switch tables (bias `0x374`) but `build` only moved A and B.  The
+loader then read the 16-bit CPU/board table at linked `0x74b8` from instruction
+bytes instead of the table:
+
+```
+0x3d10  ldr r1,[pc,#0x28]      ; r1 = 0x74b8, table base
+        ldrh r3,[r1,r0,lsl#1]
+        cmp  r3,ip             ; ip = 0x3b (CPU/revision)
+        ...
+0x3d44  b .                    ; panic when no entry matches
+```
+
+The correct halfwords are at **file `0x782c`** (`0x0000, 0x002a, 0x0029,
+0x002b, ... 0x003b, ...`), exactly `linked + 0x374`.  `bootbank.py build` now
+relocates `0x6000..0x8000 <- 0x6374..0x8374`; the CPU lookup succeeds and the
+`0x3d44` panic disappears.  `verify` pins both the bias and the `0x3b` table
+entry.
+
+**2. A corrected synthetic KaeP descriptor/list.**  `0xc58` searches a boot
+image list: it translates `descriptor+0x20` (the list head), reads
+`head+4` as the node address, then checks `node+0x60` for the type word and
+`node+0x5c` for the next pointer.  The earlier stand-in wrote one node at
+`0xfd00` but left `+0x5c` as executable code, so the search followed a garbage
+pointer and returned 0; the section size then became 0 and the parser mapped a
+2 GiB section.  `recompiler/bootbringup.py` now writes:
+
+```
+0x80 descriptor: key 0x80000000, entry 0x50310054,
+                 code 0x50310000, data 0x80000000,
+                 list head 0xfd00, code size 0x28ac0, data+bss 0x2158
+0xfd00 head:     +0x04 = 0xfd10
+0xfd10 node:     +0x2c = 0, +0x34 = 0x28ac0, +0x48 = 0x2158,
+                 +0x5c = 0 (terminator), +0x60 = 0x05040000
+```
+
+It also patches `0xfb8` (the KaeP compressed-image parser) to `mov pc,lr`; the
+real parser is still in the bank, but it cannot run against the synthetic
+descriptor.  This is an explicit stand-in, not a KaeP unpack.
+
+**3. A staging boot-region profile.**  `bootregions.py --profile staging`
+uses the `0x18b0` no-expand sentinel (`linbase = 0xffffffff`) for the type-2
+RAM bank and two type-5 section banks:
+
+| bank | base | size | flags | section result |
+|---|---|---|---|---|
+| RAM | `0x80000000` | 6 MiB | type 2, super page | offset mapping / super page |
+| kernel code | `0x5030ff9c` | `0x29064` | type 5, `0x4000` | `base+size-0x29000 = 0x50310000` |
+| kernel data | `0x50338ac0` | `0x3000` | type 5, `0x8000` | source `0x50338ac0` -> `0x80000000` |
+| boot | `0` | `0x10000` | type 5 | identity |
+
+`0xde0` selects the code/data banks by flag; `0x844` advances the section
+offset from the bank end, so the code section becomes an identity mapping of
+`0x50310000` (`0x29000` bytes) and the data section copies `0x50338ac0` to
+`0x80000000` (`0x3000` bytes).
+
+**4. Device and panic observability.**  The interpreter now reports `b .` as
+`NK_STOP_SELF_BRANCH` (panic halt) and does not let crash recovery swallow it,
+so a firmware panic stops at once instead of burning the budget.  The MMIO bus
+has two explicit UPP handshake stubs: `0x58150422` returns bit `0x400` and
+`0x58120a08` returns 1.  `0x41001400` returns 1 for the RAM-size probe.  These
+are device stubs, not CPU behaviour.
+
+**5. Result.**  `tools/test_bootbringup.sh` runs:
+
+```
+36,732 instructions (ARM), 12 MMIO reads, 46 writes,
+1 recovered stale call, 0 undefined
+--- stop: returned (2) at 0x00000080 ---
+```
+
+The call ring ends with `0x3ae8 -> 0x5bb4`; that stale call walks into the
+handoff code and returns to `0x80`.  `0x80` is the address the real mask ROM
+would have filled with the decompressed boot image.  The synthetic descriptor
+is not executable, so this is the new frontier: **the real KaeP decompression
+(or a stand-in that installs boot code at `0x80`)**.
+
+```
+.venv/bin/python recompiler/bootbank.py build 6600_mcu.bin \
+  out/6600_bootbank_linked.bin
+.venv/bin/python recompiler/bootregions.py build 6600_mcu.bin \
+  out/6600_bootregions_staging.bin --profile staging
+.venv/bin/python recompiler/bootbringup.py build 6600_mcu.bin \
+  out/6600_bootbank_bringup.bin \
+  --regions out/6600_bootregions_staging.bin
+NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
+  NK_LOW_ROM_IMAGE=out/6600_bootbank_bringup.bin \
+  NK_REGIONS=out/6600_bootregions_staging.bin@0x80000000 \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=1500000 NK_STOP_PC=0x80 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+tools/test_bootbringup.sh
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):
@@ -718,7 +816,7 @@ entry of a 64-bit shift helper, is a plausible leaf start but `0x503965fc`
 wanted the 32-bit divider).  The round-4 callmap entries for those sites remain
 in `config/callmap-6600.txt`, but the census must be repeated after relayout.
 
-The bring-up stack now has five layers:
+The bring-up stack now has these layers:
 
 | layer | knob | purpose |
 |---|---|---|
@@ -729,8 +827,11 @@ The bring-up stack now has five layers:
 | crash recovery | `NK_RECOVER=1` | snapshot the caller at every BL/BLX; if the callee faults, roll back, log the skipped call, return 0, and keep going |
 | spin watchdog | `NK_SPIN=1`, `NK_SPIN_MAX=n` | a tiny loop that keeps revisiting one PC (bogus descriptor/length) is rolled back like a fault instead of burning the budget |
 | code-space guard | `NK_CODE_ONLY=1` | a PC in RAM (or outside ROM/low alias/high vectors) is a corrupted return, not code |
-| call ring / watch | `NK_WATCH=addr`, `NK_WATCH_LOG=n` | on a watched PC, print registers and the last n BL/BLX sites with their arguments and resolved targets |
+| call ring / watch | `NK_WATCH=addr`, `NK_WATCH_LOG=n` | on a watched PC, print registers (including r4-r12 and the stack) and the last n BL/BLX sites with their arguments and resolved targets |
 | entry/register injection | `NK_ENTRY=addr`, `NK_Rn=value` (n=0..12), `NK_SP`, `NK_LR` | reproduce a mask-ROM entry without writing a new harness; `NK_R11` is `fp`, `NK_R10` is `sl` |
+| panic halt | `NK_STOP_SELFB=1` (default in the boot harness) | stop on `b .` with `NK_STOP_SELF_BRANCH` instead of treating the panic as a recoverable callee fault |
+| handoff stop | `NK_STOP_PC=0x80` | stop exactly when the loader reaches the boot-image handoff, before executing the synthetic descriptor |
+| UPP boot stubs | `runtime/src/nokia_rt.c` | `0x58150422` bit `0x400`, `0x58120a08` non-zero, `0x41001400` bit 0: the two handshakes and RAM probe the loader performs |
 | boot-bank alias | `NK_LOW_ROM=1` (`NK_LOW_ROM_SIZE=0x10000`) | copy the first ROM bank to address 0, register it as code, install the 16 high vectors and enable the interpreter's low-alias window |
 | boot-region table | `NK_REGIONS=path[@addr]` (`recompiler/bootregions.py`) | install the mask-ROM bank table (`count` + 16-byte `{base,size,attr,linbase}` entries) the secondary loader expects in `r0/fp` |
 
