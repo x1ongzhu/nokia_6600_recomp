@@ -114,9 +114,10 @@ def scan_e32(rom):
             "entry": entry, "code": code, "data": data,
             "code_size": csize, "text_size": tsize, "data_size": dsize,
             "bss_size": bss,
-            # The 6600 stores 8 extra bytes in the kernel header; its code
-            # follows the 0x64-byte E32Image header at +0x6c.
-            "code_offset": o + 0x6C,
+            # EKA1 serializes a 0x64-byte TRomImageHeader; code follows it.
+            # (An earlier version of this tool used +0x6c for the kernel and
+            # shifted every kernel instruction by 8 bytes.)
+            "code_offset": o + 0x64,
         })
     return out
 
@@ -206,17 +207,54 @@ def list_entries(rom, start, limit=64, extra=False):
     return out
 
 
-def normalise_kernel(rom, kern, name):
-    """Materialise the kernel code at its link address.
+def read_rom_dir(rom, packed_off, limit=1024):
+    """Parse a TRomDir at a *packed flash offset*.
 
-    The code is stored immediately after the E32Image header.  Its file offset
-    is *not* its link address: copying the bytes to kern['code'] is what the
-    loader does.  We also zero the BSS window described by the header.
+    EKA1's TRomDir is `iSize` followed by TRomEntry records
+    `{size, address_lin, attr, name_len, UTF-16 name}` padded to 4 bytes.
+    On the 6600 the directory is packed immediately after the 12-byte
+    TRomRootDirectoryList, so callers pass `root_list_offset + 12`.  This is
+    the correct parser; the older `read_dir_entry_any` heuristic is kept for
+    compatibility.
     """
-    # The initialized data section is part of the code image on EKA1.  BSS is
-    # *not* stored here; the loader zeroes it in RAM, so keep the image byte
-    # exact and let the runtime allocate/zero the BSS window.
-    return bytes(rom[kern["code_offset"]:kern["code_offset"] + kern["code_size"]])
+    if packed_off < 0 or packed_off + 4 > len(rom):
+        return [], packed_off
+    size = u32(rom, packed_off)
+    p = packed_off + 4
+    end = p + size
+    if size == 0 or end > len(rom):
+        return [], packed_off
+    out = []
+    while p + 10 <= end and len(out) < limit:
+        sz, addr = u32(rom, p), u32(rom, p + 4)
+        attr, nlen = rom[p + 8], rom[p + 9]
+        if nlen == 0 or nlen > 255 or p + 10 + 2 * nlen > end:
+            break
+        try:
+            name = rom[p + 10:p + 10 + 2 * nlen].decode("utf-16le")
+        except UnicodeDecodeError:
+            break
+        out.append({"name": name, "size": sz, "address": addr,
+                    "attr": attr, "next": p})
+        p += 10 + 2 * nlen
+        p = (p + 3) & ~3
+        out[-1]["next"] = p
+    return out, end
+
+
+def normalise_kernel(rom, kern, name):
+    """Materialise the kernel *text* at its link address.
+
+    The code is stored immediately after the E32Image header.  On EKA1 the
+    serialized TRomImageHeader is 0x64 bytes for every image (including the
+    kernel; the two words at +0x64 are the first 8 bytes of text, not header
+    fields).  `iTextSize` is the executable text; `iCodeSize` also includes
+    constant data.  Carve the text only.
+    """
+    size = kern.get("text_size") or kern["code_size"]
+    if size <= 0 or size > kern["code_size"]:
+        size = kern["code_size"]
+    return bytes(rom[kern["code_offset"]:kern["code_offset"] + size])
 
 
 def cmd_extract(a):
@@ -274,10 +312,19 @@ def cmd_list(a):
     root = romfs_root(rom, hdr)
     if not root:
         raise SystemExit("ROMFS root not found")
-    es = list_entries(rom, root + 12 - EKA1_ROM_BASE, extra=None)
-    print(f"root list @ {root:#x}, {len(es)} entries")
+    # The 6600 packs the root TRomDir immediately after the 12-byte
+    # TRomRootDirectoryList.  Fall back to the older heuristic if that
+    # does not parse (e.g. a future linear dump).
+    packed = root + 12 - EKA1_ROM_BASE
+    es, end = read_rom_dir(rom, packed)
+    if es:
+        print(f"root list @ {root:#x}, TRomDir @ {packed:#x}, "
+              f"{len(es)} entries, data @ {end:#x}")
+    else:
+        es = list_entries(rom, root + 12 - EKA1_ROM_BASE, extra=None)
+        print(f"root list @ {root:#x}, {len(es)} entries (heuristic parser)")
     for e in es:
-        print(f"  {e['name']:24} size={e['size']:#8x} addr={e['address']:#010x} "
+        print(f"  {e['name']:28} size={e['size']:#8x} addr={e['address']:#010x} "
               f"attr={e['attr']:#04x}")
 
 

@@ -174,6 +174,19 @@ class Lifter:
 
     def _body(self, ins, base, d):
         ops = d.operands; pc = ins.address
+        if base == "mov" and len(ops) == 2 and ops[0].type == ARM_OP_REG \
+                and ops[0].reg == ARM_REG_PC:
+            # `mov pc, lr` is a return; `mov pc, rN` is a tail call.  (The
+            # ARMv4T interworking veneers mov lr,pc; bx lr are handled by the
+            # jump group above, where bx lr becomes `return`.)
+            src = ops[1]
+            if src.type == ARM_OP_REG and src.reg == ARM_REG_LR:
+                return "return;"
+            if src.type == ARM_OP_REG:
+                return f"nk_call(c, {self.reg(ins, src.reg, pc)}); return;"
+            if src.type == ARM_OP_IMM:
+                return f"nk_call(c, {src.imm & 0xffffffff:#x}u); return;"
+            raise Unsupported()
         if (base in self._DEST0 and ops and ops[0].type == ARM_OP_REG
                 and ops[0].reg == ARM_REG_PC):
             raise Unsupported()

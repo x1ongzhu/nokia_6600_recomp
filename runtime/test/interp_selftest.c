@@ -1,0 +1,224 @@
+/*
+ * interp_selftest — hand-encoded ARMv4T instructions through the interpreter.
+ *
+ * No firmware and no lifter: this isolates the CPU core (ARM and Thumb decode,
+ * flags, branches, push/pop, multiply) so a regression is obvious.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "nokia_rt.h"
+#include "nokia_interp.h"
+
+#define TRAP 0x90000000u
+
+static int run(nk_cpu_t* c, uint32_t pc, int thumb) {
+    c->r[13] = 0x80010000u;
+    c->r[14] = TRAP;
+    c->cpsr = 0x400000d3u | (thumb ? NK_CPSR_T : 0);
+    c->r[15] = pc;
+    nk_interp_t ip;
+    nk_interp_init(&ip);
+    ip.return_pc = TRAP;
+    ip.return_thumb = (uint8_t)thumb;
+    ip.budget = 64;
+    nk_interp_run(c, &ip);
+    return ip.st.stop_reason;
+}
+
+static void poke32(nk_cpu_t* c, uint32_t a, uint32_t w) { nk_w32(c, a, w); }
+static void poke16(nk_cpu_t* c, uint32_t a, uint16_t h) { nk_w16(c, a, h); }
+
+/* Run with crash recovery enabled; returns the stop reason and the number of
+ * calls that were rolled back. */
+static int run_recover(nk_cpu_t* c, uint32_t pc, int thumb,
+                       unsigned long* recoveries) {
+    c->r[13] = 0x80010000u;
+    c->r[14] = TRAP;
+    c->cpsr = 0x400000d3u | (thumb ? NK_CPSR_T : 0);
+    c->r[15] = pc;
+    nk_interp_t ip;
+    nk_interp_init(&ip);
+    ip.return_pc = TRAP;
+    ip.return_thumb = (uint8_t)thumb;
+    ip.budget = 100;
+    ip.infer_mode = 0;   /* isolate recovery from mode inference */
+    ip.recover = 1;
+    ip.recover_max = 4;
+    ip.recover_log = 0;
+    nk_interp_run(c, &ip);
+    *recoveries = ip.st.recoveries;
+    return ip.st.stop_reason;
+}
+
+/* Run with call repair + recovery and an explicit code range; returns the stop
+ * reason and the final r0. */
+static int run_range(nk_cpu_t* c, uint32_t pc, int thumb, uint32_t lo,
+                     uint32_t hi, uint32_t* r0) {
+    c->r[13] = 0x80010000u;
+    c->r[14] = TRAP;
+    c->cpsr = 0x400000d3u | (thumb ? NK_CPSR_T : 0);
+    c->r[15] = pc;
+    nk_interp_t ip;
+    nk_interp_init(&ip);
+    ip.return_pc = TRAP;
+    ip.return_thumb = (uint8_t)thumb;
+    ip.budget = 64;
+    ip.infer_mode = 0;
+    ip.infer_calls = 1;
+    ip.recover = 1;
+    ip.recover_log = 0;
+    ip.call_fixup_log = 0;
+    nk_code_range_add(&ip, lo, hi);
+    nk_interp_run(c, &ip);
+    *r0 = c->r[0];
+    return ip.st.stop_reason;
+}
+
+int main(void) {
+    nk_cpu_t c;
+    memset(&c, 0, sizeof c);
+    if (nk_mem_init(&c) != 0) return 1;
+    if (nk_alloc_ram(&c, 0x80000000u, 0x20000) != 0) return 1;
+
+    int fails = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); fails++; } \
+                              else printf("ok: %s\n", msg); } while (0)
+
+    /* ---- ARM: mov/add/cmp/conditional move/bx ---- */
+    poke32(&c, 0x80000000u, 0xe3a00001u);   /* mov  r0, #1        */
+    poke32(&c, 0x80000004u, 0xe2801002u);   /* add  r1, r0, #2    */
+    poke32(&c, 0x80000008u, 0xe3510003u);   /* cmp  r1, #3        */
+    poke32(&c, 0x8000000cu, 0x03a02001u);   /* moveq r2, #1       */
+    poke32(&c, 0x80000010u, 0xe12fff1eu);   /* bx   lr            */
+    memset(&c.r, 0, sizeof c.r);
+    int r = run(&c, 0x80000000u, 0);
+    CHECK(r == NK_STOP_RETURN, "ARM returns through bx lr");
+    CHECK(c.r[1] == 3, "ARM add immediate");
+    CHECK(c.r[2] == 1, "ARM conditional move (eq)");
+
+    /* ---- ARM: stmdb/ldm sp! round-trip ---- */
+    poke32(&c, 0x80000100u, 0xe92d0003u);   /* push {r0,r1}       */
+    poke32(&c, 0x80000104u, 0xe8bd0003u);   /* pop  {r0,r1}       */
+    poke32(&c, 0x80000108u, 0xe12fff1eu);   /* bx   lr            */
+    memset(&c.r, 0, sizeof c.r);
+    c.r[0] = 0x11; c.r[1] = 0x22;
+    r = run(&c, 0x80000100u, 0);
+    CHECK(r == NK_STOP_RETURN && c.r[0] == 0x11 && c.r[1] == 0x22,
+          "ARM push/pop preserves registers");
+
+    /* ---- Thumb: movs/adds/muls/bx ---- */
+    poke16(&c, 0x80000140u, 0x2005);        /* movs r0, #5        */
+    poke16(&c, 0x80000142u, 0x3003);        /* adds r0, #3        */
+    poke16(&c, 0x80000144u, 0x2102);        /* movs r1, #2        */
+    poke16(&c, 0x80000146u, 0x4348);        /* muls r0, r1, r0    */
+    poke16(&c, 0x80000148u, 0x4770);        /* bx   lr            */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000140u, 1);
+    CHECK(r == NK_STOP_RETURN, "Thumb returns through bx lr");
+    CHECK(c.r[0] == 16, "Thumb movs/adds/muls");
+
+    /* ---- Thumb format 2: bit 10 selects imm3 (1) or register (0) ----
+     * A swapped selector silently turns every `adds rd,rs,#n` into a
+     * register add, which corrupts descriptor pointers and stack frames. */
+    poke16(&c, 0x80000160u, 0x2005);        /* movs r0, #5        */
+    poke16(&c, 0x80000162u, 0x2103);        /* movs r1, #3        */
+    poke16(&c, 0x80000164u, 0x1d02);        /* adds r2, r0, #4    */
+    poke16(&c, 0x80000166u, 0x1843);        /* adds r3, r0, r1    */
+    poke16(&c, 0x80000168u, 0x1e84);        /* subs r4, r0, #2    */
+    poke16(&c, 0x8000016au, 0x4770);        /* bx   lr            */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000160u, 1);
+    CHECK(r == NK_STOP_RETURN && c.r[2] == 9 && c.r[3] == 8 && c.r[4] == 3,
+          "Thumb add/sub immediate and register forms");
+
+    /* ---- Thumb: movs r4,#7; push {r4,lr}; movs r4,#0; pop {r4,pc} ---- */
+    poke16(&c, 0x80000180u, 0x2407);        /* movs r4, #7        */
+    poke16(&c, 0x80000182u, 0xb510);        /* push {r4,lr}       */
+    poke16(&c, 0x80000184u, 0x2400);        /* movs r4, #0        */
+    poke16(&c, 0x80000186u, 0xbd10);        /* pop  {r4,pc}       */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000180u, 1);
+    CHECK(r == NK_STOP_RETURN && c.r[4] == 7, "Thumb push/pop {r4,pc}");
+
+    /* ---- Thumb: beq taken ---- */
+    poke16(&c, 0x800001c0u, 0x2001);        /* movs r0, #1        */
+    poke16(&c, 0x800001c2u, 0x2801);        /* cmp  r0, #1        */
+    poke16(&c, 0x800001c4u, 0xd000);        /* beq  +0 (to +4)    */
+    poke16(&c, 0x800001c6u, 0x2009);        /* movs r0, #9 (skip) */
+    poke16(&c, 0x800001c8u, 0x2002);        /* movs r0, #2        */
+    poke16(&c, 0x800001cau, 0x4770);        /* bx   lr            */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x800001c0u, 1);
+    CHECK(r == NK_STOP_RETURN && c.r[0] == 2, "Thumb conditional branch");
+
+    /* ---- ARM: PC-relative ldr uses instruction+8, not instruction+4 ---- */
+    poke32(&c, 0x80000240u, 0xe59f1008u);   /* ldr r1, [pc, #8]   */
+    poke32(&c, 0x80000244u, 0xe3a0002au);   /* mov r0, #0x2a      */
+    poke32(&c, 0x80000248u, 0xe12fff1eu);   /* bx  lr             */
+    poke32(&c, 0x8000024cu, 0xe1a00000u);   /* nop (alignment)    */
+    poke32(&c, 0x80000250u, 0xcafebabeu);   /* literal            */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000240u, 0);
+    CHECK(r == NK_STOP_RETURN && c.r[1] == 0xcafebabeu,
+          "ARM PC-relative ldr reads instruction+8");
+
+    /* ---- Thumb BL returns to the instruction *after* the 4-byte BL ---- */
+    poke16(&c, 0x80000280u, 0xb500);        /* push {lr}           */
+    poke16(&c, 0x80000282u, 0xf000);        /* bl 0x800002c0 (h1)  */
+    poke16(&c, 0x80000284u, 0xf81du);       /* bl 0x800002c0 (h2)  */
+    poke16(&c, 0x80000286u, 0x2109);        /* movs r1, #9         */
+    poke16(&c, 0x80000288u, 0xbd00);        /* pop  {pc}           */
+    poke16(&c, 0x800002c0u, 0x2007);        /* movs r0, #7         */
+    poke16(&c, 0x800002c2u, 0x4770);        /* bx  lr              */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000280u, 1);
+    CHECK(r == NK_STOP_RETURN && c.r[0] == 7 && c.r[1] == 9,
+          "Thumb BL returns to pc+4");
+
+    /* ---- crash recovery: a faulting callee returns 0 and the caller runs ---- */
+    poke32(&c, 0x80000300u, 0xe3a00001u);   /* mov r0, #1          */
+    poke32(&c, 0x80000304u, 0xeb00003du);   /* bl  0x80000400      */
+    poke32(&c, 0x80000308u, 0xe2801029u);   /* add r1, r0, #0x29   */
+    poke32(&c, 0x8000030cu, 0xe8bd8000u);   /* pop {pc}            */
+    poke32(&c, 0x80000400u, 0xe3a0f000u);   /* mov pc, #0 (escape) */
+    poke32(&c, 0x80010000u, TRAP);          /* return address      */
+    memset(&c.r, 0, sizeof c.r);
+    unsigned long rec = 0;
+    r = run_recover(&c, 0x80000300u, 0, &rec);
+    CHECK(r == NK_STOP_RETURN && rec == 1 && c.r[1] == 0x29,
+          "recovery skips a faulting callee and returns 0");
+
+    /* ---- code-range guard: a call outside the declared text is skipped ---- */
+    poke32(&c, 0x80000600u, 0xe92d4000u);   /* push {lr}           */
+    poke32(&c, 0x80000604u, 0xe3a00001u);   /* mov r0, #1          */
+    poke32(&c, 0x80000608u, 0xeb00003cu);   /* bl  0x80000700      */
+    poke32(&c, 0x8000060cu, 0xe8bd8000u);   /* pop {pc}            */
+    poke32(&c, 0x80000700u, 0xe3a00badu);   /* mov r0, #0xbad      */
+    poke32(&c, 0x80000704u, 0xe12fff1eu);   /* bx  lr              */
+    memset(&c.r, 0, sizeof c.r);
+    c.r[14] = TRAP;
+    uint32_t rr0 = 0;
+    r = run_range(&c, 0x80000600u, 0, 0x80000600u, 0x80000610u, &rr0);
+    if (!(r == NK_STOP_RETURN && rr0 == 0))
+        printf("      range test: r=%d r0=%#x pc=%#x lr=%#x\n",
+               r, rr0, c.r[15], c.r[14]);
+    CHECK(r == NK_STOP_RETURN && rr0 == 0,
+          "call repair stays inside the declared code range");
+
+    /* ---- dispatch fallback: nk_call -> interpreter for an unregistered addr ---- */
+    poke32(&c, 0x80000200u, 0xe3a00042u);   /* mov r0, #0x42      */
+    poke32(&c, 0x80000204u, 0xe12fff1eu);   /* bx   lr            */
+    setenv("NK_INTERP_FALLBACK", "1", 1);
+    memset(&c.r, 0, sizeof c.r);
+    c.r[14] = 0x80000210u;                  /* return address     */
+    c.cpsr = 0x400000d3u;
+    nk_call(&c, 0x80000200u);
+    CHECK(c.r[0] == 0x42 && c.r[15] == 0x80000210u,
+          "nk_call falls back to the interpreter");
+
+    nk_mem_free(&c);
+    if (fails) { printf("%d test(s) failed\n", fails); return 1; }
+    printf("interpreter self-test OK\n");
+    return 0;
+}

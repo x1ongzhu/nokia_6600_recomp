@@ -1,0 +1,34 @@
+{
+  "sources": [
+    {
+      "name": "eka2l1",
+      "repository": "EKA2L1/EKA2L1",
+      "revision": "a6d67d8d40f0664db39842dcffdf568f3aaec13a",
+      "sha256": "dbb30066778f3ef503b083de6140960cdea59a2859d0f71c4fed8471e70a1234"
+    },
+    {
+      "name": "symbian-kernelhwsrv",
+      "repository": "SymbianSource/oss.FCL.sf.os.kernelhwsrv",
+      "revision": "0c3208650587ac0230aed8a74e9bddb5288023eb",
+      "sha256": "42d1d80a3eb32c6b2ec0019ad28f704d8f4176ec157a8e87d1bac1f593fc1304"
+    },
+    {
+      "name": "symbian-buildtools",
+      "repository": "SymbianSource/oss.FCL.sf.os.buildtools",
+      "revision": "7b35cd328d3a5e8e0bc177d0169fd409c3273193",
+      "sha256": "4b41ffe6ebc7071808b9f0b8ce65f4f3083fb7803670dbc88fc242915bc2919d"
+    },
+    {
+      "name": "ngagerecomp",
+      "repository": "sp00nznet/ngagerecomp",
+      "revision": "2d72acd88c75659d6a7da8bb5e4cc47e8f608250",
+      "sha256": "0f48f8a8d18edfcdc38532f9e54eb115baaa56c861a35c1acb807bf9e1f0a969"
+    },
+    {
+      "name": "dct4crypt",
+      "repository": "g3gg0/DCT4Crypt",
+      "revision": "0c22856d8cb503b7d03cbe96d87522d38e66e180",
+      "sha256": "29a8d2b2b77a7ef2c202b0382e4952e2c94e1681981464ffcbe095e172e55aa7"
+    }
+  ]
+}

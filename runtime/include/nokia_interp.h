@@ -1,0 +1,193 @@
+/*
+ * nokia-recomp — minimal ARMv4T interpreter (ARM + Thumb).
+ *
+ * P0-3 of the bring-up plan.  The interpreter is the "truth" engine while the
+ * static lifter only covers the functions we have discovered: it executes
+ * unlifted thunks, indirect calls and mixed ARM/Thumb code, and it is the
+ * execution engine for the boot trace.
+ *
+ * It is also mode-aware.  The 6600 kernel image stores Thumb code that calls
+ * ARM code with a plain Thumb BL (the ROM builder normally inserts interworking
+ * veneers), so on a failed decode we can optionally infer the target mode and
+ * keep running.  `infer_calls` additionally fixes up interworking call sites:
+ * a Thumb BL into a 4-byte-aligned ARM prologue switches to ARM (snapping back
+ * over the veneer that the ROM linker would have inserted).  Both are bring-up
+ * aids, logged loudly, not shipping features.
+ *
+ * Memory goes through the same sparse page map / MMIO bus as the lifted C.
+ */
+#ifndef NOKIA_INTERP_H
+#define NOKIA_INTERP_H
+
+#include "nokia_cpu.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define NK_CPSR_T       0x00000020u
+#define NK_CPSR_MODE    0x0000001fu
+#define NK_MODE_USR     0x10u
+#define NK_MODE_FIQ     0x11u
+#define NK_MODE_IRQ     0x12u
+#define NK_MODE_SVC     0x13u
+#define NK_MODE_ABT     0x17u
+#define NK_MODE_UND     0x1bu
+#define NK_MODE_SYS     0x1fu
+
+enum {
+    NK_STOP_BUDGET = 0,
+    NK_STOP_UNDEFINED,
+    NK_STOP_RETURN,
+    NK_STOP_SWI,
+    NK_STOP_IAT,        /* unbound import: ldr pc,[ip] slot is null */
+    NK_STOP_OUT_OF_IMAGE, /* PC left the mapped ROM/RAM windows */
+    NK_STOP_HOST
+};
+
+typedef struct nk_interp_stats {
+    unsigned long insns;
+    unsigned long arm_insns;
+    unsigned long thumb_insns;
+    unsigned long mode_switches;   /* inferred ARM<->Thumb changes */
+    unsigned long undefined;       /* instructions with no implementation */
+    unsigned long mmio_events;     /* filled in by the boot harness if wanted */
+    unsigned long call_fixups;     /* interworking calls redirected/snapped */
+    unsigned long iat_hits;        /* unbound import calls observed */
+    unsigned long recoveries;      /* skipped calls (bring-up recovery) */
+    uint32_t      stop_pc;
+    int           stop_reason;
+} nk_interp_stats;
+
+/* A recoverable call frame.  The whole caller state is snapshotted at every
+ * BL/BLX so that a fault inside a callee that cannot run (truncated packed
+ * text, missing veneer, unimplemented import) can be rolled back and the call
+ * treated as "returned 0".  This is a bring-up aid, not part of the CPU model;
+ * it lets a boot trace keep walking the caller and discover the next frontier
+ * instead of stopping at the first broken callee. */
+typedef struct nk_recover_frame {
+    uint32_t r[15];        /* r0..r14 at the call site */
+    uint32_t cpsr;
+    uint32_t ret_pc;       /* address after the BL/BLX */
+    uint32_t call_pc;      /* address of the BL/BLX itself */
+    uint32_t target;       /* raw encoded callee target */
+    uint8_t  ret_thumb;    /* caller mode */
+    int      calls_n;      /* shadow mode-stack depth before the call */
+} nk_recover_frame;
+
+#define NK_CALLMAP_MAX 512
+#define NK_CODE_RANGE_MAX 16
+
+/* A guest code range: the interpreter will only repair a call target inside
+ * one of these ranges.  The packed image stores its code and data in separate
+ * sections, and a stale BL target can otherwise "snap" onto a plausible
+ * prologue in ROMFS/rodata. */
+typedef struct nk_code_range {
+    uint32_t lo;
+    uint32_t hi;         /* exclusive */
+} nk_code_range;
+
+/* Sentinel targets for tiny host-side helpers (compiler runtime routines whose
+ * packed text is missing or ambiguous).  The interpreter executes them
+ * directly and returns to the caller. */
+#define NK_HLE_DIV 0xFFFFFFFDu
+#define NK_HLE_MOD 0xFFFFFFFEu
+#define NK_HLE_MEMZERO 0xFFFFFFFCu
+#define NK_HLE_ALLOC 0xFFFFFFFBu
+#define NK_HLE_MEMCPY 0xFFFFFFFAu
+
+/* A call-site fixup: the packed image's BL target is stale, but we know the
+ * real callee.  Keyed by the call-site PC (not the target) so the same stale
+ * target can resolve differently at different sites. */
+typedef struct nk_callmap_entry {
+    uint32_t call_pc;
+    uint32_t target;
+    uint8_t  thumb;
+} nk_callmap_entry;
+
+typedef struct nk_interp {
+    long     budget;        /* instructions to execute; <=0 means 10,000,000 */
+    long     trace_limit;   /* trace this many instructions; 0 = off */
+    int      trace;         /* print each executed instruction */
+    int      infer_mode;    /* try the other instruction set on a bad decode */
+    int      infer_calls;   /* fix Thumb/ARM mode at BL/BLX call sites */
+    /* How to repair an unlinked/interworking call target:
+     *   0 = snap back to the nearest prologue (default)
+     *   1 = execute the target as ARM (round a 2-mod-4 target down)
+     *   2 = snap forward to the next prologue
+     *   3 = snap back, then forward, then ARM-at-target
+     */
+    int      call_policy;
+    /* How far back to look for the callee's prologue.  The interesting bias is
+     * mostly on Thumb->ARM calls (the ROM's missing interworking veneers),
+     * while ARM->ARM calls include legitimate shared basic blocks whose
+     * nearest prologue belongs to a different function.  Keep them separate. */
+    uint32_t snap_window;        /* default for both */
+    uint32_t snap_window_thumb;
+    uint32_t snap_window_arm;
+    int      snap_nofast;   /* ignore a plausible leaf/shared entry at the raw
+                             * target and always snap to the nearest prologue */
+    int      call_fixup_log;/* log the first N call fixups (0 = quiet) */
+    int      iat_fake_return;/* unresolved imports return 0 instead of stopping */
+    int      iat_log;       /* log the first N unbound imports */
+    int      stop_on_swi;   /* stop at the first SWI instead of continuing */
+    /* Bring-up recovery: when a callee faults (undefined instruction, PC
+     * escape), roll back to the most recent BL/BLX and continue as if that
+     * call had returned 0.  Logs the skipped call.  Off by default. */
+    int      recover;
+    int      recover_max;   /* stop after this many skips (default 256) */
+    int      recover_log;   /* log the first N skips (default 16) */
+    uint32_t trace_from;    /* only trace PCs >= this (0 = all) */
+    uint32_t return_pc;     /* stop when PC reaches this address (0 = never) */
+    uint8_t  return_thumb;
+
+    nk_interp_stats st;
+
+    /* Shadow call stack: BL/BLX pushes the return address + caller mode so a
+     * return can restore the mode even though ARMv4T's LR carries no T bit. */
+    struct { uint32_t lr; uint8_t thumb; } calls[64];
+    int calls_n;
+
+    nk_recover_frame rec[64];
+    int rec_n;
+
+    nk_callmap_entry callmap[NK_CALLMAP_MAX];
+    int callmap_n;
+
+    /* Executable ranges.  A call target outside every range is a data address
+     * and must never be accepted as a callee. */
+    nk_code_range code[NK_CODE_RANGE_MAX];
+    int code_n;
+
+    /* Bump heap used by NK_HLE_ALLOC (bring-up only). */
+    uint32_t hle_heap;
+    uint32_t hle_heap_end;
+
+    uint32_t last[16];
+    int last_n;
+} nk_interp_t;
+
+void        nk_interp_init(nk_interp_t* ip);
+int         nk_interp_run(nk_cpu_t* c, nk_interp_t* ip);
+int         nk_interp_call(nk_cpu_t* c, uint32_t target);
+/* Add a call-site fixup (used by the boot harness to load config/callmap-*.txt). */
+int         nk_callmap_add(nk_interp_t* ip, uint32_t call_pc, uint32_t target,
+                           int thumb);
+/* Declare an executable address range.  Call repair will not leave it. */
+int         nk_code_range_add(nk_interp_t* ip, uint32_t lo, uint32_t hi);
+const char* nk_interp_reason(const nk_interp_t* ip);
+const char* nk_interp_stop_name(int reason);
+
+/* Copy a host buffer into guest memory through the page map / MMIO bus. */
+void nk_poke(nk_cpu_t* c, uint32_t addr, const void* src, uint32_t len);
+
+/* Bring-up linker aid: if `target` is not an ARM function prologue but a
+ * prologue exists a few bytes before it (the missing interworking veneer),
+ * return that prologue; otherwise return `target`.  Thumb (odd) targets are
+ * returned unchanged. */
+uint32_t nk_snap_entry(nk_cpu_t* c, uint32_t target);
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* NOKIA_INTERP_H */

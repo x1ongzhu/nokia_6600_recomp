@@ -49,3 +49,6 @@ Thumbs.db
 
 # Local agent configuration (machine-specific MCP/editor settings)
 opencode.json
+
+# Offline third-party research material (sources/licenses stay local).
+/references/

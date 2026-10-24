@@ -1,0 +1,30 @@
+# Call-site fixups for the 6600 bring-up.
+#
+# Format: <call_pc> <target> <A|T>
+#   target may be a code address, or one of the HLE sentinels:
+#     0xfffffffd  host-side unsigned division  (r0 = r0 / r1)
+#     0xfffffffe  host-side unsigned remainder (r0 = r0 % r1)
+#
+# The packed flash image's BL targets are stale: the ROM build's code layout
+# differs from the bytes stored in each image record, so a target can land in
+# an unrelated (or truncated) routine.  A callmap entry pins the one call site
+# where the heuristic cannot tell which neighbour was meant.
+
+# euser.dll's recursive integer-to-string helper.  The stale targets point into
+# the 64-bit shift helper that follows the real 32-bit divide/remainder pair.
+0x503965fc 0xfffffffd A
+0x50396618 0xfffffffe A
+
+# euser.dll descriptor setup: memset(sp, 0, 0xc) before a TDes8 operation.  The
+# stale target lands in the 64-bit divide loop's tail; the real routine is the
+# compiler's memory-clear helper (isolated by behaviour, not by address).
+0x5039f764 0xfffffffc A
+
+# TDes8 buffer allocation in the descriptor-copy helper: r0 = size, returns a
+# pointer.  The packed target is inside the divide helper; use a bump heap.
+0x5039adaa 0xfffffffb A
+
+# Descriptor copy at the same helper: r0 = dst, r1 = src, r2 = count.  The
+# packed target points into the bit-buffer copy routine two functions later;
+# the caller has just allocated len+4 bytes and wants a flat byte copy.
+0x5039adb8 0xfffffffa A

@@ -31,6 +31,26 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   `--base 0x50310000` when scanning the carved kernel.
 - **`extract_ida.py`** — exact boundaries from headless IDA Pro, then follows
   the BL/BLX call graph.  Launch at `-b0x50000000`.
+- **`romimage.py`** — recover the runtime ROM layout from the packed records.
+  `scan` lists every `TRomImageHeader`, its `.text`/`.data`/`.edata`/dll-ref
+  sections and the header-less rodata block; `build` writes the flat 22 MiB
+  runtime image (`out/6600_runtime.bin`) with the kernel, its two referenced
+  DLLs, the packed ROMFS directory block and the 171 linearly-stored ROMFS
+  files; `calls` classifies every direct ARM `BL` by how far its target is
+  biased into the callee.  `build --patch FILE` applies bring-up text repairs
+  (`<va> <hex bytes>` per line) and records them in the layout JSON;
+  `../tools/build_rom_image.sh` / `../tools/build_bringup_image.sh` and
+  `../tools/test_romimage.sh` wrap the raw and patched builds.
+- **`relayout.py`** — reconstruct the ROM linker's 4-byte alignment padding.
+  It decodes the packed text, finds literal pools from `ldr rd,[pc,#imm]`
+  sites and function starts from `push`/`stmdb` prologues, then walks them in
+  address order and inserts two bytes before any entity whose final address
+  would be 2 mod 4.  `analyze` reports the shift function and the pool
+  alignment, `build`/`verify` write and check a relaid kernel text, and
+  `image` produces the experimental flat runtime image used by
+  `tools/test_relayout.sh`.  The packed bytes are unchanged; only gaps are
+  inserted.  It currently handles the kernel text; moving the following
+  images and the out-of-range call targets is still open.
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

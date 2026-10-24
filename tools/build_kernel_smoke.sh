@@ -26,11 +26,11 @@ mkdir -p out
 "$PY" recompiler/wd2.py kernel 6600_mcu.bin fw/6600_kernel.bin
 "$PY" recompiler/recursive.py fw/6600_kernel.bin out/kernel_mixed.json \
     --base 0x50310000 --entry 0x50310054 --thumb --max-bytes 1024 \
-    --extra-entry 0x5031140C --extra-entry 0x50313084 --extra-entry 0x503133d0
+    --extra-entry 0x5031140C --extra-entry 0x5031308c --extra-entry 0x503133d0
 "$PY" recompiler/lift.py out/kernel_mixed.json --all --out out/kernel_mixed.c
 "$PY" recompiler/gen_register.py out/kernel_mixed.json out/kernel_register.c
 
 clang -std=c11 -Iruntime/include \
     runtime/test/smoke_kernel.c out/kernel_mixed.c out/kernel_register.c \
-    runtime/src/nokia_rt.c -o out/smoke_kernel
+    runtime/src/nokia_rt.c runtime/src/nokia_interp.c -o out/smoke_kernel
 ./out/smoke_kernel

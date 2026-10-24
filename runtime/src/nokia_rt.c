@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nokia_rt.h"
+#include "nokia_interp.h"
 
 /* ------------------------------------------------------------------ */
 /* Guest memory                                                        */
@@ -97,22 +98,43 @@ void nk_mem_free(nk_cpu_t* c) {
 /* MMIO bus                                                            */
 /* ------------------------------------------------------------------ */
 
+/* MMIO starts as a logging bus.  The boot trace can produce tens of thousands
+ * of accesses to unmapped scratch addresses, so cap the log (NK_MMIO_N, default
+ * 400) and print a summary when the cap is hit. */
+static unsigned long g_mmio_limit = 400, g_mmio_reads, g_mmio_writes;
+static int g_mmio_env = -1;
+
+static void mmio_init(void) {
+    if (g_mmio_env >= 0) return;
+    const char* s = getenv("NK_MMIO_N");
+    g_mmio_limit = s ? strtoul(s, NULL, 0) : 400;
+    g_mmio_env = 1;
+}
+
+static int mmio_log(unsigned long n) {
+    if (g_mmio_limit == 0) return 0;
+    if (n < g_mmio_limit) return 1;
+    if (n == g_mmio_limit) fprintf(stderr, "[mmio] ... further accesses suppressed\n");
+    return 0;
+}
+
 static uint32_t mmio_read(nk_cpu_t* c, uint32_t a, unsigned size) {
-    static uint32_t last[4] = {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
-    static unsigned n = 0;
     (void)c;
-    (void)size;
-    if (n < 4 || last[0] != a) {
-        fprintf(stderr, "[mmio] read  %#010x (%u)\n", a, size);
-        if (n < 4) last[n++] = a;
-    }
+    mmio_init();
+    unsigned long n = g_mmio_reads++;
+    if (mmio_log(n)) fprintf(stderr, "[mmio] read  %#010x (%u)\n", a, size);
     return 0;
 }
 
 static void mmio_write(nk_cpu_t* c, uint32_t a, uint32_t v, unsigned size) {
     (void)c;
-    fprintf(stderr, "[mmio] write %#010x = %#x (%u)\n", a, v, size);
+    mmio_init();
+    unsigned long n = g_mmio_writes++;
+    if (mmio_log(n)) fprintf(stderr, "[mmio] write %#010x = %#x (%u)\n", a, v, size);
 }
+
+unsigned long nk_mmio_reads(void)  { return g_mmio_reads; }
+unsigned long nk_mmio_writes(void) { return g_mmio_writes; }
 
 uint32_t nk_read_slow(nk_cpu_t* c, uint32_t a, unsigned size) {
     /* Whole access in one unmapped page: let the bus answer as a unit. */
@@ -178,13 +200,17 @@ static nk_fn lookup(uint32_t addr) {
 }
 
 /* Bring-up aids (env-controlled): NK_TRACE logs resolved calls; NK_MAX_CALLS caps
- * total dispatches so a mislifted loop can't spin forever. */
+ * total dispatches so a mislifted loop can't spin forever; NK_INTERP_FALLBACK=1
+ * runs a callee we have not lifted in the ARMv4T interpreter instead of just
+ * reporting it. */
 static int  g_trace = -1;
+static int  g_interp = -1;
 static long g_calls = 0, g_max = 0;
 
 void nk_call(nk_cpu_t* c, uint32_t guest_addr) {
     if (g_trace < 0) {
         g_trace = getenv("NK_TRACE") ? 1 : 0;
+        g_interp = getenv("NK_INTERP_FALLBACK") ? 1 : 0;
         const char* m = getenv("NK_MAX_CALLS");
         g_max = m ? atol(m) : 0;
     }
@@ -197,6 +223,13 @@ void nk_call(nk_cpu_t* c, uint32_t guest_addr) {
     if (fn) {
         if (g_trace) fprintf(stderr, "[nk_call] -> %#010x\n", a);
         fn(c);
+        return;
+    }
+    if (g_interp) {
+        if (g_trace) fprintf(stderr, "[nk_call] interp -> %#010x\n", a);
+        if (!nk_interp_call(c, guest_addr))
+            fprintf(stderr, "[nk_call] interpreter stopped at %#010x before "
+                    "returning to %#010x\n", c->r[15], c->r[14]);
         return;
     }
     fprintf(stderr, "[nk_call] no function at %#010x (lr=%#010x)\n", guest_addr, c->r[14]);

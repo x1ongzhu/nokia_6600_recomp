@@ -38,15 +38,17 @@ void     nk_write_slow(nk_cpu_t* c, uint32_t a, uint32_t v, unsigned size);
 static inline uint32_t nk_r32(nk_cpu_t* c, uint32_t a) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {
         const uint8_t* p = nk_page_ptr(c, a);
-        if (p) return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                      ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        if (p) { p += a & NK_PAGE_MASK;
+                 return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
     }
     return nk_read_slow(c, a, 4);
 }
 static inline uint16_t nk_r16(nk_cpu_t* c, uint32_t a) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 2) {
         const uint8_t* p = nk_page_ptr(c, a);
-        if (p) return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+        if (p) { p += a & NK_PAGE_MASK;
+                 return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8)); }
     }
     return (uint16_t)nk_read_slow(c, a, 2);
 }
@@ -57,7 +59,8 @@ static inline uint8_t nk_r8(nk_cpu_t* c, uint32_t a) {
 static inline void nk_w32(nk_cpu_t* c, uint32_t a, uint32_t v) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {
         uint8_t* p = nk_page_ptr(c, a);
-        if (p) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8);
+        if (p) { p += a & NK_PAGE_MASK;
+                 p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8);
                  p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); return; }
     }
     nk_write_slow(c, a, v, 4);
@@ -65,7 +68,8 @@ static inline void nk_w32(nk_cpu_t* c, uint32_t a, uint32_t v) {
 static inline void nk_w16(nk_cpu_t* c, uint32_t a, uint16_t v) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 2) {
         uint8_t* p = nk_page_ptr(c, a);
-        if (p) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); return; }
+        if (p) { p += a & NK_PAGE_MASK;
+                 p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); return; }
     }
     nk_write_slow(c, a, v, 2);
 }
@@ -122,6 +126,10 @@ void nk_register(uint32_t guest_addr, nk_fn fn);   /* populate the table at star
 void nk_call(nk_cpu_t* c, uint32_t guest_addr);    /* bl / indirect / tail dispatch */
 void nk_unimplemented(nk_cpu_t* c, uint32_t guest_addr, const char* what);
 void nk_game_register(void);                       /* register all lifted funcs (generated) */
+
+/* Bus counters (nokia_rt.c): useful for the boot trace summary. */
+unsigned long nk_mmio_reads(void);
+unsigned long nk_mmio_writes(void);
 
 #ifdef __cplusplus
 }
