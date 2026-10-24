@@ -15,8 +15,8 @@
 | Kernel | `fw/6600_kernel.bin`（166,592 / `0x28ac0` 字节 text，链接地址 `0x50310000`，入口 `0x50310054`） |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`、pre-MMU 物理 RAM `0x00000000`（round 6）、high vectors `0xffff0000`、MMIO bus |
-| 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**和少量 HLE 编译器运行时 |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`、pre-MMU 物理 RAM `0x00000000`（round 6）、high vectors `0xffff0000`、MMIO bus；扁平镜像现在放置 **722 个 image**（1,580 个 section，无重叠） |
+| 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）和少量 HLE 编译器运行时 |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
 
 > 旧的 103 MB `6600_mcu.bin` 没有 WD2 头、EKA1 向量表或 E32Image UID，
@@ -49,6 +49,9 @@
 | M13 | **崩溃恢复 + 调用点修复表 + 缺失函数尾部修复** | 解释器在每个 BL/BLX 保存完整 caller 状态；`NK_RECOVER=1` 在 callee 故障（未定义指令 / PC 越界）时回滚并把调用当作"返回 0"；`NK_CALLMAP` 可按调用点把 stale target 固定到真实 callee，并提供 `div/mod/memzero/bump-alloc` HLE；`config/patches-6600.txt` 补回 `0x5039adcc` 缺失的 `pop {r4,r7,pc}`。陪测：`tools/test_boot_recover.sh` |
 | M14 | **Thumb 解码 bug 修正 + 代码范围约束 + 重新定义 frontier** | 修正 Thumb format-2（00011）bit10 立即数/寄存器选择反了的问题；新增 `Thumb add/sub immediate/register` 回归测试。解释器新增**代码范围**：只允许把调用修复到已登记 text 范围，范围外的直接调用在 `NK_RECOVER` 下按“返回 0”跳过，不再执行 ROMFS/rodata。恢复 `0x5039adb8` 的 descriptor memcpy HLE。kernel entry 现在 **197 条指令正常返回**（mask-ROM sentinel），4 次跳过、无 undefined；旧的 2M/20M 结果是 bug 假象 |
 | M15 | **literal pool 重排（第 6 轮）**：`recompiler/relayout.py` 真正恢复 ROM linker 的 4 字节对齐填充 | 解码函数 → 收集 `ldr rd,[pc,#imm]` → 反查 terminator 后的 literal pool；把 **pool + 函数起点**按 packed 顺序对齐，凡最终地址是 2 mod 4 的实体前插入 2 字节。验证：entry pool `0x5031008e -> 0x50310090`，`ldr` 读到 `0x00046564`；helper `0x50312100` 的 pool `0x5031213e -> 0x50312140`；787/787 个 pool 重排后 4 字节对齐。kernel text 插入 **44 处 / 0x58 字节**。实验镜像 `out/6600_runtime_relaid.bin`（relaid text + 内核 .data 移到 `0x50400000`）boot **289 条指令**（带 callmap 315）而不是 197，并到达 UPP MMIO（`0x58120a04`、`0x58120110`、`0x58120308`、`0x59e00040`）。`tools/test_relayout.sh` 是验收脚本 |
+| M16 | **完整 image map + ROMFS 目录树（第 7 轮）**：修正 2 字节对齐扫描、放置全部 image、定位启动模块表 | `recompiler/romimage.py` 的 header 扫描从 4 字节步进改为 **2 字节**（`TRomImageHeader` 可以位于 2 mod 4，例如 `MmfAudioController.dll` 的 header 在 file `0x7271ca`），并加入 record plausibility 过滤（declared sections 必须落在 next header 之前且 rodata 间隙合理）。结果：**722 个 image**（781 个候选，59 个误报），text 区间两两不重叠，覆盖 `0x5030ff9c..0x515978dc`；`build` 默认放置全部 722 个 image（1,580 个 section，**无重叠**），而不是仅 3 个 reachable。ROMFS 目录树按内容定位：root file `0x32639c`、`\System` `0x325aa4`、`\System\Libs` `0x3162bc`（171 项）、`\System\Programs` `0x318170`（236 项）。`names` 命令输出启动模块表：`ekern.exe`（kernel，uid3 `0x100058e8`）、`ecust.dll`、`ecomm.ldd`、`EStart.exe`、`EFile.exe`、`EFSrv.dll` 等；`\System\Libs` 有 73/171、`\System\Programs` 有 193/236 项映射到 packed image record。同时修正：ROMFS **数据文件并不在** `addr - 0x50000000`，旧 build 往 17 MB 扁平镜像里塞的是无关代码；数据文件按 packed FS 顺序存放（0xff 填充），现在默认不再从线性地址复制。验收：`tools/test_romimage.sh` |
+| M17 | **第 8 轮：call ring / spin watchdog / PC 空间守卫；重新确认 entry frontier** | 解释器新增 `NK_WATCH`（命中 PC 时打印寄存器 + 最近 64 次 BL/BLX 的调用环）、`NK_SPIN`/`NK_SPIN_MAX`（同一 PC 被访问 N 次即视为死循环，走 recovery 回滚）、`NK_CODE_ONLY`（PC 在 RAM / ROM / low alias / high vectors 之外时视为坏返回）、`NK_ENTRY`（覆盖启动地址）。用它们重新核对：faithful image（无 patch）的 2,000,000 条 trace 是 **0x5039adcc 缺失 `pop` 造成的垃圾路径**；bringup image 仍然 **197 条返回**。kernel entry 的第三个调用（snap 到 `0x50313518`）真实写入 UPP `0x5815053a/0x5815053c/0x5815056a/0x58150200/0x58150508/0x5815004a`，第五个调用访问 `0x58120308`/`0x59e00040`。从 ROM 向量 `0x50000000` 启动可执行 **16,396 条 ARM 指令**、打开 MMU/cache（CP15 c1）、写 `0x580047e0`/`0x580047dc`、安装 high vectors，最后跳到 0 —— 这是异常向量分发代码，不是 reset 路径。修正 `wd2.py`/`romimage.py` 的 UID1 常量：`0x1000007a` 是 EXE（kernel），`0x10000079` 是 DLL（`e32uid.h`）。 |
+| M18 | **第 9 轮：export 表作为 layout oracle；packed text 不是 linked text** | 新增 `recompiler/layout.py` 与 `tools/test_layout.sh`。确认 `TRomImageHeader.iExportDir` 就是**按 ordinal 索引的、已 fixed-up 的函数地址数组**（不是名字表；Thumb 函数带 bit 0）；用 5 个 export 的小 DLL `0x101f6e00` 做正对照：5/5 都是 `push {..,lr}` 起点。**关键反证**：kernel 的 478 个 export 全部在 text 内且 4 字节对齐，但只有 82 个（17.2%）落在 stored text 的函数起点上，而随机 4 字节对齐地址的 baseline 就有 13.1%（1.31×）；DLL `0x100039e5` 是 258/1788 = 14.4%，baseline 5.9%（2.44×）。应用当前 relayout（44 pads / 0x58）后 kernel 仍只有 58/478；常数 shift 最好 0xb0 也只有 93/478；线性 drift 也没有改善。packed text 的 1420/1430 个 ARM prologue 都 4 字节对齐、759/787 个 pool 4 字节对齐，所以“只补 2 字节 padding”不可能解释这个差距。结论：**stored text 的 function layout 与 linked layout 不同（不只是对齐）**；`relayout` 只是局部修复（pool/入口验证），不能恢复跨函数调用/export 语义。 |
 
 ### 可复现命令
 
@@ -98,6 +101,12 @@ NK_CALLMAP=config/callmap-6600.txt \
 .venv/bin/python recompiler/relayout.py image 6600_mcu.bin \
     out/6600_runtime.bin out/6600_runtime_relaid.bin
 tools/test_relayout.sh
+
+# round 9: export-table / layout audit (packed vs linked)
+.venv/bin/python recompiler/layout.py census 6600_mcu.bin --json out/layout_census.json
+.venv/bin/python recompiler/layout.py pools 6600_mcu.bin
+.venv/bin/python recompiler/layout.py verify 6600_mcu.bin
+tools/test_layout.sh
 ```
 
 ---
@@ -121,6 +130,12 @@ tools/test_relayout.sh
 | `0x50310000` | kernel 代码链接地址 |
 | `0x50310054` | kernel 入口（Thumb；`nop; push {r4,r7,lr}`） |
 | `0x5030ff9c` / `0x34f3e4` | 扁平 image 里 kernel header 的位置 / packed 文件里 header 之后那个 header 未描述的 rodata 块（0x135c） |
+| `0x32639c` | packed **root directory**（2 项：`\System`、`\Nokia`），运行时 VA `0x5030fa78` |
+| `0x325aa4` | packed **`\System` directory**（23 项），运行时 VA `0x5030f180` |
+| `0x3162bc` | packed **`\System\Libs` directory**（171 项），运行时 VA `0x50301ec0` |
+| `0x318170` | packed **`\System\Programs` directory**（236 项），运行时 VA `0x50307964`；`ekern.exe` 的 ROMFS entry 指到 `0x5030ff9c` |
+| `0x5030ff9c` | `ekern.exe` / kernel `TRomImageHeader` 的运行时地址（code `0x50310000`，size `0x2974c`） |
+| `0x50339750` | `ecust.dll` 的 header（code `0x503397b4`）——kernel 的 dllref 表只引用 `0x5037c614` / `0x5037d154` 两个 DLL，但启动目录还列出 `ecomm.ldd`、`EStart.exe`、`EFile.exe` 等模块 |
 | `0x50314c0c` | 真正的 ARM IRQ-lock helper（`push {r0,r1}; mrs r1,apsr; ...`） |
 | `0x50314c16` | Thumb BL 编码目标（helper + 0xA，缺少 veneer） |
 | `0x50312186` | 指向 `0x50314c16` 的 Thumb BL |
@@ -317,17 +332,23 @@ tools/test_relayout.sh
 - 23.3 MB 的 `6600_mcu.bin` 是 **section database**，不是 `rom_base` 起点的
   线性镜像：每个 image 是 `[TRomImageHeader][.text][rodata][.data][.edata]
   [TDllRefTable]`，header 和 code 的 file offset 与 runtime address 无关。
-- **已确认的 runtime 布局**（`recompiler/romimage.py`）：
+- **第 7 轮修正后的 runtime 布局**（`recompiler/romimage.py`）：
   - `0x50000000..0x50010000`：boot / vectors，文件前 64 KiB，线性；
-  - `0x50300000..0x50310000`：ROMFS root list + 所有目录，来自文件
-    `0x3162b0..0x3262b0` 的 64 KiB packed 块（root list 的存储值就是
-    `0x50300000`；`+0x162b0` 是 **file offset bias**，不是 VA）；
+  - `0x50300000..0x5030ff9c`：ROMFS 目录区。packed 目录块从文件 `0x3162b0`
+    开始（root list 的存储值就是 `0x50300000`）；目录本身按内容定位：
+    root file `0x32639c`、`\System` `0x325aa4`、`\System\Libs` `0x3162bc`
+    （171 项）、`\System\Programs` `0x318170`（236 项）；
   - `0x50310000`：kernel text；`0x50338ac0` data；`0x50338fc0` export dir；
     `0x50339738` dll-ref；kernel 的 `TRomImageHeader` 在扁平 image 中位于
     `0x5030ff9c`；
-  - `0x503397b4..0x5042f170`：kernel 可达的 DLL（实际只有两个）；
-  - `0x5043fc90..0x51600000`：171 个 ROMFS 文件，**严格线性**
-    （`file = va - 0x50000000`，无重叠，全部在文件内）。
+  - `0x503397b4..0x515978dc`：**722 个 image 的 text**，两两不重叠
+    （含 kernel 的 dllref、启动 DLL、应用和资源 DLL）；`build` 默认把
+    header+text+data+edata+dllref 全部放到各自的 runtime 地址，共
+    **1,580 个 section，无重叠**；
+  - `0x5043fc90..0x515ed6e0`：ROMFS **数据文件**的 runtime 地址范围。
+    这些地址**不是** packed 文件偏移：文件实际按 packed FS 顺序存放
+    （0xff 填充，目录间 bias 不同），所以旧版 `file = va - ROM_BASE` 的
+    线性复制是错的，现已默认关闭（`--romfs-linear` 仅供实验）。
 - `rom_size = 0x1600000`（22.0 MB），file size = `0x1634f5c`（22.3 MB）；
   文件末尾 `0x1600000..0x1634f5c` 是 0x34f5c 字节的 trailer。
 - **kernel 记录的 section 布局**：
@@ -338,25 +359,90 @@ tools/test_relayout.sh
   - export dir：file `0x350c40`，`0x778`（478 项）→ `0x50338fc0`
   - dll-ref：file `0x3513b8`，`0x18` → `0x50339738`
   - bss：`0x1c58` → RAM `0x80000500`
-- 三个可达 image 都无重叠地装入 `out/6600_runtime.bin`；`boot_kernel
-  --rom-image` 直接映射并复现同一个 364 条 frontier。
+- 第 7 轮：packed header 扫描从 4 字节改为 **2 字节**（header 可在 2 mod 4），
+  722 个 image 全部装入扁平 image；boot harness 注册 kernel + dllref 的
+  code range（`NK_RANGE_ALL=1` 接受全部 722 个）。faithful image 仍是
+  364 条 frontier（不带 recovery）；relaid image 仍是 289 条。
 - 仍缺：
   1. header 未描述的 **rodata/debug 块**：kernel `0x135c`，DLL2 `0x19dc`。
      它们没有被任何 text literal 引用，runtime 地址也没有空间；当前假设是
      ROM build 会剥离的 debug/rodata，尚未放入扁平 image。
   2. `0x10000..0x2a0000` 的高熵区还没有归属（可能是 PPM/fonts/预解包数据），
      当前不在扁平 image 中。
-  3. ROMFS 目录项的 `iAddress` 字段（0x5030fa78 等）与 pack 偏移不一致，
-     所以扁平 image 复制目录块（0xff9c 字节，止于 kernel header）而不是信任
-     该字段；文件项本身是准确的。
-  4. **packed text 的对齐填充缺失**（第 5 轮新证据）：至少 entry 的 literal
-     pool 早了 2 字节。当前 `romimage.py build` 只是把 packed 字节原样复制
-     到目标地址，没有重建 ROM linker 的对齐；因此 entry 的后半段 literal /
-     部分 BL 目标仍不可用。relayout/function map 是 B3 的新阻塞。
+  3. ROMFS **数据文件**的 packed 顺序尚未重建（B3g）；目录树本身已经可读。
+  4. **packed text 与 export table 的布局不一致**（第 7 轮新证据）：
+     478 个 kernel export 中只有 17 个落在检测到的 prologue 上，其余回退
+     距离在 0,4,8,...,44 上近似均匀分布。这不是 padding 能解释的；packed
+     text 需要 function order / symbol 级恢复（B1g），relayout 只是部分修复。
 
 ### B4. 设备模型（P2）
 - 还没有真正到达 UPP display/timer/keypad 的初始化；当前 MMIO bus 只打印访问。
 - 需要先从 kernel 的第一次 MMIO 访问建立设备地址表，再逐个实现。
+
+### B5. packed text / export table 不同布局（第 7 轮证据，第 9 轮定量确认）
+- kernel 的 export dir 有 478 个 4 字节对齐、全部落在 text 内的地址，但只有
+  **17 个**落在「prologue + 前驱 terminator」检测到的函数起点上；其余地址到
+  最近 prologue 的回退距离在 `0, 4, 8, ..., 44` 上近似均匀分布
+  （每个距离 10–18 次）。如果是 padding 累积，回退距离应该随地址单调增长且
+  总量不超过 `0x58`，实测不符合。
+- **第 9 轮定量结果**（`recompiler/layout.py census`，用 export dir 作为 oracle）：
+  - export entry 是**已 fixed-up 的函数地址**：小 DLL `0x101f6e00` 的 5 个
+    entry 全部是 odd（Thumb bit），且 5/5 落在 `push {..,lr}`；`0x10001844`
+    8 个 entry 中 6 个被检测为 prologue/after-terminator（另 2 个是 leaf）。
+  - kernel：`82/478 = 17.2%` 落在 stored text 的函数起点；
+    **随机 4 字节对齐地址的 baseline 是 13.1%**，只有 `1.31×`。
+  - DLL `0x100039e5`：`258/1788 = 14.4%`，baseline 5.9% (`2.44×`)。
+  - 应用当前 relayout 的 variable shift 后：kernel `58/478`，DLL2 不变；
+    最优**常数** shift `0xb0` 也只有 `93/478`；线性/放大 drift 模型没有改善。
+  - packed kernel text 的 **1420/1430** 个 ARM 函数起点 4 字节对齐
+    （0 个 ARM prologue 在 2 mod 4），**759/787** 个 literal pool 4 字节对齐。
+    因此“移除/补回 2 字节 padding”最多只能解释 `0x58` 的 drift，不能解释
+    export 与 BL target 的 mismatch。
+  - 结论：**stored text 的 function layout 与 linked layout 不同**，不是
+    padding 级别的差异。`relayout` 只能修复 pool 对齐和入口 literal，不能恢复
+    跨函数的 real target/export 语义。
+- 直接后果：
+  1. 不要再靠放大 `NK_SNAP_WINDOW` 或继续调 padding 来推进；
+  2. 运行时 call repair/snap 仍是有界 bring-up 手段，但**不是** faithful
+     执行路径；
+  3. 下一步是 **layout 级恢复**：要么从 WD2 容器 / ROM build 描述里拿到
+     linked layout（B6b），要么用 export + call graph + literal 里的 code
+     pointer 解一个全局 drift（B1g2），再重建 flat image。
+- 这也解释了为什么 entry 能跑：entry 在 text 开头（drift=0），它的前几个
+  callee 距离很近，局部 drift 仍然很小，snap 后可以执行；越往后 drift
+  越大，export/call target 就越不可信。
+
+
+### B6. kernel entry 的真实 continuation（第 8 轮）
+
+第 8 轮加入 `NK_WATCH` / `NK_SPIN` / `NK_CODE_ONLY` / `NK_ENTRY` 后重新核对
+entry：
+
+1. **faithful image 的 2,000,000 条不是进展**。没有 `config/patches-6600.txt`
+   时，Thumb helper `0x5039ad9e` 在 `0x5039adcc` 没有 `pop`，会一路执行到
+   ARM 代码；`NK_RECOVER` 回滚后把 trace 带进 `euser.dll`，最终在
+   `0x50389330` 的字符串扫描循环里打转。**bringup image（同一布局 + patch）
+   仍然 197 条指令、4 次跳过返回 `0xdead0000`**。以后比较 trace 必须同时
+   标注 faithful / bringup。
+2. **entry 的第三个调用是真的设备初始化**：`0x50313522` snap 到
+   `0x50313518`，以 16-bit 写 UPP `0x5815053a`、`0x5815053c`、
+   `0x5815056a`、`0x58150200`、`0x58150508`、`0x5815004a`；第五个调用访问
+   `0x58120308` / `0x59e00040`。这是第一条确认的 UPP init 路径。
+3. **entry 的第二个调用需要 kernel 对象状态**：它进入
+   `0x503364b0`，该函数从栈参数取 vtable 并调用 `+0x14`；r0=0 时 vtable
+   为空，被 recovery 跳过。旧日志把它标成 “unbound IAT” 是
+   `ldr pc,[r3,#0x14]` 的误判；IAT 检测已收紧为 `ldr pc,[ip]` 且 offset 0，
+   现在恢复日志正确显示 “pc left the image”。
+4. **ROM 向量表不是 reset 路径**：`NK_ENTRY=0x50000000` 能执行 16,396 条
+   ARM 指令、通过 CP15 c1 打开 MMU/cache、写 `0x580047e0`/`0x580047dc`、
+   安装 high vectors，然后跳到 0。它是异常分发代码；mask ROM 仍应从
+   primary image header 进入 `0x50310054`。
+5. **两个低于 code base 的调用仍是主阻塞**：`0x5030fbc6`、`0x5030807a`
+   不能用 +0x10000 简单重定位（落点都是函数中部）；下一步试 WD2
+   “ALGORITHM” bytecode、function-order 约束求解，或从 kernel export /
+   veneer 布局反推。
+6. `wd2.py` / `romimage.py` 的 UID1 常量已修正：`0x1000007a` 是 EXE（kernel），
+   `0x10000079` 是 DLL（`e32uid.h`）。
 
 ---
 
@@ -459,7 +545,14 @@ tools/test_relayout.sh
 - [ ] **P0-2b** `nk_register/nk_call` 记录模式；`lift.py` 识别 `mov lr,pc; bx lr`
 - [ ] **B1/P0-4** 解决 veneer bias：function/veneer map（prologue + terminator + push/pop 平衡）
 - [x] **B3a** 确认 EKA1 头部尺寸（0x64）/ TRomDir 格式 / packed record 布局
-- [x] **B3b** runtime ROM 组装：`romimage.py build` → `out/6600_runtime.bin`，184 个 section 无重叠，`--rom-image` 可启动
+- [x] **B3b** runtime ROM 组装：`romimage.py build` → `out/6600_runtime.bin`，`--rom-image` 可启动
+- [x] **B3d** 2 字节对齐 header 扫描 + record plausibility：722 个 image，text 区间不重叠；`build` 默认放置全部 image（1,580 section，无重叠），boot harness 注册 kernel + dllref 的 code range（`NK_RANGE_ALL=1` 接受全部）
+- [x] **B3e** ROMFS 目录树定位（root / `\System` / `\System\Libs` / `\System\Programs`）+ `romimage.py names` 启动模块表；`ekern.exe -> uid3 0x100058e8`
+- [x] **B3f** 停止把 ROMFS 数据文件从 `addr - 0x50000000` 线性复制（它们按 packed FS 顺序存放）；`--romfs-linear` 仅保留作实验
+- [ ] **B3g** 重建 ROMFS 数据文件的 packed 顺序（目录 → 文件偏移），并填入扁平镜像
+- [x] **B1g1** `recompiler/layout.py` + `tools/test_layout.sh`：把 export dir 当 layout oracle 做 census（stored-start rate vs random baseline、常数 shift、pool 对齐），确认 packed text 与 linked text 不是同一套 function layout
+- [ ] **B1g2** layout 级恢复：用 export（478 个绝对 anchor）+ call graph + literal 中的 code pointer 解全局单调 drift，重建 linked function 顺序/地址；或者从 WD2 容器 / ROM build 描述中取得 linked layout
+- [ ] **B1g3** 用 B1g2 的结果重新生成 flat image，验收标准：kernel 的 478 个 export 全部落在 relaid 函数起点，BL target 的 exact rate 从 27% 提升到 >90%
 - [x] **P0-3d** 修复 Thumb BL 返回地址 + ARM PC-relative load 并加回归测试
 - [x] **M13a** 解释器崩溃恢复（caller 快照 + 回滚 + 跳过调用），`NK_RECOVER`
 - [x] **M13b** callmap + HLE（div/mod/memzero/alloc），调用点固定
@@ -472,10 +565,19 @@ tools/test_relayout.sh
 - [x] **B1d** packed-text relayout：`recompiler/relayout.py`，pool + 函数起点 4 字节对齐，entry pool 已验证；787/787 pool 对齐，text +0x58
 - [x] **B1d2** 实验镜像 `out/6600_runtime_relaid.bin`：relaid text + 内核 .data 移到 `0x50400000`；boot 289/315 条，到达 UPP MMIO
 - [x] **B1d3** pre-MMU low RAM（`0x00000000` 再映射 3 MiB，`NK_NO_LOW_RAM=1` 可关）
-- [ ] **B1d4** 完整 function map：leaf 函数 + export 反推，补上 `0x5031261c` 仍差的 4 字节（当前 shift 0x14，target 需 0x18）
+- [ ] **B1d4** 完整 function map：leaf 函数 + export 反推。第 9 轮确认：`0x5031261c` 的目标 `0x50312634`/relaid `0x50312636` 在 final layout 里也不可能是这个 ARM 函数的起点（差 2/6 字节），所以这 4 字节不是“再补 padding”能对齐的；call target 本身就是 stale，需要 layout 级恢复（B1g2）
 - [ ] **B1d5** DLL 也重排并重建 flat image（当前实验镜像只重排 kernel）
 - [ ] **B1e** 重新 census / 重新评估 callmap（第 4 轮数据受 Thumb bug 污染；round 6 的 relaid text 需要重新算 callmap 地址）
 - [ ] **B1f** entry 的 `0x5030fbc6` / `0x5030807a` 真实 callee（低于 code base；relaid 后是 `0x5030fbc8` / `0x5030807c`）
+- [x] **M17a** 解释器 call ring + `NK_WATCH`（最近 64 次调用，含 raw/resolved target、模式、r0-r3、sp）
+- [x] **M17b** tight-loop watchdog `NK_SPIN` / `NK_SPIN_MAX`，命中后走 recovery 回滚
+- [x] **M17c** PC 空间守卫 `NK_CODE_ONLY`（ROM / low alias / high vectors 之外视为坏返回）
+- [x] **M17d** 重新核对 faithful vs bringup：2M trace 是缺 `pop` 的垃圾路径；bringup 197 条返回
+- [x] **M17e** `NK_ENTRY` 覆盖启动地址；ROM 向量 `0x50000000` 跑 16,396 条并打开 MMU
+- [x] **M17f** 修正 UID1 常量（`0x1000007a` = EXE，`0x10000079` = DLL）
+- [ ] **B6a** entry 第二个调用的 kernel 对象 / vtable（`[0x80000000]` 全局 + `0x503364b0` 的 `+0x14` slot）
+- [ ] **B6b** 解析 WD2 “ALGORITHM” bytecode，检查它是否描述 final layout / veneer / patch
+- [ ] **B6c** 为 `0x5030fbc6` / `0x5030807a` 找到真实 callee（+0x10000 落点都是函数中部）
 - [ ] **B1c** 从 callmap 的已验证站点反推 function map，减少 HLE/手工修复
 - [ ] **B3c** header 未描述的 rodata/debug 块（kernel 0x135c / DLL2 0x19dc）归属
 - [ ] **P1-1** CP15 / MMU flat mapping + high vectors
@@ -513,6 +615,72 @@ tools/test_relayout.sh
 
 ## 9. 变更记录
 
+- 2026-10-24（本轮 9）：**export 表作为 layout oracle；确认 packed text 不是
+  linked text**。新增 `recompiler/layout.py`（`census` / `pools` / `verify`）
+  和 `tools/test_layout.sh`。确认 `iExportDir` 是**按 ordinal 的函数地址
+  数组**（Thumb 带 bit 0）：小 DLL `0x101f6e00` 的 5/5 个 entry 都落在
+  `push {..,lr}` 上，`0x10001844` 8 个中 6 个（另 2 个是 leaf）也对得上。
+  但 kernel 的 478 个 export 只有 **82 个（17.2%）**落在 stored text 的
+  函数起点，而随机 4 字节对齐地址的 baseline 是 **13.1%**（仅 1.31×）；
+  DLL `0x100039e5` 是 258/1788 = 14.4%，baseline 5.9%（2.44×）。
+  当前 relayout 的 variable shift 下 kernel 仍只有 58/478；最优常数 shift
+  `0xb0` 也只有 93/478；线性 drift 没有改善。packed kernel text 的
+  1420/1430 个 ARM 起点和 759/787 个 pool 都是 4 字节对齐，所以 2 字节
+  padding 最多解释 `0x58` 的 drift，**不能**解释这个差距。结论：stored
+  text 的 function layout 与 linked layout 不同；`relayout` 只能修复 pool
+  和入口 literal，跨函数 target/export 需要 layout 级恢复（B1g2）。
+  同时修正 B1d4 的表述：entry 的 `0x50312634` 目标即使回到 final layout
+  也不是该 ARM 函数的起点（差 2/6 字节），不是“再补 4 字节”的问题。
+  验收：`tools/test_layout.sh` 通过（并把“kernel 比值 < 2×”作为诊断
+  不变量）。
+
+- 2026-10-24（本轮 8）：**call ring / spin watchdog / PC 空间守卫；重新核对
+  entry frontier**。解释器新增 `NK_WATCH`（命中地址时打印寄存器 + 最近
+  64 次 BL/BLX 的调用环，含 raw/resolved target、模式、r0-r3、sp）、
+  `NK_SPIN`/`NK_SPIN_MAX`（同一 PC 访问 N 次即判定 tight loop，走 recovery
+  回滚）、`NK_CODE_ONLY`（PC 在 ROM `0x50000000..0x51000000`、pre-MMU low
+  alias `<3 MiB`、high vectors 之外时视为坏返回）、`NK_ENTRY`（覆盖启动
+  地址）。`boot_kernel` 默认在 ROM 启动路径开启 `NK_CODE_ONLY`。
+  重新核对后确认：faithful image（无 patch）的 **2,000,000 条 trace 是
+  `0x5039adcc` 缺失 `pop` 造成的垃圾路径**（helper 跑进 ARM 代码 →
+  `euser.dll` → `0x50389330` 扫描循环）；bringup image 仍然 **197 条返回**。
+  entry 的第三个调用（`0x50313522` → `0x50313518`）真实写入 UPP
+  `0x5815053a/0x5815053c/0x5815056a/0x58150200/0x58150508/0x5815004a`，
+  第五个调用访问 `0x58120308`/`0x59e00040`。`NK_ENTRY=0x50000000` 启动
+  ROM 向量代码可执行 **16,396 条 ARM 指令**、通过 CP15 c1 打开 MMU/cache、
+  写 `0x580047e0`/`0x580047dc`、安装 high vectors 后跳到 0 —— 这是异常
+  分发代码，不是 reset 路径。entry 的第二个调用进入 `0x503364b0`，从栈
+  参数取 vtable 并调用 `+0x14`，r0=0 时失败；旧日志的 “unbound IAT” 是
+  `ldr pc,[r3,#0x14]` 的误判，检测已收紧为 `ldr pc,[ip]` + offset 0。
+  修正 `wd2.py`/`romimage.py` 的 UID1 常量：
+  `0x1000007a` = EXE（kernel），`0x10000079` = DLL（`e32uid.h`）。
+  验收：`tools/test_interp.sh`、`tools/test_boot_recover.sh`、
+  `tools/test_relayout.sh` 全部通过。
+- 2026-10-24（本轮 7）：**完整 image map + ROMFS 目录树**。
+  `recompiler/romimage.py` 的 `TRomImageHeader` 扫描从 4 字节步进改为
+  **2 字节**——packed record 的 header 可以在 2 mod 4（`MmfAudioController.dll`
+  在 file `0x7271ca`），旧的 4 字节扫描静默丢掉了 40+ 个 image。配合
+  record plausibility（declared sections ≤ next header、rodata 间隙 ≤ 0x2000）
+  得到 **722 个 image**（781 候选 / 59 误报），text 区间两两不重叠，
+  覆盖 `0x5030ff9c..0x515978dc`。`build` 默认放置全部 722 个 image
+  （1,580 个 section，无重叠），不再只放 kernel + 2 个 dllref；
+  `--only-reachable` 保留旧行为。boot harness 的扁平镜像加载器也改为
+  2 字节扫描，默认只把 kernel + 其 dllref 注册为 code range
+  （`NK_RANGE_ALL=1` 接受全部）。
+  ROMFS 目录树按内容定位：root file `0x32639c`（`\System`/`\Nokia`）、
+  `\System` `0x325aa4`、`\System\Libs` `0x3162bc`（171）、
+  `\System\Programs` `0x318170`（236）。新增 `romimage.py names`
+  输出启动模块表：`ekern.exe -> uid3 0x100058e8`（code `0x50310000`）、
+  `ecust.dll`、`ecomm.ldd`、`EStart.exe`、`EFile.exe`、`EFSrv.dll` 等；
+  `\System\Libs` 73/171、`\System\Programs` 193/236 映射到 packed record。
+  同时修正一个真实错误：ROMFS **数据文件并不在** `addr - 0x50000000`，
+  旧 build 往扁平镜像的 17 MB 区域复制了无关代码；数据文件按 packed FS
+  顺序（0xff 填充）存放，现在默认不复制（`--romfs-linear` 实验开关）。
+  新证据（B5）：478 个 kernel export 中只有 17 个落在 prologue 上，回退
+  距离均匀分布 —— packed text 与 export table 不同布局，padding/relayout
+  只是部分修复。faithful image 仍 364 条 frontier，relaid image 仍 289；
+  `tools/test_romimage.sh` 已更新为 722-image / 1580-section / ROMFS 树
+  的验收。
 - 2026-10-24（本轮 6）：**literal pool 重排落地**。新增
   `recompiler/relayout.py`：解码 packed 函数、收集 `ldr rd,[pc,#imm]`、
   反查 terminator 后的 literal pool，把 **pool + 函数起点**按 packed 顺序

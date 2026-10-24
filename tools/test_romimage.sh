@@ -2,10 +2,13 @@
 # test_romimage.sh — regression check for the runtime-ROM assembler.
 #
 # Verifies that:
-#   - the kernel and its two referenced DLLs are recovered from the packed flash
-#   - the record sections are placed without overlaps
-#   - the ROMFS root list + all 171 files are placed at their runtime addresses
-#   - the flat image boots to the same frontier as the packed-record loader
+#   - the flash's packed records are recovered at 2-byte alignment (headers can
+#     sit at 2 mod 4), giving the full image map instead of just the kernel's
+#     direct DLL references
+#   - the ROMFS tree is located (root / \System / \System\Libs / Programs) and
+#     ekern.exe maps to the kernel image
+#   - every placed section is disjoint (the ROMFS overlays are explicit)
+#   - the flat image boots and the kernel's imports are all bound
 #
 # It does not assert *where* the kernel frontier is: that moves as the ROM
 # linker / interworking work progresses.
@@ -46,9 +49,20 @@ check() {
 check "uid3 0x100058e8" "kernel record recovered"
 check "uid3 0x100065a5" "first referenced DLL recovered"
 check "uid3 0x100039e5" "second referenced DLL recovered"
-check "171 entries (171 files)" "ROMFS entries recovered"
-check "files stored linearly" "ROMFS files are linear"
+check "plausible" "2-byte-aligned header scan reported"
+check "ekern.exe -> uid3 0x100058e8" "ekern.exe maps to the kernel record"
+check "root       file" "packed root directory located"
+check "programs   file" "\\System\\Programs directory located"
 check "kernel entry 0x50310054" "kernel entry placed"
+
+# Image placement must cover the whole boot set, not just the reachable three.
+imgs=$(sed -n 's/.*sections from \([0-9][0-9]*\) images.*/\1/p' "$LOG" | head -1)
+if [ -n "$imgs" ] && [ "$imgs" -ge 700 ]; then
+    echo "ok: $imgs packed images placed"
+else
+    echo "FAIL: expected >= 700 placed images (got '$imgs')"
+    fail=1
+fi
 
 # The flat image must be exactly the declared 22 MiB.
 size=$(wc -c <"$IMG" | tr -d ' ')
@@ -59,19 +73,21 @@ else
     fail=1
 fi
 
-# No two placed sections may overlap.
+# No two non-overlay placed sections may overlap.
 "$PY" - "$LAYOUT" <<'EOF' || fail=1
 import json, sys
 d = json.load(open(sys.argv[1]))
-secs = sorted((s["va"], s["va"] + s["size"], s["name"]) for s in d["placed"])
+secs = sorted((s["va"], s["va"] + s["size"], s["name"]) for s in d["placed"]
+              if not s.get("overlay"))
 bad = [(a, b) for a, b in zip(secs, secs[1:]) if b[0] < a[1]]
 if bad:
     print("FAIL: overlapping sections:", bad[:4])
     sys.exit(1)
-print(f"ok: {len(secs)} placed sections do not overlap")
+over = sum(1 for s in d["placed"] if s.get("overlay"))
+print(f"ok: {len(secs)} placed sections do not overlap ({over} ROMFS overlays)")
 EOF
 
-# Boot the flat image and compare the frontier with the packed-record loader.
+# Boot the flat image; the kernel's imports must all bind.
 clang -std=c11 -O2 -Wall -Wextra -Iruntime/include \
     runtime/test/boot_kernel.c runtime/src/nokia_rt.c runtime/src/nokia_interp.c \
     -o out/boot_kernel
@@ -79,7 +95,7 @@ clang -std=c11 -O2 -Wall -Wextra -Iruntime/include \
 NK_BUDGET=200000 NK_MMIO_N=0 NK_CALL_INFER=1 NK_FIXUP_LOG=0 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin --rom-image "$IMG" \
     >out/romimage_boot.log 2>&1 || true
-if grep -q "runtime image uid3 0x100058e8" out/romimage_boot.log; then
+if grep -q "uid3 0x100058e8" out/romimage_boot.log; then
     echo "ok: flat image kernel located"
 else
     echo "FAIL: flat image kernel not located"

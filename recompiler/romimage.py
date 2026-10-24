@@ -29,6 +29,12 @@ describe (the debug/rodata block between .text and .data).
     py romimage.py build 6600_mcu.bin out/6600_runtime.bin
     py romimage.py build 6600_mcu.bin out/6600_runtime.bin --json out/layout.json
     py romimage.py calls 6600_mcu.bin
+    py romimage.py names 6600_mcu.bin            # root / \\System / boot table
+    py romimage.py names 6600_mcu.bin --all      # ... plus \\System\\Libs
+
+Packed records are only 2-byte aligned (the ROM build removed the linker's
+4-byte padding), so the header scan steps by 2.  `build` places every plausible
+image at its runtime address, not just the kernel's direct DLL references.
 """
 from __future__ import annotations
 
@@ -41,8 +47,8 @@ from dataclasses import dataclass, field, asdict
 ROM_BASE = 0x50000000
 ROM_SIZE = 0x01600000
 
-UID_EXE = 0x10000079
-UID_DLL = 0x1000007A
+UID_EXE = 0x1000007A          # KExecutableImageUidValue (e32uid.h)
+UID_DLL = 0x10000079          # KDynamicLibraryUidValue
 UID_KERNEL = 0x100058E8
 
 # The ROMFS root-list pointer in the ROM header is stored 0x162b0 below the
@@ -99,6 +105,7 @@ class Section:
     file_off: int
     size: int
     va: int
+    overlay: bool = False
 
     @property
     def file_end(self):
@@ -146,7 +153,11 @@ class Image:
 
 
 def is_e32_header(rom: bytes, o: int) -> bool:
-    if o < 0 or o + 0x70 > len(rom) or (o & 3):
+    # Packed image records are only 2-byte aligned: the ROM build removes the
+    # linker's 4-byte padding, so a TRomImageHeader can start at 2 mod 4 (for
+    # example /System/Libs/MmfAudioController.dll's header sits at file
+    # 0x7271ca).  Scanning every 4th byte used to drop those images entirely.
+    if o < 0 or o + 0x70 > len(rom) or (o & 1):
         return False
     if u32(rom, o) not in (UID_EXE, UID_DLL):
         return False
@@ -167,7 +178,7 @@ def is_e32_header(rom: bytes, o: int) -> bool:
 
 
 def scan_headers(rom: bytes) -> list[int]:
-    return [o for o in range(0, len(rom) - 0x70, 4) if is_e32_header(rom, o)]
+    return [o for o in range(0, len(rom) - 0x70, 2) if is_e32_header(rom, o)]
 
 
 def find_dll_ref_table(rom: bytes, hdr: int, nxt: int) -> tuple[int, int]:
@@ -267,11 +278,34 @@ def scan_images(rom: bytes) -> list[Image]:
     return out
 
 
+def record_is_plausible(im: Image) -> bool:
+    """Reject 2-byte-scan false positives.
+
+    A packed record is `header + text + [rodata] + data + edata + dllref`, and
+    the next header starts right after it.  The header describes every byte
+    except the header-less rodata/debug block, which is small.  A candidate
+    whose declared sections do not fit before the next header, or leave a huge
+    unexplained gap, is data that happened to look like a header.
+    """
+    if im.errors:
+        return False
+    declared = (0x64 + im.text_size +
+                (im.data_size if im.data_addr else 0) +
+                im.export_count * 4 + im.dllref_size)
+    actual = im.next_hdr_off - im.hdr_off
+    return 0 <= actual - declared <= 0x2000
+
+
+def plausible_images(images: list[Image]) -> list[Image]:
+    return [im for im in images if record_is_plausible(im)]
+
+
 # ---------------------------------------------------------------------------
-# reachability (the only images the kernel actually needs)
+# reachability (the images the kernel references directly)
 # ---------------------------------------------------------------------------
 
 def reachable_images(images: list[Image]) -> list[Image]:
+    images = plausible_images(images)
     by_code = {im.code: im for im in images}
     kernel = next((im for im in images if im.uid3 == UID_KERNEL), None)
     if kernel is None:
@@ -285,6 +319,7 @@ def reachable_images(images: list[Image]) -> list[Image]:
                 seen.add(dep.hdr_off)
                 todo.append(dep)
     return [im for im in images if im.hdr_off in seen]
+
 
 
 # ---------------------------------------------------------------------------
@@ -349,12 +384,12 @@ def read_rom_dir(rom: bytes, off: int) -> tuple[list[RomfsEntry], int]:
 
 
 def parse_romfs(rom: bytes, root_off: int) -> list[RomfsEntry]:
-    """Parse the root list and the root directory.
+    """Parse the first packed directory after the root list.
 
-    The 6600's ROMFS is flat: the root directory is packed immediately after
-    the 12-byte list and contains all 171 entries.  Sub-directories are not
-    present in this ROM (all entries have attr 0x01), so no recursive packed
-    directory search is needed; the parser still handles the general shape.
+    This is the flat view used by `wd2.py list`: on the 6600 the 64 KiB block
+    below the kernel starts with the `\\System\\Libs` directory (DLLs and
+    resources).  The real ROMFS is a tree; see `find_boot_dirs` for the root
+    directory, which is packed separately just below the kernel header.
     """
     count = u32(rom, root_off)
     entries: list[RomfsEntry] = []
@@ -369,6 +404,83 @@ def parse_romfs(rom: bytes, root_off: int) -> list[RomfsEntry]:
         es, _ = read_rom_dir(rom, off)
         entries.extend(es)
     return entries
+
+
+# ---------------------------------------------------------------------------
+# ROMFS directory tree
+#
+# The stored `iAddress` fields are *final-layout* addresses, while the packed
+# bytes were written after the ROM build removed alignment gaps, so a single
+# file-offset bias does not map the whole tree.  What is stable is the packed
+# order: the big directory block below the kernel holds `\System` and its
+# subdirectories, and the root directory is packed on its own, immediately
+# before the kernel header.  We therefore locate directories by content (the
+# set of names they contain) inside the packed block.
+# ---------------------------------------------------------------------------
+
+def find_dir_by_names(rom: bytes, lo: int, hi: int,
+                      required: set[str]) -> tuple[int, list[RomfsEntry]]:
+    """Find the packed TRomDir in [lo, hi) that contains all `required` names."""
+    hi = min(hi, len(rom) - 8)
+    for o in range(max(0, lo), hi, 2):
+        size = u32(rom, o)
+        if size < 0x10:
+            continue
+        es, end = read_rom_dir(rom, o)
+        if not es or end > len(rom):
+            continue
+        names = {e.name.lower() for e in es}
+        # Requiring the first entry to be one of the expected names rejects a
+        # window that starts in the middle of a directory: those parse too,
+        # but their first "entry" is a fragment of an earlier record.
+        if required <= names and es[0].name.lower() in required:
+            return o, es
+    return -1, []
+
+
+@dataclass
+class BootDirs:
+    root_list_off: int
+    root_list_va: int
+    root_off: int
+    root_entries: list[RomfsEntry]
+    system_off: int
+    system_entries: list[RomfsEntry]
+    libs_off: int
+    libs_entries: list[RomfsEntry]
+    programs_off: int
+    programs_entries: list[RomfsEntry]
+
+
+def find_boot_dirs(rom: bytes, root_off: int, root_va: int) -> BootDirs:
+    """Recover the root, \\System, \\System\\Libs and \\System\\Programs dirs.
+
+    The root list sits at `root_off` (file) / `root_va` (runtime).  The root
+    directory itself is packed near the end of the directory block; `\\System`
+    lists Libs/Programs/Apps/...; `\\System\\Libs` holds the shared DLLs and
+    `\\System\\Programs` holds the boot executables (ekern.exe, ecust.dll, ...).
+    """
+    root_dir_off, root_entries = find_dir_by_names(
+        rom, root_off, root_off + 0x30000, {"system", "nokia"})
+    system_off, system_entries = find_dir_by_names(
+        rom, root_off, root_off + 0x30000, {"libs", "programs", "data"})
+    libs_off, libs_entries = find_dir_by_names(
+        rom, root_off, root_off + 0x30000, {"acmclasscontroller.dll",
+                                            "httpclient.dll"})
+    programs_off, programs_entries = find_dir_by_names(
+        rom, root_off, root_off + 0x30000, {"ekern.exe", "ecust.dll"})
+    return BootDirs(root_off, root_va, root_dir_off, root_entries,
+                    system_off, system_entries, libs_off, libs_entries,
+                    programs_off, programs_entries)
+
+
+def image_by_header_address(images: list[Image], va: int) -> Image | None:
+    """Map a ROMFS entry address (which points at the image header) to its image."""
+    for im in images:
+        if im.code - 0x64 == va:
+            return im
+    return None
+
 
 
 # ---------------------------------------------------------------------------
@@ -426,36 +538,50 @@ def snap_exports(rom: bytes, im: Image, edata: bytes) -> tuple[bytes, int]:
 
 def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
                 include_rodata: bool = False,
-                do_snap: bool = True) -> tuple[bytes, list[str], list[Section]]:
-    """Assemble a flat ROM at runtime addresses.  Returns (buf, warnings, placed)."""
+                do_snap: bool = True,
+                romfs_linear: bool = False) -> tuple[bytes, list[str], list[Section]]:
+    """Assemble a flat ROM at runtime addresses.  Returns (buf, warnings, placed).
+
+    `images` is the set to place.  `cmd_build` passes every plausible image
+    (the ROM's full code map), not just the kernel's direct DLL references:
+    the 6600's boot loader and the window server need images that the kernel's
+    TDllRefTable does not name, and their packed records are all present in
+    the flash.  `--only-reachable` passes the old 3-image set instead.
+    """
     buf = bytearray(ROM_SIZE)
     placed: list[Section] = []
     warnings: list[str] = []
 
-    def put(va: int, data: bytes, name: str, file_off: int):
+    def put(va: int, data: bytes, name: str, file_off: int,
+            overlay: bool = False):
         if va < ROM_BASE or va + len(data) > ROM_BASE + ROM_SIZE:
             warnings.append(f"{name}: {va:#x}+{len(data):#x} outside the 22 MiB ROM")
             return
         off = va - ROM_BASE
         old = bytes(buf[off:off + len(data)])
-        if any(old) and old != data:
+        if not overlay and any(old) and old != data:
             warnings.append(f"{name}: overwrites existing data at {va:#x}")
         buf[off:off + len(data)] = data
-        placed.append(Section(name, file_off, len(data), va))
+        placed.append(Section(name, file_off, len(data), va, overlay))
+
 
     # 1. boot area: the first 64 KiB are linear in the file
     boot_len = min(0x10000, len(rom))
     put(ROM_BASE, rom[:boot_len], "boot", 0)
 
-    # 2. every reachable ROM image, at its header addresses.  The 0x64-byte
-    #    TRomImageHeader sits at code-0x64; the ROMFS directory block stops
-    #    exactly there, so the two do not collide.  A later image's header may
-    #    also live in the 4-byte gap after the previous image's export dir.
+    # 2. Every ROM image at its header addresses.  The 0x64-byte
+    #    TRomImageHeader sits at code-0x64; header+text are contiguous in the
+    #    packed record.  data/edata/dllref follow at their own runtime
+    #    addresses.  The plain image placement is disjoint for this ROM (the
+    #    text ranges, data, export dirs and DLL-ref tables do not overlap), so
+    #    a clash here means a bogus header; report it instead of hiding it.
     for im in images:
         tag = f"uid3_{im.uid3:08x}"
-        put(im.code - 0x64, rom[im.hdr_off:im.hdr_off + 0x64],
-            tag + "_hdr", im.hdr_off)
+        hdr_plus_text = rom[im.hdr_off:im.text.file_end]
+        put(im.code - 0x64, hdr_plus_text, tag + "_hdr_text", im.hdr_off)
         for s in im.sections:
+            if s.name == "text":
+                continue
             data = rom[s.file_off:s.file_end]
             if do_snap and s.name == "edata":
                 data, fixed = snap_exports(rom, im, data)
@@ -473,11 +599,14 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
                 f"{tag}: rodata {im.rodata.size:#x} at file {im.rodata.file_off:#x} "
                 f"is not placed (use `scan` to inspect it)")
 
-    # 3. ROMFS directory area.  On the 6600 the packed directories occupy
-    #    exactly the 64 KiB below the kernel: file [root, root+span) maps to
-    #    [root_dir_list, root_dir_list+span).  The individual iAddress fields
-    #    inside the list are stale, so the whole packed area is copied as one
-    #    block instead of trusting them.
+    # 3. ROMFS directory area.  The packed directory block below the kernel is
+    #    stored in packed order; its first bytes map onto the ROM header's
+    #    root_dir_list (0x50300000).  Copy that block, then overlay the two
+    #    directories that live in a separately packed run next to the kernel
+    #    header: the root directory and \System.  Their stored addresses are
+    #    authoritative, and the packed bytes are found by content (see
+    #    find_boot_dirs), because a single file<->VA bias does not cover the
+    #    whole tree.
     hdr = find_rom_header(rom)
     root_off = find_romfs_root(rom, hdr["root_dir_list"])
     kernel = next(im for im in images if im.uid3 == UID_KERNEL)
@@ -492,24 +621,56 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
         else:
             put(hdr["root_dir_list"], rom[root_off:root_off + span],
                 "romfs_dirs", root_off)
-            entries = parse_romfs(rom, root_off)
-            if not entries:
-                warnings.append("romfs: root directory did not parse")
+            if not parse_romfs(rom, root_off):
+                warnings.append("romfs: directory block did not parse")
+            dirs = find_boot_dirs(rom, root_off, hdr["root_dir_list"])
+
+            def place_dir(off: int, va: int, name: str):
+                if off < 0 or not va:
+                    return
+                blob = rom[off:off + 4 + u32(rom, off)]
+                put(va, blob, name, off, overlay=True)
+
+            # The stored addresses are authoritative.  The packed block above
+            # is a compressed copy, so a linear copy puts \System\Libs at
+            # 0x5030000c instead of its real 0x50301ec0; the overlay repairs
+            # the directories the boot path needs.
+            root_va = u32(rom, root_off + 8) if u32(rom, root_off) == 1 else 0
+            system_va = next((e.addr for e in dirs.root_entries
+                              if e.name.lower() == "system"), 0)
+            libs_va = next((e.addr for e in dirs.system_entries
+                            if e.name.lower() == "libs"), 0)
+            programs_va = next((e.addr for e in dirs.system_entries
+                                if e.name.lower() == "programs"), 0)
+            place_dir(dirs.root_off, root_va, "romfs_root")
+            place_dir(dirs.system_off, system_va, "romfs_system")
+            place_dir(dirs.libs_off, libs_va, "romfs_libs")
+            place_dir(dirs.programs_off, programs_va, "romfs_programs")
+            if dirs.root_off < 0 or dirs.system_off < 0:
+                warnings.append("romfs: root/System directory not located")
     elif root_off is not None:
         warnings.append(f"romfs: implausible directory span {span:#x}")
 
-    # 4. ROMFS files.  On the 6600 they are stored linearly at their runtime
-    #    address, so file_off == va - ROM_BASE.
-    for e in romfs:
-        if e.attr & 0x10:
-            continue
-        foff = e.addr - ROM_BASE
-        if foff < 0 or foff + e.size > len(rom):
-            warnings.append(f"romfs: {e.name} at {e.addr:#x} outside the file")
-            continue
-        put(e.addr, rom[foff:foff + e.size], f"romfs_{e.name}", foff)
+    # 4. ROMFS data files.  They are *not* stored at addr - ROM_BASE: the flash
+    #    keeps them in packed FS order (0xff-padded, with a variable bias), so
+    #    copying from the linear address splices unrelated code into the image.
+    #    `romfs_linear` keeps the old behaviour for experiments only.
+    if romfs_linear:
+        for e in romfs:
+            if e.attr & 0x10:
+                continue
+            foff = e.addr - ROM_BASE
+            if foff < 0 or foff + e.size > len(rom):
+                warnings.append(f"romfs: {e.name} at {e.addr:#x} outside the file")
+                continue
+            put(e.addr, rom[foff:foff + e.size], f"romfs_{e.name}", foff)
+    elif romfs:
+        warnings.append(
+            f"romfs: {sum(1 for e in romfs if not e.attr & 0x10)} data files are "
+            f"packed in the FS area, not at addr-{ROM_BASE:#x}; not placed")
 
     return bytes(buf), warnings, placed
+
 
 
 # ---------------------------------------------------------------------------
@@ -645,10 +806,17 @@ def cmd_scan(a):
     rom = open(a.rom, "rb").read()
     hdr = find_rom_header(rom)
     images = scan_images(rom)
+    good = plausible_images(images)
     reach = reachable_images(images)
     print(f"ROM {len(rom):#x} bytes, header @ {hdr['header_offset']:#x}, "
           f"base {hdr['rom_base']:#x}, size {hdr['rom_size']:#x}")
-    print(f"images: {len(images)} headers, {len(reach)} reachable from the kernel")
+    print(f"images: {len(images)} header candidates ({len(good)} plausible, "
+          f"{len(images) - len(good)} rejected), {len(reach)} reachable from "
+          f"the kernel")
+    span_lo = min(im.code - 0x64 for im in good)
+    span_hi = max(im.code + im.text_size for im in good)
+    print(f"  code map: {len(good)} images at {span_lo:#010x}..{span_hi:#010x} "
+          f"({sum(im.text_size for im in good):#x} bytes of text)")
     for im in reach:
         print(f"\nuid3 {im.uid3:#010x}  file {im.hdr_off:#08x}  "
               f"code {im.code:#010x}  entry {im.entry:#010x}")
@@ -669,17 +837,42 @@ def cmd_scan(a):
     entries = parse_romfs(rom, root)
     files = [e for e in entries if not e.attr & 0x10]
     print(f"\nROMFS: root list @ file {root:#x} (va {hdr['root_dir_list']:#x}), "
-          f"{len(entries)} entries ({len(files)} files)")
-    bad = [e for e in files if e.addr - ROM_BASE + e.size > len(rom)]
-    print(f"  files stored linearly at va - {ROM_BASE:#x}: "
-          f"{'all ok' if not bad else str(len(bad)) + ' out of range'}")
+          f"{len(entries)} entries ({len(files)} files) in the first directory")
+    dirs = find_boot_dirs(rom, root, hdr["root_dir_list"])
+    def show(name, off, es):
+        va = next((e.addr for e in es if e.name.lower() == name), 0)
+        print(f"  {name:10} file {off:#08x}  {len(es):3d} entries"
+              + (f"  va {va:#010x}" if va else ""))
+    show("root", dirs.root_off, dirs.root_entries)
+    show("system", dirs.system_off, dirs.system_entries)
+    show("libs", dirs.libs_off, dirs.libs_entries)
+    show("programs", dirs.programs_off, dirs.programs_entries)
+    by_hdr = {im.code - 0x64: im for im in good}
+    for es in (dirs.programs_entries, dirs.libs_entries):
+        for e in es:
+            if e.name.lower() in ("ekern.exe", "ecust.dll", "cbus.dll",
+                                  "helper.ldd", "euser.dll"):
+                im = by_hdr.get(e.addr)
+                if im:
+                    print(f"  {e.name} -> uid3 {im.uid3:#010x}, "
+                          f"code {im.code:#010x}, packed file {im.hdr_off:#x}")
+    print(f"  image records named by ROMFS: "
+          f"{sum(1 for es in (dirs.libs_entries,) for e in es if e.addr in by_hdr)}"
+          f"/{len(dirs.libs_entries)} in \\System\\Libs, "
+          f"{sum(1 for e in dirs.programs_entries if e.addr in by_hdr)}"
+          f"/{len(dirs.programs_entries)} in \\System\\Programs")
+    print("  note: file data is packed in FS order, not at addr - ROM_BASE")
     if a.json:
         payload = {
             "rom_header": hdr,
             "images": [asdict(im) for im in images],
+            "plausible": [im.uid3 for im in good],
             "reachable": [im.uid3 for im in reach],
             "romfs": {"root_file_off": root,
-                      "entries": [asdict(e) for e in entries]},
+                      "entries": [asdict(e) for e in entries],
+                      "root_dir_file_off": dirs.root_off,
+                      "system_dir_file_off": dirs.system_off,
+                      "libs_dir_file_off": dirs.libs_off},
         }
         open(a.json, "w").write(json.dumps(payload, indent=1))
         print(f"-> {a.json}")
@@ -689,11 +882,14 @@ def cmd_build(a):
     rom = open(a.rom, "rb").read()
     hdr = find_rom_header(rom)
     images = scan_images(rom)
+    good = plausible_images(images)
     reach = reachable_images(images)
+    place = reach if a.only_reachable else good
     root = find_romfs_root(rom, hdr["root_dir_list"])
     romfs = parse_romfs(rom, root) if root is not None else []
-    buf, warnings, placed = build_image(rom, reach, romfs, a.include_rodata,
-                                        do_snap=not a.no_snap)
+    buf, warnings, placed = build_image(rom, place, romfs, a.include_rodata,
+                                        do_snap=not a.no_snap,
+                                        romfs_linear=a.romfs_linear)
     patches = load_patches(a.patch) if a.patch else []
     if patches:
         buf = bytearray(buf)
@@ -701,23 +897,79 @@ def cmd_build(a):
         buf = bytes(buf)
     open(a.output, "wb").write(buf)
     print(f"wrote {a.output}: {len(buf):#x} bytes at {ROM_BASE:#x}")
-    print(f"  {len(placed)} sections from {len(reach)} images, "
+    print(f"  {len(placed)} sections from {len(place)} images, "
           f"{len(romfs)} ROMFS entries")
-    for w in warnings:
+    for w in warnings[:40]:
         print(f"  ! {w}")
+    if len(warnings) > 40:
+        print(f"  ! ... {len(warnings) - 40} more warnings")
     kernel = next(im for im in reach if im.uid3 == UID_KERNEL)
     print(f"  kernel entry {kernel.entry:#010x}")
     if a.json:
         payload = {
             "rom_header": hdr,
-            "images": [asdict(im) for im in reach],
+            "images": [asdict(im) for im in place],
             "placed": [asdict(s) for s in placed],
             "patches": [{"va": va, "bytes": data.hex(), "line": line}
                         for va, data, line in patches],
             "warnings": warnings,
+            "mode": ("reachable" if a.only_reachable else "all-images"),
         }
         open(a.json, "w").write(json.dumps(payload, indent=1))
         print(f"-> {a.json}")
+
+
+def cmd_names(a):
+    """Map ROMFS image names to packed records (the boot-file table)."""
+    rom = open(a.rom, "rb").read()
+    hdr = find_rom_header(rom)
+    good = plausible_images(scan_images(rom))
+    by_hdr = {im.code - 0x64: im for im in good}
+    root = find_romfs_root(rom, hdr["root_dir_list"])
+    if root is None:
+        raise SystemExit("ROMFS root list not found")
+    dirs = find_boot_dirs(rom, root, hdr["root_dir_list"])
+
+    def dump(path, es):
+        for e in es:
+            # The packed Programs directory has one entry whose tail was
+            # overwritten by following data (the name ends in a space and the
+            # next record is code bytes); skip entries that cannot be real.
+            if (not e.name or
+                    any(ord(c) < 32 or ord(c) > 126 for c in e.name) or
+                    not (ROM_BASE <= e.addr < ROM_BASE + ROM_SIZE) or
+                    e.size > 0x1000000):
+                continue
+            p = path + "\\" + e.name
+            kind = "dir " if e.attr & 0x10 else "file"
+            im = by_hdr.get(e.addr)
+            tail = ""
+            if im is not None:
+                tail = (f"  -> uid3 {im.uid3:#010x} code {im.code:#010x} "
+                        f"packed {im.hdr_off:#08x}")
+            print(f"  {kind} {p:44s} {e.size:#08x} @ {e.addr:#010x}{tail}")
+
+    if dirs.root_off < 0:
+        raise SystemExit("packed root directory not located")
+    print(f"root directory: file {dirs.root_off:#x}, "
+          f"{len(dirs.root_entries)} entries")
+    dump("", dirs.root_entries)
+    if dirs.system_off >= 0:
+        print(f"\n\\System: file {dirs.system_off:#x}, "
+              f"{len(dirs.system_entries)} entries")
+        dump("\\System", dirs.system_entries)
+    if dirs.programs_off >= 0:
+        print(f"\n\\System\\Programs: file {dirs.programs_off:#x}, "
+              f"{len(dirs.programs_entries)} entries")
+        dump("\\System\\Programs", dirs.programs_entries)
+    if a.all and dirs.libs_off >= 0:
+        print(f"\n\\System\\Libs: file {dirs.libs_off:#x}, "
+              f"{len(dirs.libs_entries)} entries")
+        dump("\\System\\Libs", dirs.libs_entries)
+        mapped = sum(1 for e in dirs.libs_entries if e.addr in by_hdr)
+        print(f"  ({mapped}/{len(dirs.libs_entries)} entries map to packed images)")
+
+
 
 
 def cmd_calls(a):
@@ -760,6 +1012,14 @@ def main():
     b.add_argument("--patch",
                    help="apply bring-up text patches from this file "
                         "('<va> <hex bytes>' per line)")
+    b.add_argument("--only-reachable", action="store_true",
+                   help="place only the kernel + its direct DLL references "
+                        "(the old 3-image behaviour); default places every "
+                        "plausible image found in the flash")
+    b.add_argument("--romfs-linear",
+                   action="store_true",
+                   help="also copy ROMFS data files from addr - ROM_BASE "
+                        "(unverified: the flash stores them in packed FS order)")
     b.set_defaults(func=cmd_build)
 
     c = sub.add_parser("calls")
@@ -767,8 +1027,15 @@ def main():
     c.add_argument("--limit", type=int, default=8)
     c.set_defaults(func=cmd_calls)
 
+    n = sub.add_parser("names")
+    n.add_argument("rom")
+    n.add_argument("--all", action="store_true",
+                   help="also dump \\System\\Libs")
+    n.set_defaults(func=cmd_names)
+
     a = ap.parse_args()
     a.func(a)
+
 
 
 if __name__ == "__main__":

@@ -45,8 +45,20 @@
  *   NK_IAT_LOG=n            log the first n unbound imports (default 16)
  *   NK_ENTRY_ARM=1          start in ARM state instead of Thumb
  *   NK_ENTRY_THUMB=1        force Thumb state (the kernel text is Thumb)
+ *   NK_ENTRY=0x...          override the entry address (e.g. 0x50000000 to
+ *                           run the ROM's exception-vector code)
+ *   NK_WATCH=0x...          dump registers + the call ring when PC hits this
+ *   NK_WATCH_HITS=n         how many times to report (default 1)
+ *   NK_WATCH_LOG=n          how many recent calls to print (default 16)
+ *   NK_SPIN=1               enable the tight-loop watchdog
+ *   NK_SPIN_MAX=n           visits to one PC before it is a spin (default 20000)
+ *   NK_CODE_ONLY=0|1        reject a PC outside ROM/low-RAM/high vectors
+ *                           (default 1 in this harness)
  *   NK_KERNEL_CODE=0x...    where to copy the kernel blob (default 0x50310000)
  *   NK_SP=0x...             initial stack pointer (default 0x80300000)
+ *   NK_R0=0x... NK_R1=0x... NK_R2=0x...
+ *                           initial argument registers (the mask ROM passes
+ *                           the ROM header in r0 and the super page in r1)
  *   NK_LR=0x...             initial link register (default 0xdead0000, the
  *                           mask-ROM return sentinel)
  *   NK_STOP_PC=0x...        stop when PC reaches this address (default NK_LR)
@@ -138,7 +150,9 @@ typedef struct {
 } rom_loader_t;
 
 static int is_e32_header(const uint8_t* rom, long len, long o) {
-    if (o < 0 || o + 0x70 > len || (o & 3)) return 0;
+    /* Packed records are only 2-byte aligned; the ROM build removed the
+     * linker's 4-byte padding, so a header can start at 2 mod 4. */
+    if (o < 0 || o + 0x70 > len || (o & 1)) return 0;
     uint32_t uid1 = u32(rom + o);
     if (uid1 != 0x10000079u && uid1 != 0x1000007au) return 0;
     uint32_t uid2 = u32(rom + o + 4);
@@ -157,13 +171,13 @@ static int is_e32_header(const uint8_t* rom, long len, long o) {
 }
 
 static long next_e32_header(const uint8_t* rom, long len, long after) {
-    for (long o = (after + 3) & ~3L; o + 0x70 <= len; o += 4)
+    for (long o = (after + 1) & ~1L; o + 0x70 <= len; o += 2)
         if (is_e32_header(rom, len, o)) return o;
     return len;
 }
 
 static long header_for_code(const uint8_t* rom, long len, uint32_t code) {
-    for (long o = 0; o + 0x70 <= len; o += 4) {
+    for (long o = 0; o + 0x70 <= len; o += 2) {
         if (!is_e32_header(rom, len, o)) continue;
         if (u32(rom + o + 0x14) == code) return o;
     }
@@ -267,19 +281,31 @@ static int load_image(rom_loader_t* L, long hdr, int depth) {
 /* ------------------------------------------------------------------ */
 /* flat runtime-image loader (out/6600_runtime.bin)                    */
 /*                                                                     */
-/* `recompiler/romimage.py build` places every reachable ROM image and */
-/* the ROMFS at its runtime address.  Headers sit at code-0x64, so the */
-/* loader can recover data/RAM placement without the packed-record     */
-/* tables.                                                             */
+/* `recompiler/romimage.py build` places every plausible ROM image and */
+/* the ROMFS directories at their runtime addresses.  Headers sit at   */
+/* code-0x64, so the loader can recover data/RAM placement without the */
+/* packed-record tables.  Call repair stays conservative by default:   */
+/* only the kernel and the DLLs named by its TDllRefTable are declared */
+/* executable (NK_RANGE_ALL=1 additionally accepts every image).       */
 /* ------------------------------------------------------------------ */
+
+#define NK_MAX_IMAGES 1024
+
+typedef struct {
+    uint32_t uid3, entry, code, text, data, dsize, bss, ram, hdr_va;
+} rom_image_t;
+
 static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
                                   const uint8_t* img, long len, int verbose) {
-    uint32_t kernel_entry = 0;
-    /* The first 64 KiB of the ROM is the boot/vector block; it contains real
-     * ARM code even though it has no TRomImageHeader. */
-    if (ip) nk_code_range_add(ip, NK_FLASH_BASE, NK_FLASH_BASE + 0x10000);
+    static rom_image_t images[NK_MAX_IMAGES];
+    int nimg = 0;
+    uint32_t kernel_entry = 0, kernel_hdr = 0;
+
+    /* Packed records are only 2-byte aligned (the ROM build removed the
+     * linker's 4-byte padding), so headers can sit at 2 mod 4.  Scanning by 4
+     * used to miss those images entirely. */
     for (uint32_t h = NK_FLASH_BASE;
-         h + 0x64 < NK_FLASH_BASE + (uint32_t)len; h += 4) {
+         h + 0x64 < NK_FLASH_BASE + (uint32_t)len && nimg < NK_MAX_IMAGES; h += 2) {
         const uint8_t* p = img + (h - NK_FLASH_BASE);
         uint32_t uid1 = u32(p);
         if (uid1 != 0x10000079u && uid1 != 0x1000007au) continue;
@@ -296,7 +322,15 @@ static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
         if (code < NK_FLASH_BASE || tsize == 0 ||
             code + tsize > NK_FLASH_BASE + (uint32_t)len) continue;
         if (csize < tsize || dsize > 0x1000000 || bss > 0x1000000) continue;
-        if (ram) {
+        rom_image_t* ri = &images[nimg++];
+        ri->uid3 = uid3; ri->entry = entry; ri->code = code; ri->text = tsize;
+        ri->data = data; ri->dsize = dsize; ri->bss = bss; ri->ram = ram;
+        ri->hdr_va = h;
+        /* Copy .data/.bss into RAM only for images whose RAM window is the
+         * 6600 kernel window.  Other images carry placeholder bases such as
+         * 0x00400000 (unmapped here); writing there would only fill the MMIO
+         * log with noise. */
+        if (ram >= NK_RAM_BASE && ram < NK_RAM_BASE + NK_RAM_SIZE) {
             if (data >= NK_FLASH_BASE && data + dsize <= NK_FLASH_BASE + (uint32_t)len) {
                 for (uint32_t i = 0; i < dsize; i++)
                     nk_w8(cpu, ram + i, img[data - NK_FLASH_BASE + i]);
@@ -304,12 +338,51 @@ static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
                     nk_w8(cpu, ram + dsize + i, 0);
             }
         }
-        if (ip) nk_code_range_add(ip, code, code + tsize);
-        if (uid3 == 0x100058e8u) kernel_entry = entry;
-        if (verbose)
-            printf("runtime image uid3 %#010x @ %#010x: text %#x, entry %#010x, "
-                   "ram %#010x (+%#x data, +%#x bss)\n",
-                   uid3, code, tsize, entry, ram, dsize, bss);
+        if (uid3 == 0x100058e8u) { kernel_entry = entry; kernel_hdr = h; }
+    }
+
+    /* Executable ranges: boot block + kernel + the kernel's direct DLL refs. */
+    int ranges = 0;
+    if (ip) {
+        nk_code_range_add(ip, NK_FLASH_BASE, NK_FLASH_BASE + 0x10000);
+        ranges = 1;
+        int all = getenv("NK_RANGE_ALL") != NULL;
+        uint32_t refs[32];
+        int nrefs = 0;
+        if (kernel_hdr) {
+            const uint8_t* kp = img + (kernel_hdr - NK_FLASH_BASE);
+            uint32_t dll = u32(kp + 0x38);
+            if (dll >= NK_FLASH_BASE && dll + 8 <= NK_FLASH_BASE + (uint32_t)len) {
+                const uint8_t* dp = img + (dll - NK_FLASH_BASE);
+                uint32_t count = u32(dp) >> 16;
+                if (count > 32) count = 32;
+                for (uint32_t i = 0; i < count; i++) {
+                    uint32_t ref = u32(dp + 4 + i * 8);
+                    if (nrefs < 32) refs[nrefs++] = ref;
+                }
+            }
+        }
+        for (int i = 0; i < nimg; i++) {
+            int keep = all;
+            for (int r = 0; r < nrefs && !keep; r++)
+                if (images[i].code == refs[r]) keep = 1;
+            if (images[i].code == (kernel_hdr ? kernel_hdr + 0x64 : 0)) keep = 1;
+            if (keep && nk_code_range_add(ip, images[i].code,
+                                          images[i].code + images[i].text))
+                ranges++;
+        }
+    }
+    if (verbose)
+        printf("runtime image: %d images, %d code ranges"
+               " (NK_RANGE_ALL=1 to accept every image)\n", nimg, ranges);
+    if (verbose) {
+        for (int i = 0; i < nimg; i++)
+            if (images[i].uid3 == 0x100058e8u || i < 3)
+                printf("  uid3 %#010x @ %#010x: text %#x, entry %#010x, "
+                       "ram %#010x (+%#x data, +%#x bss)\n",
+                       images[i].uid3, images[i].code, images[i].text,
+                       images[i].entry, images[i].ram, images[i].dsize,
+                       images[i].bss);
     }
     return kernel_entry;
 }
@@ -426,6 +499,13 @@ int main(int argc, char** argv) {
         nk_poke(&cpu, code_base, code_img + text_shift, load_len);
     }
 
+    uint32_t entry_override = (uint32_t)env_ulong("NK_ENTRY", 0);
+    if (entry_override) {
+        entry = entry_override;
+        thumb_entry = (entry_override & 1) ? 1 : 0;
+        printf("entry override: %#010x (%s)\n", entry, thumb_entry ? "Thumb" : "ARM");
+    }
+
     const char* sp_env = getenv("NK_SP");
     cpu.r[13] = sp_env ? (uint32_t)strtoul(sp_env, NULL, 0) : 0x80300000u;
     cpu.r[0] = (uint32_t)env_ulong("NK_R0", 0);
@@ -453,6 +533,12 @@ int main(int argc, char** argv) {
     ip.recover = (int)env_ulong("NK_RECOVER", 0);
     ip.recover_max = (int)env_ulong("NK_RECOVER_MAX", 256);
     ip.recover_log = (int)env_ulong("NK_RECOVER_LOG", 16);
+    ip.watch_pc = (uint32_t)env_ulong("NK_WATCH", 0);
+    ip.watch_hits = (int)env_ulong("NK_WATCH_HITS", 1);
+    ip.watch_log = (int)env_ulong("NK_WATCH_LOG", 16);
+    ip.spin_max = (uint32_t)env_ulong("NK_SPIN", 0) ?
+        (uint32_t)env_ulong("NK_SPIN_MAX", 20000) : 0;
+    ip.require_code = (int)env_ulong("NK_CODE_ONLY", 1);
     const char* callmap = getenv("NK_CALLMAP");
     if (callmap) load_callmap(&ip, callmap);
     ip.hle_heap = (uint32_t)env_ulong("NK_HLE_HEAP", 0x80400000);

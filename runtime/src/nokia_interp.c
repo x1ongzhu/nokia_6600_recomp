@@ -454,6 +454,61 @@ uint32_t nk_snap_entry(nk_cpu_t* c, uint32_t target) {    /* Export entries are 
     return target;
 }
 
+static void record_call(nk_interp_t* ip, nk_cpu_t* c, uint32_t call_pc,
+                        uint32_t raw, uint32_t resolved, int caller_thumb) {
+    nk_call_rec* r = &ip->call_ring[ip->call_ring_n % NK_CALL_RING];
+    r->call_pc = call_pc;
+    r->raw_target = raw;
+    r->target = resolved;
+    r->r0 = c->r[0];
+    r->r1 = c->r[1];
+    r->r2 = c->r[2];
+    r->r3 = c->r[3];
+    r->sp = c->r[13];
+    r->lr = c->r[14];
+    r->caller_thumb = (uint8_t)(caller_thumb != 0);
+    r->callee_thumb = (uint8_t)(thumb(c) != 0);
+    ip->call_ring_n++;
+}
+
+static void dump_call_ring(nk_interp_t* ip, int n) {
+    unsigned total = ip->call_ring_n;
+    if (n <= 0) n = 16;
+    if ((unsigned)n > total) n = (int)total;
+    if (n > NK_CALL_RING) n = NK_CALL_RING;
+    fprintf(stderr, "[watch] last %d of %u calls:\n", n, total);
+    for (int i = n - 1; i >= 0; i--) {
+        const nk_call_rec* r = &ip->call_ring[(total - 1 - (unsigned)i) % NK_CALL_RING];
+        fprintf(stderr,
+                "[watch]   %#010x -> %#010x%s (%s->%s) r0=%#x r1=%#x r2=%#x r3=%#x sp=%#x\n",
+                r->call_pc, r->target,
+                r->target != r->raw_target ? " [fixed]" : "",
+                r->caller_thumb ? "T" : "A", r->callee_thumb ? "T" : "A",
+                r->r0, r->r1, r->r2, r->r3, r->sp);
+    }
+}
+
+/* Bring-up watchdog.  A tight loop (a handful of PCs repeated for tens of
+ * thousands of iterations) almost always means a library call received a
+ * bogus descriptor or length and is scanning a 2 GiB address range.  Count
+ * visits per PC in a direct-mapped table; when one PC exceeds spin_max the
+ * caller rewinds through the recovery frame instead of burning the budget. */
+static int spin_tick(nk_interp_t* ip, uint32_t pc) {
+    if (!ip->spin_max) return 0;
+    uint32_t slot = (pc >> 2) & 1023u;
+    if (ip->spin_tag[slot] != pc) {
+        ip->spin_tag[slot] = pc;
+        ip->spin_cnt[slot] = 0;
+        return 0;
+    }
+    if (++ip->spin_cnt[slot] < ip->spin_max) return 0;
+    fprintf(stderr, "[interp] spin: %#010x visited %u times (tight loop)\n",
+            pc, ip->spin_cnt[slot]);
+    memset(ip->spin_tag, 0, sizeof ip->spin_tag);
+    memset(ip->spin_cnt, 0, sizeof ip->spin_cnt);
+    return 1;
+}
+
 /* Decide the callee mode at a call site.  Returns 1 when the target was
  * repaired (mode and/or address changed) and 0 otherwise. */
 static int infer_call(nk_interp_t* ip, nk_cpu_t* c, int caller_thumb,
@@ -782,8 +837,11 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
             if (rd == 15) {
                 /* `ldr pc, [ip]` is the EKA1 import stub.  In the packed
                  * pre-link image the IAT slot is still empty (ROM build binds
-                 * it).  Report it instead of silently jumping to address 0. */
-                if (v < 0x1000u && rn != 15) {
+                 * it).  Report it instead of silently jumping to address 0.
+                 * Restrict this to the ip register: a small value loaded from
+                 * an arbitrary vtable slot (e.g. `ldr pc,[r3,#0x14]`) is a
+                 * missing object, not an import. */
+                if (v < 0x1000u && rn == 12 && off == 0) {
                     ip->st.iat_hits++;
                     if (ip->iat_log-- > 0)
                         fprintf(stderr, "[interp] unbound IAT slot %#010x at %#010x (caller lr=%#010x)\n",
@@ -822,11 +880,14 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
             if (op & (1u << 24)) {
                 c->r[14] = pc + 4;
                 push_call(ip, c, pc + 4, pc, target);
+                uint32_t raw = target;
                 if (infer_call(ip, c, 0, pc, &target) == 2) {
+                    record_call(ip, c, pc, raw, target, 0);
                     drop_call(ip);
                     c->r[15] = pc + 4;
                     return 0;
                 }
+                record_call(ip, c, pc, raw, target, 0);
             }
             c->r[15] = target;
             return 0;
@@ -1175,16 +1236,20 @@ static int thumb_step(nk_cpu_t* c, nk_interp_t* ip) {
          * 2-byte BLX register form handled above. */
         c->r[14] = (pc + 4) | 1;
         push_call(ip, c, pc + 4, pc, target);
+        uint32_t raw = target;
         if (blx) {                                 /* BLX (ARMv5) */
             set_thumb(c, 0);
             c->r[15] = target & ~3u;
+            record_call(ip, c, pc, raw, target & ~3u, 1);
         } else {
             if (infer_call(ip, c, 1, pc, &target) == 2) {
+                record_call(ip, c, pc, raw, target, 1);
                 drop_call(ip);
                 c->r[15] = pc + 4;
                 return 0;
             }
             c->r[15] = target;
+            record_call(ip, c, pc, raw, target, 1);
         }
         return 0;
     }
@@ -1213,11 +1278,42 @@ void nk_interp_init(nk_interp_t* ip) {
     ip->recover = 0;
     ip->recover_max = 256;
     ip->recover_log = 16;
+    ip->watch_hits = 1;
+    ip->watch_log = 16;
+    ip->require_code = 0;      /* selftests execute tiny snippets in RAM */
+}
+
+/* The 6600 executes code from ROM (0x50000000), the pre-MMU low alias
+ * (0x00000000, first 3 MiB) and the high vectors (0xffff0000).  RAM at
+ * 0x80000000 holds data and stacks only; a PC there after a bad return is
+ * data being executed as code.  The dispatcher uses this to turn that into
+ * a recovery instead of spending millions of instructions in the heap. */
+static int pc_in_code_space(uint32_t pc) {
+    pc &= ~1u;
+    return (pc >= 0x50000000u && pc < 0x51000000u) ||
+           pc < 0x00300000u ||
+           (pc >= 0xffff0000u && pc < 0xffff1000u);
 }
 
 int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
     if (ip->budget <= 0) ip->budget = 10000000;
     while (ip->budget-- > 0) {
+        if (ip->watch_pc && ip->watch_hits != 0 &&
+            (c->r[15] & ~1u) == (ip->watch_pc & ~1u)) {
+            fprintf(stderr,
+                    "[watch] pc=%#010x thumb=%d r0=%#x r1=%#x r2=%#x r3=%#x "
+                    "sp=%#x lr=%#x cpsr=%#x\n",
+                    c->r[15], thumb(c), c->r[0], c->r[1], c->r[2], c->r[3],
+                    c->r[13], c->r[14], c->cpsr);
+            dump_call_ring(ip, ip->watch_log);
+            if (ip->watch_hits > 0) ip->watch_hits--;
+        }
+        if (spin_tick(ip, c->r[15])) {
+            if (recover_call(ip, c, NK_STOP_SPIN)) continue;
+            ip->st.stop_reason = NK_STOP_SPIN;
+            ip->st.stop_pc = c->r[15];
+            break;
+        }
         if (ip->return_pc &&
             (c->r[15] & ~1u) == (ip->return_pc & ~1u)) {
             ip->st.stop_reason = NK_STOP_RETURN;
@@ -1230,6 +1326,12 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
          * return/frame, not real code; stop at the boundary instead of
          * disassembling zero pages for the rest of the budget. */
         if (c->r[15] < 0x40000000u) {
+            ip->st.stop_reason = NK_STOP_OUT_OF_IMAGE;
+            ip->st.stop_pc = c->r[15];
+            if (recover_call(ip, c, NK_STOP_OUT_OF_IMAGE)) continue;
+            return 1;
+        }
+        if (ip->require_code && !pc_in_code_space(c->r[15])) {
             ip->st.stop_reason = NK_STOP_OUT_OF_IMAGE;
             ip->st.stop_pc = c->r[15];
             if (recover_call(ip, c, NK_STOP_OUT_OF_IMAGE)) continue;
@@ -1312,6 +1414,7 @@ const char* nk_interp_stop_name(int reason) {
     case NK_STOP_SWI:       return "swi";
     case NK_STOP_IAT:       return "unbound import (IAT)";
     case NK_STOP_OUT_OF_IMAGE: return "pc left the image";
+    case NK_STOP_SPIN:      return "spin loop";
     default:                return "host";
     }
 }

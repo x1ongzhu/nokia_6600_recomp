@@ -81,6 +81,17 @@ For the packed-image bring-up it also has:
   as "returned 0", logged, and the caller resumes.  This is how a boot trace
   walks past stale calls instead of stopping at the first one.  It is a
   bring-up aid and is off by default;
+- **spin watchdog** (`NK_SPIN`, `NK_SPIN_MAX`) — a tiny loop that revisits one
+  PC thousands of times (usually a descriptor/string scan with a bogus
+  argument) is rolled back through the same recovery frame instead of burning
+  the instruction budget;
+- **call ring / PC watch** (`NK_WATCH`, `NK_WATCH_LOG`) — a 64-entry ring of
+  recent BL/BLX sites records the raw and resolved targets, modes and r0-r3/sp;
+  reaching the watched PC prints the ring, which answers "how did we get here"
+  without a full trace;
+- **PC-space guard** (`NK_CODE_ONLY`) — a PC in RAM (or outside ROM, the low
+  pre-MMU alias and high vectors) is a corrupted return, not code; the boot
+  harness enables this by default;
 - **text patches** (`config/patches-6600.txt`, applied by
   `romimage.py build --patch`) — restore bytes the packed flash does not
   contain (the first case is a Thumb function whose `pop` was overwritten by
@@ -99,9 +110,9 @@ are independent of their file offsets.  The runtime loader (`boot_kernel.c`)
 locates the sections backwards from the next header, loads the referenced DLLs
 (UID3 `0x100065a5` and `0x100039e5`), and resolves import stubs through their
 export directories.  `recompiler/romimage.py build` now reconstructs the
-runtime ROM layout (kernel + reachable DLLs at their header addresses, the
-packed ROMFS directory block, all 171 ROMFS files at their linear addresses);
-184 sections are placed without overlaps in `out/6600_runtime.bin`.
+runtime ROM layout (all 722 packed images at their header addresses plus the
+ROMFS tree); 1,580 sections are placed without overlaps in
+`out/6600_runtime.bin`.
 
 What remains is the ROM build's **interworking veneer insertion**: Thumb→ARM
 calls and export targets are biased into the callee.  A census of the kernel's
@@ -123,10 +134,18 @@ was inverted, so the earlier ~2,000,000-instruction traces were executing wrong
 operands and are void.  After the fix the kernel entry completes in **197
 instructions** and returns through the mask-ROM stand-in (4 skipped calls, no
 undefined instruction).  Call repair is also confined to registered code
-ranges, so it cannot snap into ROMFS data.  The current frontier is the
-**packed text's missing 4-byte alignment padding** (the entry's literal pool is
-stored two bytes early); the next step is a function map plus relayout, then a
-fresh call census.  See [`BOOT.md`](BOOT.md).
+ranges, so it cannot snap into ROMFS data.  Round 6 added a literal-pool
+relayout (`recompiler/relayout.py`) that is directly validated by the entry's
+`ldr` and all 787 detected pools, and round 7/9 showed why it cannot be the
+whole answer: the stored text's **function layout** is not the linked layout.
+The kernel's 478 export entries are genuine fixed-up function addresses (a
+small Thumb DLL is 5/5), but only 82 (17.2%) land on a stored function start
+versus a 13.1% random baseline; the big DLL is 14.4% versus 5.9%.  The stored
+text already keeps 1,420/1,430 ARM starts and 759/787 pools 4-byte aligned, so
+removed 2-byte padding (`0x58` in the plan) cannot explain it.  The next step
+is layout-level recovery from the exports, call graph and literal code
+pointers (`recompiler/layout.py` measures this; B1g2 in `PROGRESS.md`), not a
+larger snap radius.  See [`BOOT.md`](BOOT.md).
 
 ## The HLE boundary
 
@@ -143,7 +162,8 @@ straight to the UPP.  The runtime therefore grows one device at a time:
 ## Stages
 
 1. **Front end** — `wd2.py` extracts the EKA1 ROM; `romimage.py` reconstructs
-   the flat runtime ROM and the call-site census; `extract.py`/`extract_ida.py`
+   the flat runtime ROM and the call-site census; `layout.py` audits the
+   packed-vs-linked layout using the export tables; `extract.py`/`extract_ida.py`
    recover functions; the ROMFS is browsable via `wd2.py list`.
 2. **Lifter** — ARMv4T + Thumb → C, against the sparse-memory `nk_cpu_t`.
 3. **Runtime** — sparse memory + MMIO bus (`nokia_rt.c`), the ARMv4T

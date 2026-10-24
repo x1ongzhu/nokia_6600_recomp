@@ -105,12 +105,12 @@ criteria and phased roadmap live in
 - [x] **ROMFS extraction** — `System\Libs`, the app suite, sounds, skins and the
   E32Image headers are all reachable from the plaintext ROM.
 - [x] **Flat runtime ROM assembly** — [`recompiler/romimage.py`](recompiler/romimage.py)
-  reconstructs the runtime layout: the kernel and its two referenced DLLs at
-  their header addresses, the packed ROMFS directory block below the kernel,
-  and all 171 ROMFS files at their linear addresses.  `out/6600_runtime.bin`
-  is exactly the declared 22 MiB, 184 sections with no overlaps, and
-  `boot_kernel --rom-image` boots it.  The same tool prints a census of every
-  direct `BL`: 3854 kernel sites, 478 exact, 3222 biased by 4..0x308 bytes.
+  reconstructs the runtime layout: the kernel and all 722 packed images at
+  their header addresses, and the packed ROMFS tree below the kernel.
+  `out/6600_runtime.bin` is exactly the declared 22 MiB, 1,580 sections with
+  no overlaps, and `boot_kernel --rom-image` boots it.  The same tool prints a
+  census of every direct `BL`: 3854 kernel sites, 478 exact, 3222 biased by
+  4..0x308 bytes.
 - [x] **Crash recovery + per-site callmap** — every `BL/BLX` snapshots the
   caller; `NK_RECOVER=1` rolls back a callee that faults and treats the call as
   "returned 0".  [`config/callmap-6600.txt`](config/callmap-6600.txt) pins
@@ -135,20 +135,79 @@ criteria and phased roadmap live in
   `tools/test_relayout.sh` is the acceptance test.  The early entry also runs
   in the pre-MMU physical view, so `boot_kernel` now maps a second 3 MiB RAM
   at `0x00000000` (`NK_NO_LOW_RAM=1` disables it).
+- [x] **Full image map + ROMFS tree (round 7)** — packed image records are only
+  **2-byte aligned**: the ROM build removed the linker's 4-byte padding, so a
+  `TRomImageHeader` can start at 2 mod 4 (for example
+  `\System\Libs\MmfAudioController.dll` at file `0x7271ca`).  Scanning every
+  4th byte silently dropped 40+ images.  With a 2-byte scan plus a
+  record-plausibility filter, **722 images** are recovered and their text
+  ranges are disjoint, spanning `0x5030ff9c..0x515978dc`.
+  `romimage.py build` now places **all** of them (1,580 sections, no overlaps)
+  instead of only the kernel and its two direct DLL refs; the boot harness
+  registers their text as code.  The ROMFS is a tree, and its directories are
+  now located by content: root file `0x32639c`, `\System` `0x325aa4`,
+  `\System\Libs` `0x3162bc` (171 entries) and `\System\Programs` `0x318170`
+  (236 entries).  This gives the boot module table — `ekern.exe` (the kernel,
+  uid3 `0x100058e8`), `ecust.dll`, `ecomm.ldd`, `EStart.exe`, `EFile.exe`,
+  `EFSrv.dll`, ... — via the new `romimage.py names`.  Also fixed: ROMFS
+  **data** files are not stored at `addr - 0x50000000`; the old build spliced
+  unrelated code into 17 MB of the flat image.  They are packed in FS order
+  (0xff-padded), so `build` no longer copies them from the linear address.
+- [x] **Debugging the frontier (round 8)** — the interpreter now has a
+  **call ring** (`NK_WATCH=addr` prints the registers plus the last 64 calls,
+  their raw/resolved targets and arguments), a **tight-loop watchdog**
+  (`NK_SPIN`, rolls a stuck scan back through recovery instead of burning the
+  budget), a **PC-space guard** (`NK_CODE_ONLY`: RAM is not code) and
+  `NK_ENTRY` for starting at an arbitrary address.  These features resolved a
+  misleading result: the faithful image's old **2,000,000-instruction** trace
+  is a path through ARM code created by the missing Thumb `pop` at
+  `0x5039adcc`; the patched bring-up image still completes the kernel entry in
+  **197 instructions**.  The entry's third call (`0x50313522` →
+  `0x50313518`) is real UPP initialisation (16-bit writes to
+  `0x5815053a/0x5815053c/0x5815056a/0x58150200/0x58150508/0x5815004a`), and
+  the fifth touches `0x58120308`/`0x59e00040`.  Starting at the ROM vector
+  `0x50000000` runs 16,396 ARM instructions, turns on the MMU/cache and
+  installs high vectors, then jumps to 0 — it is exception dispatch, not the
+  reset path.  The two entry calls below the code base (`0x5030fbc6`,
+  `0x5030807a`) remain the main blockers.
+- [x] **Layout audit (round 9)** — export directories are fixed-up function
+  address lists (Thumb entries carry bit 0; a 5-export DLL scores 5/5 on
+  `push` prologues).  The kernel's 478 entries prove that the stored text is
+  not the linked text: only 82 (17.2%) land on a start versus a 13.1% random
+  baseline; the big DLL is 14.4% versus 5.9%.  Padding cannot close that gap
+  (the stored text is already 4-byte aligned for 1,420/1,430 ARM starts and
+  759/787 pools).  [`recompiler/layout.py`](recompiler/layout.py) +
+  [`tools/test_layout.sh`](tools/test_layout.sh) make the audit repeatable and
+  re-frame B1g; details under the frontier below.
 
 **← current frontier →**
 
-- [ ] **Packed-text relayout / function map** — the entry's literal pool is
-  stored two bytes early (at `0x5031008e` instead of `0x50310090`; its values
-  `0x00046564`/`0x00046fca`/`0x00000c03` become valid RAM pointers with the
-  `0x80000000` base).  This is the ROM linker's 4-byte alignment padding that
-  the packer removed, and it explains the even BL-target biases.  The next step
-  is to enumerate function/pool starts, re-insert the padding, rebuild the flat
-  image, and re-run the call census.  The entry's two calls below the code base
-  (`0x5030fbc6`, `0x5030807a`) are part of this unresolved-veneer problem.
-- [ ] **Boot continuation** — the kernel entry now returns to the mask-ROM
-  stand-in; the real post-entry path (boot loader → scheduler) is still
-  unknown.
+- [ ] **Packed text vs. export table** — the kernel's 478 export addresses are
+  all 4-byte aligned and inside the text, but only 82 (17.2%) land on a
+  function start in the stored text, while a random 4-byte-aligned address
+  scores 13.1% (1.31x).  The DLL `0x100039e5` is 14.4% against a 5.9% baseline
+  (2.44x).  Export entries are real fixed-up function addresses — a small
+  Thumb DLL (`\System\Libs` 0x101f6e00) scores 5/5, with the Thumb bit set —
+  so the failure is the stored layout, not the table.  The current relayout
+  (44 pads, `0x58`) leaves only 58/478 kernel entries aligned; the best
+  constant shift (`0xb0`) gives 93/478; a linear drift model gives nothing
+  better.  Since the stored text already keeps 1,420/1,430 ARM starts and
+  759/787 pools 4-byte aligned, padding cannot explain the gap.  The packed
+  text is therefore *not* the linked text at function granularity: recovering
+  the linked layout needs global drift recovery from the export table, the
+  3,854 call sites and the ~7,000 literal code pointers (B1g2), or the layout
+  from the container/ROM build description (B6b).  `recompiler/layout.py`
+  (`census` / `pools` / `verify`) and `tools/test_layout.sh` make this
+  measurable and reproducible.
+- [ ] **Boot continuation** — the kernel entry still returns to the mask-ROM
+  stand-in.  The old claim that recovery + the full image map runs into
+  `euser.dll` and loops at `0x50389330` was a faithful-image artifact (missing
+  Thumb `pop`); the patched image completes the entry in 197 instructions.
+  The entry performs real UPP register writes, but its second call needs a
+  vtable-backed kernel object at `[0x80000000]` and two calls
+  (`0x5030fbc6`, `0x5030807a`) still point below the code base.  The real
+  post-entry path (mask ROM → kernel main → scheduler) is still unknown.
+
 - [ ] **WD2 unpacking** — the extracted 23.3 MB flash image is **not linear**:
   every `TRomImageHeader`+code blob is packed out of line (kernel header at file
   `0x3268c0`, code at `0x32692c`, while the link address is `0x50310000`), and
@@ -197,6 +256,12 @@ tools/test_romimage.sh
 NK_CALL_INFER=1 ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
   --rom-image out/6600_runtime.bin
 
+# round 7: the full image map + the boot module table
+.venv/bin/python recompiler/romimage.py scan 6600_mcu.bin
+.venv/bin/python recompiler/romimage.py names 6600_mcu.bin
+.venv/bin/python recompiler/romimage.py names 6600_mcu.bin --all
+#   722 images placed; ekern.exe -> uid3 0x100058e8, \System\Programs tables
+
 # bring-up image (missing Tail patched) + call-site map + crash recovery
 tools/build_bringup_image.sh
 tools/test_boot_recover.sh
@@ -216,6 +281,12 @@ NK_CALLMAP=config/callmap-6600.txt \
 .venv/bin/python recompiler/relayout.py image 6600_mcu.bin \
   out/6600_runtime.bin out/6600_runtime_relaid.bin
 tools/test_relayout.sh
+
+# round 9: is the stored text the linked text?  Audit the export tables.
+.venv/bin/python recompiler/layout.py census 6600_mcu.bin --json out/layout_census.json
+.venv/bin/python recompiler/layout.py pools 6600_mcu.bin
+.venv/bin/python recompiler/layout.py verify 6600_mcu.bin
+tools/test_layout.sh
 ```
 
 `6600_mcu.bin` is now the **23.3 MB raw EKA1 flash image** extracted from
@@ -262,7 +333,8 @@ full analysis and the relayout plan are in [`docs/BOOT.md`](docs/BOOT.md) and
 ## Toolchain
 
 - **Python 3 + Capstone** — the recompiler (`wd2.py`, `extract.py`, `lift.py`,
-  `gen_register.py`); `dct4decrypt.py` remains for the older 6100 DCT4 chunks.
+  `gen_register.py`, `romimage.py`, `relayout.py`, `layout.py`);
+  `dct4decrypt.py` remains for the older 6100 DCT4 chunks.
 - **IDA Pro 9.1 (headless)** — exact function boundaries on the EKA1 image
   (`extract_ida.py`).
 - **clang** — compiles the generated C + runtime.

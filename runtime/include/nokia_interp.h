@@ -42,6 +42,7 @@ enum {
     NK_STOP_SWI,
     NK_STOP_IAT,        /* unbound import: ldr pc,[ip] slot is null */
     NK_STOP_OUT_OF_IMAGE, /* PC left the mapped ROM/RAM windows */
+    NK_STOP_SPIN,       /* tight loop with no progress (bring-up watchdog) */
     NK_STOP_HOST
 };
 
@@ -76,7 +77,7 @@ typedef struct nk_recover_frame {
 } nk_recover_frame;
 
 #define NK_CALLMAP_MAX 512
-#define NK_CODE_RANGE_MAX 16
+#define NK_CODE_RANGE_MAX 1024
 
 /* A guest code range: the interpreter will only repair a call target inside
  * one of these ranges.  The packed image stores its code and data in separate
@@ -104,6 +105,21 @@ typedef struct nk_callmap_entry {
     uint32_t target;
     uint8_t  thumb;
 } nk_callmap_entry;
+
+/* Ring buffer of the most recent BL/BLX sites and their resolved callees.
+ * The shadow call stack only shows calls that are still on the stack; when a
+ * trace runs into a broken loop deep in a library the ring still shows how it
+ * got there.  Used by NK_WATCH (see boot_kernel.c). */
+#define NK_CALL_RING 64
+typedef struct nk_call_rec {
+    uint32_t call_pc;
+    uint32_t raw_target;   /* target encoded in the instruction */
+    uint32_t target;       /* target after interworking repair */
+    uint32_t r0, r1, r2, r3;
+    uint32_t sp, lr;
+    uint8_t  caller_thumb;
+    uint8_t  callee_thumb;
+} nk_call_rec;
 
 typedef struct nk_interp {
     long     budget;        /* instructions to execute; <=0 means 10,000,000 */
@@ -165,6 +181,26 @@ typedef struct nk_interp {
 
     uint32_t last[16];
     int last_n;
+
+    /* Bring-up observability: recent calls and a one-shot PC watch. */
+    nk_call_rec call_ring[NK_CALL_RING];
+    unsigned    call_ring_n;     /* total calls recorded */
+    uint32_t    watch_pc;        /* dump state the first time PC hits this */
+    int         watch_hits;      /* how many times to report (-1 = every) */
+    int         watch_log;       /* calls to print when the watch fires */
+
+    /* Bring-up watchdog: a tight loop that keeps executing the same few
+     * addresses (typically a descriptor scan with a bogus argument) is treated
+     * as a fault and rolled back through the recovery frame.  spin_max is the
+     * number of visits to a single PC before the loop is declared stuck;
+     * 0 disables the detector. */
+    uint32_t spin_max;
+    uint32_t spin_tag[1024];
+    uint32_t spin_cnt[1024];
+
+    /* Reject a PC outside the ROM/low-alias/high-vector windows.  A corrupted
+     * return otherwise runs the heap as Thumb code for the rest of the budget. */
+    int require_code;
 } nk_interp_t;
 
 void        nk_interp_init(nk_interp_t* ip);

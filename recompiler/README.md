@@ -51,6 +51,16 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   `tools/test_relayout.sh`.  The packed bytes are unchanged; only gaps are
   inserted.  It currently handles the kernel text; moving the following
   images and the out-of-range call targets is still open.
+- **`layout.py`** — audit the packed image layout with the export directory as
+  ground truth.  `census` reports, per image, how many `iExportDir` entries
+  are in the text, 4-byte aligned, Thumb-tagged and actually land on a
+  function start, plus the same number for random addresses (the baseline)
+  and the best constant shift.  `pools` reports literal-pool alignment and
+  adjacent/duplicate pool starts for the kernel.  `verify` is the machine
+  check used by `../tools/test_layout.sh`.  The result: small images are
+  stored in their linked layout (the 5-export Thumb DLL is 5/5) but the
+  kernel and the big DLLs are not — this is the B1g evidence, and it shows
+  that padding alone cannot recover the linked layout.
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

@@ -33,9 +33,12 @@ EKA1_ROM_BASE = 0x50000000
 
 # EKA1 kernel UID (same in the N-Gage and 6600 firmware builds).
 KERNEL_UID3 = 0x100058E8
-# E32Image UID1 values (EKA1).
-UID_EXE = 0x10000079
-UID_DLL = 0x1000007A
+# E32Image UID1 values (EKA1).  Note the order is the opposite of what the
+# names suggest at first glance: 0x1000007a is the executable UID and
+# 0x10000079 is the DLL UID (e32uid.h: KExecutableImageUidValue /
+# KDynamicLibraryUidValue).  The kernel (uid3 0x100058e8) is an EXE.
+UID_EXE = 0x1000007A
+UID_DLL = 0x10000079
 
 
 def u32(b, o):

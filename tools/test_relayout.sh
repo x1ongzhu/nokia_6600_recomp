@@ -78,6 +78,7 @@ NK_BUDGET=${NK_BUDGET:-2000000} \
 NK_RECOVER=1 NK_RECOVER_LOG=${NK_RECOVER_LOG:-24} NK_RECOVER_MAX=200 \
 NK_CALL_INFER=1 NK_SNAP_WINDOW_ARM=${NK_SNAP_WINDOW_ARM:-0x200} \
 NK_SNAP_WINDOW_THUMB=${NK_SNAP_WINDOW_THUMB:-0x400} \
+NK_SPIN=1 NK_SPIN_MAX=${NK_SPIN_MAX:-20000} NK_CODE_ONLY=1 \
 NK_CALLMAP=config/callmap-6600.txt NK_MMIO_N=${NK_MMIO_N:-24} \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
     --rom-image out/6600_runtime_relaid.bin >out/relayout_boot.log 2>&1 || true

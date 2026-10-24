@@ -73,7 +73,7 @@ kernel UID **`0x100058e8`**:
 
 ```
 hdr     0x3268c0      (guest 0x503268c0)
-uid1    0x1000007a
+uid1    0x1000007a    (KExecutableImageUidValue = EXE; e32uid.h)
 uid2    0x1000008b
 uid3    0x100058e8
 entry   0x50310054    (Thumb)
@@ -131,6 +131,34 @@ individual call sites (`NK_CALL_INFER=1`, `NK_CALLMAP`); the open piece is the
 complete function map (leaf entries) and relaying the DLLs.  See
 `docs/BOOT.md`.
 
+### The export directory is a layout oracle
+
+`iExportDir` (`TRomImageHeader +0x40`) is a plain array of
+`iExportDirCount` **fixed-up function addresses**, indexed by ordinal — not a
+name table.  Thumb entries carry the ARM interworking bit (bit 0).  Small
+images confirm this directly: `\System\Libs` DLL `0x101f6e00` has five odd
+entries and all five are `push {..,lr}` starts.
+
+That makes the export table the best test of whether a stored record is the
+*linked* image.  `recompiler/layout.py census` scores every image against the
+function starts found in its stored text.  The split is sharp:
+
+| image | entries | on a start | random baseline | ratio |
+|---|---|---|---|---|
+| `0x101f6e00` (small Thumb DLL) | 5 | **5/5** | 0% | — |
+| `0x10001844` (small DLL) | 8 | 6/8 (2 leaves) | 0% | — |
+| kernel `0x100058e8` | 478 | 82 (17.2%) | 13.1% | 1.31x |
+| DLL `0x100039e5` | 1788 | 258 (14.4%) | 5.9% | 2.44x |
+
+The kernel's stored text already keeps 1,420/1,430 ARM function starts and
+759/787 literal pools 4-byte aligned, so the 2-byte padding removed by the
+packer (`0x58` in the relayout plan) cannot explain a 1.31x score.  Applying
+the relayout still leaves 58/478; the best constant shift (`0xb0`) gives
+93/478.  **The stored kernel/DLL text is not the linked text at function
+granularity.**  Recovering the linked layout is B1g2 (global drift recovery
+from exports + call sites + literal code pointers) or B6b (the container /
+ROM-build description).  `tools/test_layout.sh` pins the measurement.
+
 Two bring-up inputs are now kept under `config/`:
 
 - `config/patches-6600.txt` — bytes missing from the packed text, applied by
@@ -143,27 +171,35 @@ Two bring-up inputs are now kept under `config/`:
   faithful `out/6600_runtime.bin` build.
 
 Separately, the flash is **packed**: the 23.3 MB file is not the linear
-`0x50000000` image.  Every `TRomImageHeader`+code is a packed record, the ROMFS
-has its own packed offsets, and `0x10000..0x2a0000` is the high-entropy
+`0x50000000` image.  Every `TRomImageHeader`+code is a packed record, the
+ROMFS has its own packed layout, and `0x10000..0x2a0000` is the high-entropy
 (8.0 bit/byte) region.  `rom_size` in the header is `0x1600000` (22 MiB).
+
+The records are only **2-byte aligned** (the ROM build removed the linker's
+4-byte padding; `MmfAudioController.dll`'s header, for example, is at file
+`0x7271ca`), so the scanner must step by 2.  Scanning every 4th byte used to
+recover 448 headers and silently dropped 40+ images.  With the 2-byte scan and
+a plausibility filter (declared sections fit before the next header), the ROM
+yields **722 images** from 781 candidates; their text ranges are disjoint and
+span `0x5030ff9c..0x515978dc`, for `0xc4ef20` bytes of text.
 
 `recompiler/romimage.py build` reconstructs the flat runtime image from those
 records:
 
 ```
 0x50000000..0x50010000   boot code / vectors        (file 0..0x10000, linear)
-0x50300000..0x50310000   ROMFS root list + dirs     (file 0x3162b0..0x3262b0)
+0x50300000..0x5030ff9c   ROMFS root list + dirs     (packed block + overlays)
 0x50310000               kernel text                (file 0x326924)
 0x50338ac0               kernel .data               (file 0x350740)
 0x50338fc0               kernel .edata              (file 0x350c40)
 0x50339738               kernel dll-ref table       (file 0x3513b8)
-0x503397b4..0x5042f170   kernel-reachable DLLs
-0x5043fc90..0x51600000   171 ROMFS files            (file = va - 0x50000000)
+0x503397b4..0x515978dc   722 packed images          (all records, disjoint)
 ```
 
-The output is `out/6600_runtime.bin` (exactly `0x1600000` bytes); 184 placed
-sections do not overlap.  The 0x34f5c bytes at the end of the original file
-are a trailer, not ROM content.
+The output is `out/6600_runtime.bin` (exactly `0x1600000` bytes); 1,580 placed
+sections do not overlap (`romimage.py build --only-reachable` keeps the old
+3-image behaviour).  The 0x34f5c bytes at the end of the original file are a
+trailer, not ROM content.
 
 Two sections are still unplaced because no header describes them: the kernel's
 `0x135c` bytes at file `0x34f3e4` (interrupt names + handler table) and the
@@ -171,38 +207,63 @@ DLL `0x100039e5`'s `0x19dc` bytes at file `0x3cd36c` (UTF-16/pointer tables).
 No literal in the reachable text points at them; the working hypothesis is
 that they are the pre-ROM-build debug/rodata copies.
 
+
 ## ROM file system
 
-The ROMFS is plaintext and can be browsed without the kernel:
+The ROMFS is plaintext, but it is a **directory tree** and its packed layout is
+not linear.  `recompiler/wd2.py list` prints the first packed directory (the
+shared-DLL directory) without needing the kernel; `recompiler/romimage.py
+names` locates the root and the boot directory by content:
 
 ```
-py recompiler/wd2.py list 6600_mcu.bin
-  root list @ 0x503162b0, TRomDir @ 0x3162bc, 171 entries, data @ 0x317e40
-  AcmClassController.dll       size=   0x32c addr=0x5043fc90 attr=0x01
-  101FBF20.RSC                 size=    0x2d addr=0x50440020 attr=0x01
-  Tfcorefilters.dll            size=  0x31e8 addr=0x505df3d0 attr=0x01
-  ...
+py recompiler/romimage.py names 6600_mcu.bin
+  root directory: file 0x32639c, 2 entries
+    dir  \System      @ 0x5030f180
+    dir  \Nokia       @ 0x5030fa54
+  \System: file 0x325aa4, 23 entries
+    dir  \System\Programs @ 0x50307964
+    dir  \System\Libs     @ 0x50301ec0
+    ...
+  \System\Programs: file 0x318170, 236 entries
+    file \System\Programs\ekern.exe  0x02974c @ 0x5030ff9c  -> uid3 0x100058e8
+    file \System\Programs\ecust.dll  0x002320 @ 0x50339750  -> uid3 0x100058e7
+    ...
 ```
 
 `TRomDir` is `iSize` + `{size, addr_lin, attr, name_len, UTF-16 name}`
-records, 4-byte aligned.  The `addr_lin` values are **runtime** addresses:
+records, 4-byte aligned.  The `attr & 0x10` bit marks a subdirectory; its
+`addr_lin` is the runtime address of another `TRomDir`, so the tree can be
+walked.  `iSize` is the number of bytes after the 4-byte size word.
 
-- The root list's runtime VA is the stored ROM-header pointer **`0x50300000`**;
-  its packed file offset is **`0x3162b0`**.  The `+0x162b0` number quoted by
-  older notes is the file-offset difference, not a runtime bias.
-- The packed directory block is the 64 KiB `[0x3162b0, 0x3262b0)`.  Its last
-  `0x64` bytes coincide with the kernel's `TRomImageHeader`, so the directory
-  data maps to `[0x50300000, 0x5030ff9c)` and the header sits at
-  `0x5030ff9c`.  The `iAddress` field inside the root list (`0x5030fa78`)
-  does **not** match the directory's packed position; the flat image copies
-  the whole block rather than trusting it.
-- The 171 **file** entries are different: `addr_lin` is exact and the file
-  data is stored **linearly**, `file_offset = addr_lin - 0x50000000`.  They
-  occupy `0x5043fc90..0x515ed6e0`, with no overlaps.  The old `+0x16538`
-  entry bias is obsolete.
+| structure | packed file | runtime VA | entries |
+|---|---|---|---|
+| root list | `0x3162b0` | `0x50300000` | 1 |
+| root dir | `0x32639c` | `0x5030fa78` | 2 |
+| `\System` | `0x325aa4` | `0x5030f180` | 23 |
+| `\System\Libs` | `0x3162bc` | `0x50301ec0` | 171 |
+| `\System\Programs` | `0x318170` | `0x50307964` | 236 |
+
+The stored `addr_lin` values are *final-layout* addresses, while the packed
+bytes were written after the ROM build removed alignment gaps, so a single
+`file = va - 0x50000000` bias does **not** map the tree.  `romimage.py` locates
+each directory by its content (the set of names it contains, and the first
+entry name) inside the packed block and places it at its stored VA.
+
+The entry `addr_lin` values are **not** file offsets either:
+
+- entries whose address equals `image.code - 0x64` name a **packed image
+  record** (a DLL or EXE); the record is found by scanning the flash at
+  2-byte alignment, and the image's text/data/edata/dllref are placed at their
+  own runtime addresses.  `ekern.exe` is the kernel (`uid3 0x100058e8`);
+- the remaining entries are data files (`.rsc`, `.mbm`, `.r01`, `.wav`, `.mid`,
+  fonts, ...).  Their bytes are stored **in packed FS order**, back to back
+  with `0xff` padding, at file offsets unrelated to `addr_lin`; the old
+  `file = addr_lin - ROM_BASE` assumption copied unrelated code into the flat
+  image and is now disabled (`--romfs-linear` is an experiment only).
 
 None of this is encryption: the ROMFS and the image records are plaintext; the
 container header is a fixed, keyless WD2 wrapper.
+
 
 ## 6100 and the older DCT4 format
 

@@ -155,6 +155,132 @@ with the DLLs relaid as well.
 tools/test_relayout.sh
 ```
 
+### Round 7: the full image map and the ROMFS tree (2026-10-24)
+
+Two things were wrong with the flat image, and both were silent:
+
+1. **Packed records are 2-byte aligned.**  `TRomImageHeader` can start at
+   2 mod 4 because the ROM build removed the linker's 4-byte padding.
+   `MmfAudioController.dll`'s header, for example, is at file `0x7271ca`.
+   Scanning every 4th byte missed 40+ images.  A 2-byte scan plus a
+   record-plausibility filter (declared sections must fit before the next
+   header; the unexplained rodata gap must be small) recovers **722 images**
+   from 781 candidates.  Their text ranges are disjoint and span
+   `0x5030ff9c..0x515978dc`.  `romimage.py build` now places **all** of them
+   (1,580 sections, no overlaps), not just the kernel and its two direct DLL
+   references.  The boot harness's flat-image loader scans at 2 bytes too and
+   declares the kernel + its `TDllRefTable` DLLs as code ranges by default
+   (`NK_RANGE_ALL=1` accepts every image for call repair).
+
+2. **ROMFS has a directory tree, and file data is not linear.**  The 64 KiB
+   block below the kernel is a compressed *copy* of the directories, not a
+   linear mapping.  Locating directories by content recovers:
+
+   | directory | packed file | runtime VA | entries |
+   |---|---|---|---|
+   | root | `0x32639c` | `0x5030fa78` | 2 (`\System`, `\Nokia`) |
+   | `\System` | `0x325aa4` | `0x5030f180` | 23 |
+   | `\System\Libs` | `0x3162bc` | `0x50301ec0` | 171 |
+   | `\System\Programs` | `0x318170` | `0x50307964` | 236 |
+
+   `\System\Programs` is the boot module table: `ekern.exe` (the kernel,
+   uid3 `0x100058e8`, code `0x50310000`), `ecust.dll`, `ecomm.ldd`,
+   `EStart.exe`, `EFile.exe`, `EFSrv.dll`, ...  `romimage.py names` prints it
+   and maps each entry to its packed record (`ekern.exe` is at file
+   `0x3268c0`).  193/236 Programs entries and 73/171 Libs entries map to
+   packed images; the rest are resources (`.rsc`, `.mbm`, `.r01`, ...).
+
+   The data files themselves are stored in packed FS order with `0xff`
+   padding, not at `addr - 0x50000000`.  The old build copied from the linear
+   address and therefore spliced unrelated code into ~17 MB of the flat image;
+   `build` now leaves those bytes empty unless `--romfs-linear` is passed.
+
+The faithful image still reaches 364 instructions (without recovery) and the
+relaid image still returns after 289.  With `NK_RECOVER=1` and the full image
+map on the **faithful** image (no bring-up patch), the trace runs past the entry
+into `euser.dll` and settles in the old round-4 loop at `0x50389330`.  That long
+run is a **patch artifact**: the missing Thumb `pop` at `0x5039adcc` lets the
+helper run into ARM code.  The bring-up image (same layout plus
+`config/patches-6600.txt`) completes the entry in 197 instructions; see the
+round-8 section below.
+
+### Round 7 finding: the export table does not match the packed text
+
+The kernel's export directory holds 478 addresses, all 4-byte aligned and
+inside the text.  Only **17** of them land on a detected prologue; the
+backward distances to the nearest prologue are almost uniformly distributed
+(0, 4, 8, ... 44 each occur 10-18 times).  Cumulative alignment padding cannot
+produce that: the total padding is `0x58` bytes and would grow monotonically.
+The packed text and the export directory therefore come from different
+layouts.  The relayout pass repairs literal-pool alignment inside a function
+but cannot recover inter-function call edges; that needs symbol-level
+recovery (B1g in `docs/PROGRESS.md`), not a larger snap window.
+
+### Round 9: the export table is the layout oracle (2026-10-24)
+
+The export directory is a **fixed-up list of function addresses**, indexed by
+ordinal (Symbian's `TRomImageHeader` documentation: "the export directory is a
+simple list of functions, which can be indexed by ordinal").  Thumb entries
+carry the interworking bit (bit 0), so a 4-aligned-only reading loses data.
+This makes it the best available ground truth for the layout question: after
+a correct unpack every entry must be a function start in the text.
+
+`recompiler/layout.py census` measures that.  Two controls validate the
+method first:
+
+| image | exports | on a start | note |
+|---|---|---|---|
+| `\System\Libs` 0x101f6e00 (small Thumb DLL) | 5 | **5/5 (100%)** | all odd, all `push {..,lr}` |
+| 0x10001844 (small DLL) | 8 | 6/8 | the two misses are leaf entries |
+
+For the boot-critical images the same test fails, and not by a small margin:
+
+| image | exports | in text | on a start | random baseline | ratio |
+|---|---|---|---|---|---|
+| kernel 0x100058e8 | 478 | 478 | **82 (17.2%)** | 13.1% | **1.31x** |
+| DLL 0x100039e5 | 1788 | 1726 | **258 (14.4%)** | 5.9% | **2.44x** |
+
+"Random baseline" is the fraction of arbitrary text addresses that the same
+detector calls a function start, so 1.31x means the kernel's export table is
+essentially unrelated to the stored text layout.  Other tests confirm this is
+not an alignment offset:
+
+* applying the current relayout plan (44 pads, `0x58`) and following it
+  backwards still gives only **58/478** kernel entries;
+* the best **constant** shift is `0xb0`, and only gives **93/478**;
+* a linear (or widening) drift model over 100k combinations gives nothing
+  better than the constant shift;
+* the stored kernel text keeps **1420/1430** ARM function starts and
+  **759/787** literal pools 4-byte aligned.  Two-byte padding therefore
+  cannot account for more than `0x58` of address drift.
+
+Conclusion: the packed text's function layout is **not** the linked layout.
+This is stronger than the round-7 statement ("padding is only a partial
+repair"): no padding pass can recover the linked layout, because the drift is
+larger than, and not monotone with, the observed pool/function alignment.
+`relayout` remains useful (it is directly validated by the pool literals and
+fixes the entry's `ldr`), but it cannot restore inter-function semantics.
+
+Consequences for the bring-up:
+
+* stop tuning snap windows against the export/call mismatch;
+* keep the runtime's bounded snap/callmap as an explicit **bring-up** layer,
+  not as the faithful execution path;
+* the next layout step is global recovery from the 478 kernel exports plus
+  the 3,854 call sites and the ~7,000 literal code pointers (B1g2), or
+  obtaining the linked layout from the container / ROM build description
+  (B6b);
+* the entry still runs because drift is zero at the start of the text and
+  grows slowly: nearby callees stay inside the intended function, which is
+  exactly why snap-to-nearest-start works for the first few calls.
+
+```
+.venv/bin/python recompiler/layout.py census 6600_mcu.bin --json out/layout_census.json
+.venv/bin/python recompiler/layout.py pools 6600_mcu.bin
+.venv/bin/python recompiler/layout.py verify 6600_mcu.bin
+tools/test_layout.sh
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):
@@ -202,6 +328,9 @@ The bring-up stack now has five layers:
 | call-site map | `NK_CALLMAP=config/callmap-6600.txt` | pin one call site to its real callee, or to a host-side HLE helper (`div`, `mod`, `memzero`, bump `alloc`, `memcpy`) |
 | missing-byte patches | `romimage.py build --patch config/patches-6600.txt` | restore bytes the packed image does not contain (the first one is the `pop {r4,r7,pc}` at `0x5039adcc` that the following packed table overwrote) |
 | crash recovery | `NK_RECOVER=1` | snapshot the caller at every BL/BLX; if the callee faults, roll back, log the skipped call, return 0, and keep going |
+| spin watchdog | `NK_SPIN=1`, `NK_SPIN_MAX=n` | a tiny loop that keeps revisiting one PC (bogus descriptor/length) is rolled back like a fault instead of burning the budget |
+| code-space guard | `NK_CODE_ONLY=1` | a PC in RAM (or outside ROM/low alias/high vectors) is a corrupted return, not code |
+| call ring / watch | `NK_WATCH=addr`, `NK_WATCH_LOG=n` | on a watched PC, print registers and the last n BL/BLX sites with their arguments and resolved targets |
 
 Measured with `tools/test_boot_recover.sh` **after the Thumb fix**:
 
@@ -210,6 +339,11 @@ Measured with `tools/test_boot_recover.sh` **after the Thumb fix**:
 | baseline `tools/build_boot_trace.sh` | 12 | — | `0x50314c16` (Thumb BL into ARM, no veneer) |
 | assisted `NK_CALL_INFER=1` | 364 | — | `0x5038337c`, `lr=0`, no undefined |
 | recovery + patch + callmap | **197** | **4** | entry returns to `0xdead0000` |
+| recovery, **faithful image** (no patch) | 2,000,000 | 23 | long garbage path: missing `pop` at `0x5039adcc`, then `euser.dll`, then the `0x50389330` scan loop |
+
+The faithful-image row is deliberately kept as a warning: a long run is not
+progress.  With the spin watchdog it becomes a sequence of recoveries and a
+budget stop, not a new frontier.
 
 (`recoveries` in the stats line counts both a real stack rollback and an
 out-of-code call skipped by the code-range guard.)
@@ -392,33 +526,93 @@ The 23.3 MB `6600_mcu.bin` is not the linear `0x50000000` image:
 - `0x10000..0x2a0000` is an 8.0 bit/byte high-entropy region (likely packed
   data), but the ROM images themselves are plaintext records.
 
+## Round 8 (2026-10-24): call ring, spin watchdog, and the real entry frontier
+
+The interpreter grew three bring-up observability features that are now part of
+the normal workflow:
+
+- **`NK_WATCH=<addr>`** — when the PC first reaches `addr`, print the registers
+  and a ring of the last `NK_WATCH_LOG` BL/BLX calls (call site, raw target,
+  resolved target, caller/callee mode, r0-r3, sp).  This answers "how did we
+  get here" without a 2-million-line trace.
+- **`NK_SPIN=1` / `NK_SPIN_MAX=n`** — a tight-loop watchdog.  A descriptor scan
+  with a bogus argument turns into a 2 GiB loop; after `n` visits to one PC the
+  interpreter rolls the call back through the recovery frame instead of burning
+  the budget.
+- **`NK_CODE_ONLY=1`** (default in the boot harness) — a PC outside ROM
+  (`0x50000000..0x51000000`), the low pre-MMU alias (`<3 MiB`) or the high
+  vectors is treated as a corrupted return, not as code.  `NK_ENTRY=<addr>`
+  overrides the start address (used to run the ROM vector table).
+
+New findings:
+
+1. **The old "2M instruction" frontier was a patch artifact.**  With the
+   faithful image (no patch) and `NK_RECOVER=1`, the missing `pop` at
+   `0x5039adcc` lets the Thumb helper run into ARM code, which is recovered and
+   sends the trace down a long garbage path into `euser.dll` — including the
+   `0x50389330` string loop.  With the bringup image (the same image plus
+   `config/patches-6600.txt`) the entry completes in **197 instructions** and
+   returns to the mask-ROM sentinel.  Always compare faithful and bringup runs;
+   a long run is not automatically progress.
+2. **The kernel entry performs real UPP initialisation.**  With the bringup
+   image the third call (`0x50313522`, snapped to `0x50313518`) writes
+   `0x5815053a`, `0x5815053c`, `0x5815056a`, `0x58150200`, `0x58150508` and
+   `0x5815004a` (16-bit UPP registers), and the fifth call touches
+   `0x58120308` / `0x59e00040`.  This is the first confirmed device-init code,
+   not just logging.
+3. **The kernel EXE UID is `0x1000007a`.**  `e32uid.h` defines
+   `KExecutableImageUidValue=0x1000007a` and
+   `KDynamicLibraryUidValue=0x10000079`; `wd2.py` and `romimage.py` had the two
+   names swapped (the filter accepted both, so behaviour did not change).  The
+   kernel is an EXE, which is why its entry is expected not to return.
+4. **The ROM vector table is exception dispatch, not the reset path.**  Booting
+   at `0x50000000` runs **16,396 ARM instructions**, enables the MMU/cache via
+   CP15 c1, writes `0x580047e0`/`0x580047dc`, installs high vectors, and then
+   branches to 0 (the vector page executed as data).  The mask ROM enters the
+   kernel through the primary image header, so `0x50310054` remains the correct
+   start.
+5. **The second entry call needs kernel object state.**  It reaches
+   `0x503364b0`, which dereferences a vtable from a stack argument and calls
+   slot `+0x14`; with r0=0 the vtable is null and the call is recovered.  The
+   old "unbound IAT" log line was a misclassification of
+   `ldr pc,[r3,#0x14]`; the detector now requires `ldr pc,[ip]` with offset 0,
+   so the recovery reports "pc left the image" instead.  The kernel's
+   global/object state at `0x80000000` and the stack descriptor must be modelled
+   before that call can run.
+
+The two calls below the code base (`0x5030fbc6`, `0x5030807a`) are still the
+main entry blockers.  They are not fixed by a bigger snap window: both targets
+lie in the ROMFS directory block, and every nearby candidate in the final text
+is mid-function.
+
 ## Next tasks
 
-1. **Complete the relayout (P0)** — round 6 implements the padding pass
+1. **Resolve the entry's two out-of-range calls (P0)** — `0x5030fbc6` and
+   `0x5030807a` are below the kernel code base.  They land inside the ROMFS
+   directory block; the +0x10000 hypothesis lands mid-function, so the mapping
+   is not a simple relocation.  Try the WD2 "ALGORITHM" bytecode, a
+   function-order/constraint solver, and the kernel's own export/veneer layout.
+2. **Model the kernel object state (P0/P1)** — `0x80000000` starts as zero and
+   the entry's second call expects a vtable-backed object at `[0x80000000]`
+   (slot `+0x14`).  Decide whether the mask-ROM stand-in must pre-fill the
+   super page / kernel data or whether that call should be HLE'd for bring-up.
+3. **Complete the relayout** — round 6 implements the padding pass
    (`recompiler/relayout.py`) and validates the entry pool and the
-   `0x50312100` helper.  What remains is the **complete function map**: leaf
-   functions without a `push`/`stmdb` prologue are not yet alignment entities,
-   which is why the shift at the first callee is `0x14` instead of the `0x18`
-   its encoded target expects.  Add export-derived and cross-referenced leaf
-   starts, then rebuild the flat image with the DLLs relaid too.  Re-run
-   `romimage.py calls` and the boot trace; the old 2M/20M traces and the
-   round-4 census remain invalid.
-2. **Resolve the entry's two out-of-range calls** — `0x5030fbc6` and
-   `0x5030807a` are below the kernel code base.  They are either linker veneer
-   slots or code that the packed record does not contain; recovering them is
-   part of the relayout/veneer work, not a snap-window problem.
-3. **The header-less rodata blocks** — decide whether they belong to `.text`,
+   `0x50312100` helper.  Round 7 shows the model is incomplete: the packed
+   text and the export directory do not share a layout (only 17/478 exports
+   land on a prologue, with a uniform bias distribution).  The next step is
+   symbol-level recovery (a function-order/constraint solver), not more
+   padding or a larger snap window.
+4. **The header-less rodata blocks** — decide whether they belong to `.text`,
    to a RAM copy, or are debug data.  The kernel's block contains an
    interrupt-name/handler table but is not referenced by any literal in the
-   reachable text.  The entry's truncated string at the text boundary suggests
-   the block may be a continuation of the same rodata, so re-check this after
-   relayout.
-4. **Boot continuation** — the kernel entry now returns to the mask-ROM
-   stand-in.  Find the real post-entry path (the mask ROM / boot loader's next
-   call) so the trace can continue into the scheduler instead of stopping at
-   the sentinel.
-5. **Mask ROM stand-in** — CP15/MMU flat mapping, high vectors, SVC/IRQ state.
-6. **MMIO/display** — the entry already writes UPP registers around
+   reachable text.
+5. **ROMFS data files (B3g)** — rebuild the packed FS order (directory →
+   file offset) so the pictures, ringtones, fonts and resource files can be
+   placed in the flat image and served by a future file HLE.
+6. **Mask ROM stand-in** — CP15/MMU flat mapping, high vectors, SVC/IRQ state,
+   and the initial super-page/kernel-data contents.
+7. **MMIO/display** — the entry already writes UPP registers around
    `0x58150000` / `0x58150500`; the next useful milestone is a real UPP
    display/timer/keypad register table rather than logging every access.
 
