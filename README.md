@@ -194,6 +194,19 @@ criteria and phased roadmap live in
   (the rest is overwritten by the next packed record); `romimage.py` validates
   entries and reports this instead of inventing names.  The `.r01`/`.wav`
   resources still need B3g.
+- [x] **Padding-only layout rejected; mask-ROM loader entry (round 11)** —
+  `layout.py drift` tests the strongest "packed text + non-decreasing 2-byte
+  padding" model (any stored start below an export, any monotone drift).  The
+  kernel reaches 149/183/225 of 478 at budgets `0x60/0xc0/0x200`, against a
+  random-address null of 140/169/217 (**1.04–1.09x**), so no padding/relayout
+  can recover the linked order.  The census now reports `in-code%`: 135 images
+  have every export inside their own code (the kernel is one), 155 are about
+  half (a separate parser/format question), 36 lower, 366 none.  The boot
+  harness accepts `NK_Rn`; the mask-ROM secondary loader is
+  **`0x500003bc` → `0x50001648`**, driven by the `KaeP` descriptor at
+  `0x50000124`.  It runs 211 instructions before stale calls are recovered, or
+  300k+ into a missing boot image/super-page table when the first call is
+  snapped.  `tools/test_layout.sh` pins the drift null test.
 
 **← current frontier →**
 
@@ -208,15 +221,20 @@ criteria and phased roadmap live in
   bit set — so the failure is the stored layout, not the table.  The current
   relayout (44 pads, `0x58`) leaves only 58/478 kernel entries aligned; the
   best constant shift (`0xb0`, now `0x128` with the pool-aware detector) gives
-  at most ~112/478; a monotone drift model over the export order does not fit.
+  at most ~112/478; round 11's null test rejects the monotone-drift model.
   Since the stored text already keeps 1,420/1,430 ARM starts and 759/787 pools
-  4-byte aligned, padding cannot explain the gap.  The packed text is
-  therefore *not* the linked text at function granularity: recovering the
-  linked layout needs global drift recovery from the export table, the 3,854
-  call sites and the ~7,000 literal code pointers (B1g2), or the layout from
-  the container/ROM build description (B6b).  `recompiler/layout.py`
-  (`census` / `pools` / `verify`) and `tools/test_layout.sh` make this
-  measurable and reproducible.
+  4-byte aligned, padding cannot explain the gap.  Round 11 adds
+  `layout.py drift`, the strongest padding-only model: an export may match any
+  stored start below it with a non-decreasing cumulative drift.  It reaches
+  149/183/225 of 478 exports at drift budgets `0x60/0xc0/0x200`, while the
+  same matcher on random addresses reaches 140/169/217 — a **1.04–1.09x**
+  ratio, i.e. the null.  The packed text is therefore *not* the linked text at
+  function granularity, and **no monotone padding/drift recovery can fix it**.
+  Recovering the linked layout needs an explicit function-order/relocation
+  table from the container/ROM build description (B6b) or a symbol-level
+  permutation (B1g2b).  `recompiler/layout.py`
+  (`census` / `pools` / `drift` / `verify`) and `tools/test_layout.sh` make
+  this measurable and reproducible.
 - [ ] **Packed ROMFS is truncated** — the packed `\System\Programs`
   `TRomDir` declares `0x5608` bytes but only **9 entries / 0x114 bytes** are
   present; the next packed image record overwrites the rest (`0x54f4` bytes).
@@ -246,8 +264,14 @@ criteria and phased roadmap live in
   `rom_size = 0x1600000`; file size is `0x1634f5c`. The 2.7 MB high-entropy
   region (`0x10000..0x2a0000`) is the likely packed core.
 - [ ] **Mask ROM** — the reset path at `0x00e00000` (entry `0x00e0ca39`) is in
-  the UPP's internal boot ROM and is not in the flash dump; the runtime has to
-  supply the initial MMU/vector state before the kernel entry.
+  the UPP's internal boot ROM and is not in the flash dump.  Round 11 found the
+  secondary loader entry it calls: **`0x500003bc` → `0x50001648`**, driven by
+  the **`KaeP`** descriptor at `0x50000124` (payload `0x130`).  With the
+  `NK_Rn` register overrides the loader executes 211 instructions before the
+  stale call sites are recovered; snapping the first one lets it run 300k+
+  instructions into a **boot image/super-page table** (`base=0`,
+  `count≈0x80000000`) that the mask ROM should have installed.  Modelling that
+  table is the next boot step.
 - [ ] **MMIO + display** — the sparse bus is in place; the entry already writes
   UPP registers around `0x58150000`, which is the first real device surface.
 - [ ] **First light** — the Nokia boot logo on a host window.
@@ -317,11 +341,18 @@ NK_CALLMAP=config/callmap-6600.txt \
   out/6600_runtime.bin out/6600_runtime_relaid.bin
 tools/test_relayout.sh
 
-# round 9: is the stored text the linked text?  Audit the export tables.
+# round 9/11: is the stored text the linked text?  Audit the export tables.
 .venv/bin/python recompiler/layout.py census 6600_mcu.bin --json out/layout_census.json
 .venv/bin/python recompiler/layout.py pools 6600_mcu.bin
+.venv/bin/python recompiler/layout.py drift 6600_mcu.bin --json out/layout_drift.json
 .venv/bin/python recompiler/layout.py verify 6600_mcu.bin
 tools/test_layout.sh
+
+# round 11: mask-ROM secondary loader entry (registers via NK_Rn)
+NK_ENTRY=0x500003bc NK_R11=0x80000000 NK_R10=0 \
+  NK_RECOVER=1 NK_CODE_ONLY=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
 ```
 
 `6600_mcu.bin` is now the **23.3 MB raw EKA1 flash image** extracted from

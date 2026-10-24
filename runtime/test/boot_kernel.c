@@ -511,6 +511,17 @@ int main(int argc, char** argv) {
     cpu.r[0] = (uint32_t)env_ulong("NK_R0", 0);
     cpu.r[1] = (uint32_t)env_ulong("NK_R1", 0);
     cpu.r[2] = (uint32_t)env_ulong("NK_R2", 0);
+    /* Mask-ROM stand-in: the UPP boot ROM enters the secondary loader with
+     * r11 (fp), r10 (sl) and the other callee-saved registers already set.
+     * NK_Rn makes those entry conditions reproducible, e.g.
+     *   NK_ENTRY=0x500003bc NK_R11=0x80000000 NK_R10=0x...
+     *   ./out/boot_kernel ... --rom-image out/6600_runtime.bin
+     * The existing NK_R0/NK_R1/NK_R2 names keep working. */
+    for (int i = 0; i <= 12; i++) {
+        char name[16];
+        snprintf(name, sizeof name, "NK_R%d", i);
+        cpu.r[i] = (uint32_t)env_ulong(name, cpu.r[i]);
+    }
     /* Stand in for the mask-ROM/bootstrap caller: the kernel entry returns to
      * a sentinel so a completed entry is reported as a clean return instead of
      * "pc left the image". */

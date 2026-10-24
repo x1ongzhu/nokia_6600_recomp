@@ -17,6 +17,9 @@
 #     that the stored text is not the linked text
 #   - the pool-aware detector (round 10) finds more leaf starts (104/478) and
 #     raises the baseline in step (17.2%), so the ratio stays near 1.3x
+#   - the strongest padding-only model (round 11: any stored start below the
+#     export, non-decreasing drift) only matches the random-address null
+#     (1.03-1.08x), so monotone drift/relayout is not the answer
 #
 # Run tools/test_romimage.sh as well: that one checks the assembled flat image.
 set -eu
@@ -38,10 +41,13 @@ mkdir -p out
 CENSUS=out/layout_census.json
 CENSUS_LOG=out/layout_census.log
 POOLS_LOG=out/layout_pools.log
+DRIFT=out/layout_drift.json
+DRIFT_LOG=out/layout_drift.log
 VERIFY_LOG=out/layout_verify.log
 
 "$PY" recompiler/layout.py census "$ROM" --json "$CENSUS" >"$CENSUS_LOG"
 "$PY" recompiler/layout.py pools "$ROM" >"$POOLS_LOG"
+"$PY" recompiler/layout.py drift "$ROM" --null 12 --json "$DRIFT" >"$DRIFT_LOG"
 "$PY" recompiler/layout.py verify "$ROM" >"$VERIFY_LOG"
 
 fail=0
@@ -63,6 +69,8 @@ check "alignment plan      : 44 inserts, 0x58 bytes" "$POOLS_LOG" \
     "alignment-only drift is bounded"
 check "0x100058e8" "$CENSUS_LOG" "kernel export census present"
 check "0x101f6e00" "$CENSUS_LOG" "reference DLL export census present"
+check "kernel scores at the null level" "$DRIFT_LOG" \
+    "padding-only drift model is rejected"
 
 # The census must keep reporting a real split: the kernel export table does
 # not describe the stored text, while the small Thumb DLL does.
@@ -75,8 +83,9 @@ small = rows.get("0x101f6e00")
 if not k or not small:
     print("FAIL: census is missing the kernel or the reference DLL")
     raise SystemExit(1)
-if k["exports"] != 478 or k["in_text"] != 478:
-    print(f"FAIL: kernel census {k['exports']} exports / {k['in_text']} in text")
+if k["exports"] != 478 or k["in_text"] != 478 or k.get("in_code") != 478:
+    print(f"FAIL: kernel census {k['exports']} exports / {k['in_text']} in text / "
+          f"{k.get('in_code')} in code")
     raise SystemExit(1)
 if k["start_rate"] is None or k["base_rate"] is None:
     print("FAIL: kernel census has no start/base rate (text too small?)")
@@ -99,11 +108,37 @@ if small["start"] != small["exports"]:
 print(f"ok: reference DLL {small['start']}/{small['exports']} starts")
 EOF
 
+# B1g2: even the strongest padding-only relayout (any stored start below an
+# export, any non-decreasing drift up to the budget) must not beat the random
+# null.  If it does, the "stored function order is not the linked order"
+# conclusion is stale and this test should fail loudly.
+"$PY" - "$DRIFT" <<'EOF' || fail=1
+import json, sys
+d = json.load(open(sys.argv[1]))
+rows = {r["max_drift"]: r for r in d["results"]}
+r = rows.get(0x200)
+if r is None:
+    print("FAIL: drift JSON has no 0x200 budget row")
+    raise SystemExit(1)
+if r["chain"] < 100:
+    print(f"FAIL: drift matcher regressed (chain={r['chain']})")
+    raise SystemExit(1)
+if r["ratio"] is None or r["ratio"] >= 1.2:
+    print(f"FAIL: padding-only drift now fits the kernel "
+          f"(chain={r['chain']}, null={r['null_avg']:.1f}, "
+          f"ratio={r['ratio']:.2f}); revisit B1g2")
+    raise SystemExit(1)
+print(f"ok: drift chain {r['chain']}/{r['exports']} vs null "
+      f"{r['null_avg']:.1f} ({r['ratio']:.2f}x); padding cannot explain it")
+EOF
+
 if [ "$fail" -ne 0 ]; then
     echo "--- $VERIFY_LOG ---"
     cat "$VERIFY_LOG"
     echo "--- $POOLS_LOG ---"
     cat "$POOLS_LOG"
+    echo "--- $DRIFT_LOG ---"
+    cat "$DRIFT_LOG"
     echo "--- $CENSUS_LOG (head) ---"
     sed -n '1,16p' "$CENSUS_LOG"
     exit 1

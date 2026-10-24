@@ -351,6 +351,69 @@ tools/test_layout.sh
 tools/test_romimage.sh
 ```
 
+### Round 11: padding-only drift is rejected; the mask-ROM loader entry (2026-10-25)
+
+**1. No monotone drift can explain the kernel export table.**  The strongest
+form of the "packed text is the linked text with 2-byte padding removed" model
+does not require a fixed shift: it may match an export `V` to *any* stored
+function start `c <= V`, with a **non-decreasing** cumulative drift `V - c`,
+and it may skip exports.  `layout.py drift` finds the longest such monotone
+matching and compares it with the same statistic on random text addresses (the
+null hypothesis):
+
+| drift budget | best chain | null avg | null max | ratio |
+|---|---|---|---|---|
+| `0x60` | 149/478 (31.2%) | 140.4 | 152 | **1.06x** |
+| `0xc0` | 183/478 (38.3%) | 168.6 | 186 | **1.09x** |
+| `0x200` | 225/478 (47.1%) | 217.2 | 227 | **1.04x** |
+
+The best padding-only model is statistically indistinguishable from random.
+This closes the **monotone drift** branch of B1g2: the difference is not a
+removed-padding offset, it is a different **function order** (or a relocation
+table).  Recovering it needs an explicit function-order/relocation table or a
+symbol-level permutation, not more padding.
+
+**2. The census now distinguishes a wrong layout from a wrong export table.**
+`layout.py census` adds an `in-code%` column.  Across 692 images with exports:
+135 have every entry inside their own code range (the kernel and the big DLLs),
+155 are about half in-code (the export section is probably misplaced or the
+"header" is a data false positive), 36 are lower and 366 are none.  The kernel
+is fully in-code, so its low start rate is a real layout mismatch, not a
+parser artifact.  The half-in-code group is recorded as the next cleanup, not
+used as layout evidence.
+
+**3. The mask-ROM loader entry is identified.**  The boot harness now accepts
+`NK_Rn` (n = 0..12) so the register state the UPP boot ROM would pass can be
+reproduced.  The secondary loader entry is **`0x500003bc`**:
+
+```
+500003bc  mov  r0, fp                 ; r11
+500003c0  sub  r1, pc, #0x298         ; 0x50000130 -> KaeP descriptor
+500003c4  mov  r2, sl                 ; r10
+500003c8  mov  r3, #0
+500003cc  b    0x50001648             ; image loader/relocator
+```
+
+The `KaeP` block at `0x50000124` (`"KaeP"`, size `0x20`, value `0x1423dc`,
+payload at `0x130`) is the loader descriptor.  Without call repair the loader
+executes **211 instructions**, recovers 10 stale calls and returns to the
+sentinel.  With `NK_CALL_POLICY=3 NK_SNAP_WINDOW=0x400` the first stale call
+snaps to its real start and the loader runs **>300,000 instructions**, then
+scans a table whose base is 0 and whose count is about `0x80000000`.  That
+table is the **boot image/super-page state the mask ROM installs**; it is not
+present in the flash dump.  The next boot task is therefore concrete: model
+that table, not another snap window.
+
+```
+.venv/bin/python recompiler/layout.py drift 6600_mcu.bin \
+  --json out/layout_drift.json
+
+NK_ENTRY=0x500003bc NK_R11=0x80000000 NK_R10=0 \
+  NK_RECOVER=1 NK_CODE_ONLY=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+  --rom-image out/6600_runtime.bin
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):
@@ -401,6 +464,7 @@ The bring-up stack now has five layers:
 | spin watchdog | `NK_SPIN=1`, `NK_SPIN_MAX=n` | a tiny loop that keeps revisiting one PC (bogus descriptor/length) is rolled back like a fault instead of burning the budget |
 | code-space guard | `NK_CODE_ONLY=1` | a PC in RAM (or outside ROM/low alias/high vectors) is a corrupted return, not code |
 | call ring / watch | `NK_WATCH=addr`, `NK_WATCH_LOG=n` | on a watched PC, print registers and the last n BL/BLX sites with their arguments and resolved targets |
+| entry/register injection | `NK_ENTRY=addr`, `NK_Rn=value` (n=0..12), `NK_SP`, `NK_LR` | reproduce a mask-ROM entry without writing a new harness; `NK_R11` is `fp`, `NK_R10` is `sl` |
 
 Measured with `tools/test_boot_recover.sh` **after the Thumb fix**:
 

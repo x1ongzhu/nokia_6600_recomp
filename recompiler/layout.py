@@ -24,17 +24,28 @@ stored text is not the linked text.
 
     py recompiler/layout.py census 6600_mcu.bin
     py recompiler/layout.py census 6600_mcu.bin --json out/layout_census.json
-    py recompiler/layout.py pools 6600_mcu.bin
+    py recompiler/layout.py drift  6600_mcu.bin --json out/layout_drift.json
+    py recompiler/layout.py pools  6600_mcu.bin
     py recompiler/layout.py verify 6600_mcu.bin
+
+`drift` tests the strongest possible "the packed text is the linked text with
+some 2-byte padding removed" model: an export may match any stored start at or
+below it, with a non-decreasing cumulative drift.  Even that freedom only
+matches the kernel exports at the same rate as random addresses (a null test),
+so padding/relayout cannot recover the linked layout.
 
 `verify` exits non-zero if the invariants used by the loader stop holding
 (export tables inside the text, the small reference DLL fully aligned, the
-kernel export count and alignment stable, pools mostly 4-aligned).
+kernel export count and alignment stable, pools mostly 4-aligned, and the drift
+model still indistinguishable from the null).
 """
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
+import random
+from array import array
 
 import romimage
 import relayout
@@ -43,6 +54,8 @@ EXPORT_MIN = 16          # images smaller than this only need the basic checks
 SHIFT_LIMIT = 0x200      # constant-shift search range
 SMALL_REF_UID3 = 0x101F6E00   # 5 Thumb exports, every one a function start
 KERNEL_UID3 = 0x100058E8
+DRIFT_LIMITS = (0x60, 0xC0, 0x200)   # cumulative-padding budgets to test
+DRIFT_NULL_SAMPLES = 20
 
 
 # ---------------------------------------------------------------------------
@@ -159,12 +172,110 @@ def export_entries(rom: bytes, img: romimage.Image) -> list[int]:
             for i in range(img.export_count)]
 
 
+def monotone_chain(entries: list[int], starts: list[int],
+                   max_drift: int) -> tuple[int, int]:
+    """Longest order-preserving matching of exports to stored starts.
+
+    A pure cumulative-padding (or "drift") model of the packed text says the
+    linked layout is the stored layout plus a non-decreasing number of inserted
+    bytes: export `V` matches a stored start `c` with `V - c == P(c)`, the
+    mapping is monotone in address order, and P never exceeds the total padding.
+
+    This is the strongest possible version of that model: it does not require
+    every export to match and it allows a different drift for every export.
+    The returned length is therefore an *upper bound* on how many exports any
+    padding-only relayout could explain.  The caller compares it with the same
+    statistic on random addresses (the null hypothesis).
+    """
+    if not entries or not starts or max_drift <= 0:
+        return 0, 0
+    # 2-D prefix maximum over (drift, stored start).  Both axes are monotone:
+    # a state can extend a later export only if the stored start and the drift
+    # are both non-decreasing.  The Fenwick tree is over drift; each node is a
+    # Fenwick tree over the start index.  Chain lengths fit in 16 bits.
+    index = {c: i + 1 for i, c in enumerate(starts)}
+    n_drift = max_drift // 2 + 2
+    n_start = len(starts) + 1
+    tree = [array("H", [0]) * (n_start + 1) for _ in range(n_drift + 1)]
+    best = 0
+    for v in entries:
+        lo = bisect.bisect_left(starts, v - max_drift)
+        hi = bisect.bisect_right(starts, v)
+        updates: list[tuple[int, int, int]] = []
+        for c in starts[lo:hi]:
+            d = (v - c) // 2 + 1
+            ci = index[c]
+            # query prefix (drift <= d, stored start < c)
+            q = 0
+            i = d
+            while i > 0:
+                row = tree[i]
+                j = ci - 1
+                while j > 0:
+                    if row[j] > q:
+                        q = row[j]
+                    j -= j & -j
+                i -= i & -i
+            ln = q + 1
+            updates.append((d, ci, ln))
+            if ln > best:
+                best = ln
+        # Insert only after the whole export is processed, so one export can
+        # contribute at most one match to a chain.
+        for d, ci, ln in updates:
+            i = d
+            while i <= n_drift:
+                row = tree[i]
+                j = ci
+                while j <= n_start:
+                    if ln > row[j]:
+                        row[j] = ln
+                    j += j & -j
+                i += i & -i
+    return best, max_drift
+
+
+def drift_image(rom: bytes, img: romimage.Image, max_drift: int,
+                null_samples: int, seed: int = 0x6600) -> dict:
+    """Compare the best padding-only export matching against a random null."""
+    tv = TextView(rom, img)
+    entries = sorted(export_entries(rom, img))
+    starts = [img.code + o for o in range(0, img.text_size - 4, 4)
+              if start_kind(tv, img.code + o, pool_aware=True)]
+    real, real_drift = monotone_chain(entries, starts, max_drift)
+
+    rng = random.Random(seed)
+    null: list[int] = []
+    for _ in range(null_samples):
+        fake = sorted(rng.randrange(img.code, img.code + img.text_size, 4)
+                      for _ in entries)
+        null.append(monotone_chain(fake, starts, max_drift)[0])
+    null_avg = sum(null) / len(null) if null else 0.0
+    return {
+        "uid3": f"{img.uid3:#010x}",
+        "exports": len(entries),
+        "text_size": img.text_size,
+        "max_drift": max_drift,
+        "starts": len(starts),
+        "chain": real,
+        "chain_rate": (real / len(entries)) if entries else None,
+        "budget": real_drift,
+        "null_samples": null_samples,
+        "null_avg": null_avg,
+        "null_max": max(null, default=0),
+        "ratio": (real / null_avg) if null_avg else None,
+    }
+
+
 def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
     tv = TextView(rom, img)
     entries = export_entries(rom, img)
     in_text = aligned4 = thumb = prologue = after_term = after_pool = 0
     start = start_legacy = 0
+    in_code = 0
     for v in entries:
+        if img.code <= v < img.code + img.code_size:
+            in_code += 1
         if v & 1:
             thumb += 1
         else:
@@ -217,8 +328,11 @@ def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
         "header_file": f"{img.hdr_off:#x}",
         "code": f"{img.code:#x}",
         "text_size": img.text_size,
+        "code_size": img.code_size,
         "exports": len(entries),
         "in_text": in_text,
+        "in_code": in_code,
+        "in_code_rate": (in_code / len(entries)) if entries else None,
         "aligned4": aligned4,
         "thumb": thumb,
         "prologue": prologue,
@@ -249,9 +363,9 @@ def cmd_census(a):
     rows.sort(key=lambda r: -r["exports"])
 
     print(f"# export-table census: {len(rows)} images with exports")
-    print(f"{'uid3':>12} {'exports':>7} {'in-text':>7} {'al4':>5} {'thumb':>5} "
-          f"{'pro':>4} {'after':>5} {'pool':>5} {'start':>5} {'rate':>6} "
-          f"{'legacy':>6} {'base':>6} {'x':>5} {'best-shift':>10} {'hits':>5}")
+    print(f"{'uid3':>12} {'exports':>7} {'in-text':>7} {'in-code':>7} {'al4':>5} "
+          f"{'thumb':>5} {'pro':>4} {'after':>5} {'pool':>5} {'start':>5} "
+          f"{'rate':>6} {'legacy':>6} {'base':>6} {'x':>5} {'best-shift':>10} {'hits':>5}")
     for r in rows:
         best = r["best"] or {"shift": 0, "hits": 0}
         rate = 100.0 * r["start_rate"] if r["start_rate"] is not None else 0.0
@@ -259,25 +373,37 @@ def cmd_census(a):
                   if r["start_rate_legacy"] is not None else 0.0)
         base = 100.0 * r["base_rate"] if r["base_rate"] is not None else 0.0
         ratio = (rate / base) if base else 0.0
+        code_rate = (100.0 * r["in_code_rate"]
+                     if r["in_code_rate"] is not None else 0.0)
         print(f"{r['uid3']:>12} {r['exports']:7d} {r['in_text']:7d} "
-              f"{r['aligned4']:5d} {r['thumb']:5d} {r['prologue']:4d} "
-              f"{r['after_term']:5d} {r['after_pool']:5d} {r['start']:5d} "
-              f"{rate:5.1f}% {legacy:5.1f}% {base:5.1f}% {ratio:5.2f} "
-              f"{best['shift']:#10x} {best['hits']:5d}")
+              f"{code_rate:6.1f}% {r['aligned4']:5d} {r['thumb']:5d} "
+              f"{r['prologue']:4d} {r['after_term']:5d} {r['after_pool']:5d} "
+              f"{r['start']:5d} {rate:5.1f}% {legacy:5.1f}% {base:5.1f}% "
+              f"{ratio:5.2f} {best['shift']:#10x} {best['hits']:5d}")
 
     total = sum(r["exports"] for r in rows)
     start = sum(r["start"] for r in rows)
     legacy = sum(r["start_legacy"] for r in rows)
-    linked = [r for r in rows if r["start_rate"] is not None
+    # Only images whose whole export array lies in their own code range can
+    # say anything about the layout.  The half-in-code group is a separate
+    # parser/format question (see the in-code% column) and would otherwise
+    # dominate the "linked" counts with random data words.
+    valid = [r for r in rows if (r["in_code_rate"] or 0.0) >= 0.99]
+    linked = [r for r in valid if r["start_rate"] is not None
               and r["start_rate"] >= 0.8]
-    partial = [r for r in rows if r["start_rate"] is not None
+    partial = [r for r in valid if r["start_rate"] is not None
                and 0.3 <= r["start_rate"] < 0.8]
     print(f"\n{start}/{total} export entries land on a function start at shift 0 "
           f"({100.0 * start / total:.1f}%; legacy detector {legacy}/{total})")
+    print(f"images with every export inside their code range: "
+          f"{len(valid)}/{len(rows)}")
     print(f"images with >=80% exports on a start (stored linked): {len(linked)}")
     for r in linked[:10]:
         print(f"  {r['uid3']}  {r['start']}/{r['exports']}")
     print(f"images with 30-80%: {len(partial)}")
+    print("'in-code%' is the fraction of export words inside the image's own "
+          "code range; the kernel is 100%, so its low start rate is a real "
+          "layout mismatch.")
     print("'start' walks back through a literal pool to the terminator, so leaf "
           "functions after a pool count.")
     print("'base' is the chance that a random text address of the same parity "
@@ -291,6 +417,42 @@ def cmd_census(a):
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"images": rows}, f, indent=1)
+        print(f"wrote {a.json}")
+
+
+def cmd_drift(a):
+    rom, images = load_images(a.rom)
+    by_uid: dict[int, romimage.Image] = {}
+    for im in images:
+        old = by_uid.get(im.uid3)
+        if old is None or im.text_size > old.text_size:
+            by_uid[im.uid3] = im
+    img = by_uid.get(a.uid3)
+    if img is None or not img.export_count:
+        raise SystemExit(f"image {a.uid3:#x} with exports not found")
+
+    print(f"# drift test: {img.uid3:#010x}, {img.export_count} exports, "
+          f"text {img.text_size:#x} at {img.code:#x}")
+    print(f"# a padding-only relayout may match an export V to any stored "
+          f"start c <= V with a non-decreasing drift V-c")
+    print(f"{'max-drift':>9} {'chain':>7} {'rate':>6} {'null-avg':>8} "
+          f"{'null-max':>8} {'ratio':>6}")
+    rows = []
+    for limit in a.limits:
+        row = drift_image(rom, img, limit, a.null, a.seed)
+        rows.append(row)
+        print(f"{limit:#9x} {row['chain']:7d} "
+              f"{100.0 * (row['chain_rate'] or 0):5.1f}% "
+              f"{row['null_avg']:8.1f} {row['null_max']:8d} "
+              f"{row['ratio']:6.2f}")
+    print("A real padding-only layout has a monotone drift and should score "
+          "far above the random-address null.")
+    print("The kernel scores at the null level, so the stored function order is "
+          "not the linked order; padding/relayout cannot recover it.")
+    if a.json:
+        with open(a.json, "w") as f:
+            json.dump({"uid3": f"{img.uid3:#010x}", "results": rows}, f,
+                      indent=1)
         print(f"wrote {a.json}")
 
 
@@ -339,6 +501,13 @@ def cmd_verify(a):
               "kernel exports outside the kernel text")
         check(all(v % 4 == 0 for v in entries),
               "kernel exports not all 4-byte aligned")
+        # B1g2: a padding-only relayout is a non-decreasing drift.  It must not
+        # beat the random-address null, otherwise the B1g conclusion is stale.
+        row = drift_image(rom, k, 0x200, 8)
+        check(row["ratio"] is not None and row["ratio"] < 1.2,
+              f"kernel drift chain {row['chain']} vs null "
+              f"{row['null_avg']:.1f} (ratio {row['ratio']:.2f}); "
+              "a padding-only model is now plausible, revisit B1g")
 
     # 2. a small Thumb DLL is the positive control: every export is a start
     small = by_uid.get(SMALL_REF_UID3)
@@ -388,6 +557,19 @@ def main():
     p.add_argument("--uid3", type=lambda s: int(s, 0),
                    default=KERNEL_UID3)
     p.set_defaults(func=cmd_pools)
+
+    d = sub.add_parser("drift")
+    d.add_argument("rom")
+    d.add_argument("--uid3", type=lambda s: int(s, 0),
+                   default=KERNEL_UID3)
+    d.add_argument("--json")
+    d.add_argument("--null", type=int, default=DRIFT_NULL_SAMPLES,
+                   help="random-address samples for the null hypothesis")
+    d.add_argument("--seed", type=lambda s: int(s, 0), default=0x6600)
+    d.add_argument("--limits", type=lambda s: [int(x, 0) for x in s.split(",")],
+                   default=list(DRIFT_LIMITS),
+                   help="comma-separated cumulative-padding budgets")
+    d.set_defaults(func=cmd_drift)
 
     v = sub.add_parser("verify")
     v.add_argument("rom")

@@ -57,16 +57,19 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   images and the out-of-range call targets is still open.
 - **`layout.py`** — audit the packed image layout with the export directory as
   ground truth.  `census` reports, per image, how many `iExportDir` entries
-  are in the text, 4-byte aligned, Thumb-tagged and actually land on a
+  are in the text/code, 4-byte aligned, Thumb-tagged and actually land on a
   function start (including a pool-aware walk-back for leaf functions after a
   literal pool), plus the same number for random addresses (the baseline) and
   the best constant shift.  `pools` reports literal-pool alignment and
-  adjacent/duplicate pool starts for the kernel.  `verify` is the machine
-  check used by `../tools/test_layout.sh`.  The result: small images are
-  stored in their linked layout (the 5-export Thumb DLL is 5/5) but the
-  kernel and the big DLLs are not — pool-aware detection reaches 104/478
-  (21.8%) against a 17.2% baseline, so padding alone cannot recover the
-  linked layout.
+  adjacent/duplicate pool starts for the kernel.  `drift` tests the strongest
+  padding-only model — every export may match any stored start below it with a
+  non-decreasing cumulative drift — against random addresses; the kernel stays
+  at the null (1.04–1.09x), so padding/drift cannot recover the linked layout.
+  `verify` is the machine check used by `../tools/test_layout.sh`.  Small
+  images are stored in their linked layout (the 5-export Thumb DLL is 5/5)
+  but the kernel and the big DLLs are not: the pool-aware census reaches
+  104/478 (21.8%) against a 17.2% baseline, and the drift null test rejects
+  monotone relayout.
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`
