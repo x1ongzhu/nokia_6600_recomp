@@ -34,7 +34,7 @@
  *   NK_SNAP_WINDOW_THUMB=n  override for Thumb callers (default: above)
  *   NK_SNAP_WINDOW_ARM=n    override for ARM callers (default: above)
  *   NK_FIXUP_LOG=n          log the first n call fixups (default 16)
- *   NK_CALLMAP=path         call-site fixups / HLE stubs (see config/callmap-6600.txt)
+ *   NK_CALLMAP=path         call-site fixups / HLE stubs (see config/callmap-rtc-6600.txt)
  *   NK_RECOVER=1            roll back a broken callee and continue (bring-up)
  *   NK_RECOVER_MAX=n        stop after n skipped calls (default 256)
  *   NK_RECOVER_LOG=n        log the first n skips (default 16)
@@ -85,6 +85,11 @@
  *   NK_PRIMARY_RAM=addr      copy the 64 KiB ROMFS directory block to RAM and
  *                           repoint only iPrimaryFile (0x5000009c); the
  *                           initial TStack object is iPrimaryFile+iStackSize.
+ *   NK_SYSTEM_TIME=1        install the mask ROM's initial system TTime at
+ *                           [0x50000084] (64-bit), sourced from the
+ *                           TRomHeader iTime at 0x50000080.  The kernel's
+ *                           system-time init reads that hand-off slot, not
+ *                           the header word.
  *   NK_HAL_TIMER_HZ=n        with NK_B7E: make the fake HAL's vtable+0x5c
  *                           (timer frequency) return n.  4 is the round-27
  *                           probe value, not recovered firmware state.
@@ -128,8 +133,8 @@
  *                           object at [0x800017d4] (legacy stand-in; the
  *                           process+0x38 field was misread as a heap)
  *   NK_B7E=1                install thread -> process -> CObjectIx -> array
- *                           when the kernel publishes [0x800017d4] (round 20;
- *                           see tools/test_b7e.sh).  NK_B7E_HEAP/NK_B7E_SIZE
+ *                           when the kernel publishes [0x800017d4].
+ *                           NK_B7E_HEAP/NK_B7E_SIZE
  *                           set the guest bump allocator window.
  *   NK_EXT_STUB=1           give an extension image with no export table a
  *                           synthetic export 1 (HAL-like object); needed by
@@ -154,7 +159,7 @@
  *                           instead of the raw flash bytes (recompiler/
  *                           bootbank.py build); start at linked 0x30c
  *   NK_REGIONS=path[@addr]  install a mask-ROM boot-region table (count +
- *                           0x10-byte segments, see recompiler/bootregions.py) at
+ *                           0x10-byte segments) at
  *                           addr (default 0x80000000) and report it; pass the
  *                           same addr in NK_R11 to reproduce the mask-ROM
  *                           hand-off
@@ -1325,7 +1330,7 @@ int main(int argc, char** argv) {
      * segments) in RAM and passes its address in fp/r11.  The secondary
      * loader copies that table to the super page and uses it for address
      * translation.  Installing one from a file keeps the stand-in explicit
-     * and lets recompiler/bootregions.py evolve the table format independently. */
+     * keeps the table format and the boot state independent. */
     const char* regions = getenv("NK_REGIONS");
     if (regions) {
         char path[512];
@@ -1403,6 +1408,19 @@ int main(int argc, char** argv) {
      * the super page and gives the ROMFS directory a writable RAM copy. */
     if (env_ulong("NK_BOOT_HANDOFF", 0))
         install_boot_handoff(&cpu);
+    /* Round 29: the kernel's system-time init (0x5031380c) reads a 64-bit
+     * TTime at 0x50000084, four bytes after the TRomHeader iTime at
+     * 0x50000080.  The mask ROM's hand-off page supplies that value; source
+     * it from the header's iTime.  This overlaps the header's iRomBase word,
+     * which the kernel never reads at runtime. */
+    if (env_ulong("NK_SYSTEM_TIME", 0)) {
+        uint32_t lo = nk_r32(&cpu, 0x50000080u);
+        uint32_t hi = nk_r32(&cpu, 0x50000084u);
+        nk_w32(&cpu, 0x50000084u, lo);
+        nk_w32(&cpu, 0x50000088u, hi);
+        printf("system time handoff: [0x50000084] = %#010x%08x "
+               "(from TRomHeader iTime)\n", hi, lo);
+    }
     {
         uint32_t primary_ram = (uint32_t)env_ulong("NK_PRIMARY_RAM", 0);
         if (primary_ram) install_primary_ram(&cpu, primary_ram);

@@ -32,6 +32,23 @@ static int run(nk_cpu_t* c, uint32_t pc, int thumb) {
 }
 
 static void poke32(nk_cpu_t* c, uint32_t a, uint32_t w) { nk_w32(c, a, w); }
+
+/* Same as run(), for tests that need a longer straight-line budget. */
+static int run_budget(nk_cpu_t* c, uint32_t pc, int thumb, long budget) {
+    c->r[13] = 0x80010000u;
+    c->r[14] = TRAP;
+    c->cpsr = 0x400000d3u | (thumb ? NK_CPSR_T : 0);
+    c->r[15] = pc;
+    nk_interp_t ip;
+    nk_interp_init(&ip);
+    ip.return_pc = TRAP;
+    ip.return_thumb = (uint8_t)thumb;
+    ip.budget = budget;
+    ip.allow_low_alias = g_allow_low_alias;
+    ip.stop_selfb = 1;
+    nk_interp_run(c, &ip);
+    return ip.st.stop_reason;
+}
 static void poke16(nk_cpu_t* c, uint32_t a, uint16_t h) { nk_w16(c, a, h); }
 
 /* Run with crash recovery enabled; returns the stop reason and the number of
@@ -216,6 +233,99 @@ int main(void) {
     CHECK(r == NK_STOP_RETURN && c.r[0] == 0x10 && c.r[1] == 0x20 &&
           c.r[2] == 0x200 && c.r[3] == 0x400 && c.r[4] == 0x80000,
           "ARM MUL/MLA write bits 19-16 and leave r0 alone");
+
+    /* ---- ARM long multiply: UMULL/UMLAL/SMULL/SMLAL ----
+     * These are `00001 U A S RdHi RdLo Rs 1001 Rm`, not a bit-22 variant of
+     * MUL.  Before this test the interpreter executed them as a register-
+     * shifted SBC (data-processing opcode 0x6), so every 64-bit product in
+     * the kernel was garbage; round 28's TTime conversion stopped on exactly
+     * that.  Values also pin RdHi == Rs, which the firmware uses. */
+    poke32(&c, 0x800000a0u, 0xe59f0034u);   /* ldr r0, [pc, #0x34]  */
+    poke32(&c, 0x800000a4u, 0xe59f1034u);   /* ldr r1, [pc, #0x34]  */
+    poke32(&c, 0x800000a8u, 0xe0854190u);   /* umull r4, r5, r0, r1 */
+    poke32(&c, 0x800000acu, 0xe0a86190u);   /* umlal r6, r8, r0, r1 */
+    poke32(&c, 0x800000b0u, 0xe0c32190u);   /* smull r2, r3, r0, r1 */
+    poke32(&c, 0x800000b4u, 0xe0e97190u);   /* smlal r7, r9, r0, r1 */
+    poke32(&c, 0x800000b8u, 0xe12fff1eu);   /* bx    lr             */
+    poke32(&c, 0x800000dcu, 0xffffffffu);   /* -1                   */
+    poke32(&c, 0x800000e0u, 0x00000002u);   /*  2                   */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x800000a0u, 0);
+    CHECK(r == NK_STOP_RETURN &&
+          c.r[4] == 0xfffffffeu && c.r[5] == 0x00000001u &&
+          c.r[6] == 0xfffffffeu && c.r[8] == 0x00000001u &&
+          c.r[2] == 0xfffffffeu && c.r[3] == 0xffffffffu &&
+          c.r[7] == 0xfffffffeu && c.r[9] == 0xffffffffu,
+          "ARM UMULL/UMLAL/SMULL/SMLAL produce 64-bit products");
+
+    /* `smull r1, r3, r2, r3`: RdHi is also Rs.  Real ARM7TDMI/920T read Rs
+     * first; the interpreter must not overwrite the multiplicand early. */
+    poke32(&c, 0x800000f0u, 0xe59f2018u);   /* ldr r2, [pc, #0x18]  */
+    poke32(&c, 0x800000f4u, 0xe59f3018u);   /* ldr r3, [pc, #0x18]  */
+    poke32(&c, 0x800000f8u, 0xe0c31392u);   /* smull r1, r3, r2, r3 */
+    poke32(&c, 0x800000fcu, 0xe12fff1eu);   /* bx    lr             */
+    poke32(&c, 0x80000110u, 0x14c00000u);   /* multiplicand         */
+    poke32(&c, 0x80000114u, 0x00005000u);   /* multiplier           */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x800000f0u, 0);
+    {
+        int64_t prod = (int64_t)(int32_t)0x14c00000 * (int64_t)0x5000;
+        CHECK(r == NK_STOP_RETURN &&
+              c.r[1] == (uint32_t)prod && c.r[3] == (uint32_t)(prod >> 32),
+              "ARM SMULL with RdHi == Rs reads the multiplicand first");
+    }
+
+    /* ---- ARM: a non-S SUB/ADD/ADC/SBC must not write the condition flags ----
+     * The old data-processing switch called sub_flags()/add_flags()
+     * unconditionally, so every plain `add`/`sub` clobbered N/Z/C/V.  This is
+     * the exact pattern at 0x50389d14 in EUser's 64-bit divide: `adc r3,r3,r3`
+     * (S=0) sits between the `sbcs` comparison and the `movhs` remainder
+     * update, and the clobber made every division return 0xFFFFF. */
+    poke32(&c, 0x80000520u, 0xe3a00005u);   /* mov r0, #5          */
+    poke32(&c, 0x80000524u, 0xe2501003u);   /* subs r1, r0, #3     */
+    poke32(&c, 0x80000528u, 0xe0a02000u);   /* adc r2, r0, r0      */
+    poke32(&c, 0x8000052cu, 0x03a03055u);   /* moveq r3, #0x55     */
+    poke32(&c, 0x80000530u, 0x23a040aau);   /* movhs r4, #0xaa     */
+    poke32(&c, 0x80000534u, 0xe12fff1eu);   /* bx lr               */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000520u, 0);
+    CHECK(r == NK_STOP_RETURN && c.r[1] == 2 && c.r[2] == 11 &&
+          c.r[3] == 0 && c.r[4] == 0xaa,
+          "ARM non-S data processing preserves the condition flags");
+
+    /* ---- ARM 64-bit divide loop: the real EUser __udivmoddi4 body ----
+     * 8 iterations of the 4-step restoring division.  Dividend
+     * 0x00e0ca3991f6bc80 / 0x141dd76000 must give 0xb2ca3 remainder
+     * 0x86d549c80.  This exercises SMULL/UMULL, the non-S flag rule and the
+     * conditional remainder update together. */
+    {
+        static const uint32_t grp[8] = {
+            0xe0955005u, /* adds r5, r5, r5   */
+            0xe0b66006u, /* adcs r6, r6, r6   */
+            0xe0b99009u, /* adcs sb, sb, sb   */
+            0xe056a007u, /* subs sl, r6, r7   */
+            0xe0d9c008u, /* sbcs ip, sb, r8   */
+            0xe0a33003u, /* adc  r3, r3, r3   */
+            0x21a0600au, /* movhs r6, sl      */
+            0x21a0900cu, /* movhs sb, ip      */
+        };
+        uint32_t a = 0x80000600u;
+        for (int i = 0; i < 4; i++)
+            for (int g = 0; g < 8; g++, a += 4) poke32(&c, a, grp[g]);
+        poke32(&c, a, 0xe2544001u); a += 4;      /* subs r4, r4, #1 */
+        poke32(&c, a, 0x1affffddu); a += 4;      /* bne 0x80000600  */
+        poke32(&c, a, 0xe12fff1eu);              /* bx lr           */
+        memset(&c.r, 0, sizeof c.r);
+        c.r[5] = 0x91f6bc80u;
+        c.r[6] = 0x00e0ca39u;
+        c.r[7] = 0x1dd76000u;
+        c.r[8] = 0x14u;
+        c.r[4] = 8;
+        r = run_budget(&c, 0x80000600u, 0, 1000);
+        CHECK(r == NK_STOP_RETURN && c.r[3] == 0xb2ca3u &&
+              c.r[6] == 0x6d549c80u && c.r[9] == 8u,
+              "ARM 64-bit restoring division returns the right quotient");
+    }
 
     /* ---- ARM: PC-relative ldr uses instruction+8, not instruction+4 ---- */
     poke32(&c, 0x80000240u, 0xe59f1008u);   /* ldr r1, [pc, #8]   */

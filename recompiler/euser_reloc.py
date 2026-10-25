@@ -20,25 +20,23 @@ is ``User::Alloc`` (the kernel's low ordinal block is not the generic one).
 The round-27 profile also pins K=1361: the ROM's own target (`0x503a0224`)
 is the 16-byte-zeroing constructor used by the boot-file object.
 
-Round 28's boot profile keeps four call-site-derived local exceptions.  The
-first boot thread is allocated with `operator new(0x74, block)` and needs the
-buffer/stack constructor `0x503a023c` (stores the size and allocates the
-backing store), not the zeroing constructor.  Three time-cluster slots
-(K=294/1069/1375) must keep their ROM (static) targets: the K-3 targets put
-the ROM header's 2000-01-01 iTime out of range in TTime::SecondsFrom and
-Kern::Init1 then panics KERN-WD2 24.
+Round 28's boot profile originally kept four call-site-derived local
+exceptions.  Round 29 showed that the three time-cluster ones were a symptom
+of two interpreter bugs (undecoded ARMv4T long multiply and non-S
+data-processing instructions clobbering the flags): with those fixed, K=294
+-> `TTime::DateTime` (`0x503a4020`), K=1069 -> `TDateTime::Set`
+(`0x503a3900`) and K=1375 -> `TTime::TTime(const TDateTime&)` (`0x503a3af8`)
+are the plain edata[K-3] slots.  Only K=1361 remains, because the first boot
+thread's `operator new(0x74, block)` needs the buffer/stack constructor
+`0x503a023c` rather than the ROM's 16-byte-zeroing `0x503a0224`.
 
-This tool emits the full 236-slot kernel -> EUser relocation maps (round 27
-and the round-28 boot profile), the smaller DProcess-name probe map, and
-verifies the known anchors.
+This tool emits the 236-slot kernel -> EUser boot relocation map and verifies
+the known anchors.
 
 Commands::
 
     py recompiler/euser_reloc.py analyze 6600_mcu.bin
-    py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r27-6600.txt
-    py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r28-6600.txt --profile boot
-    py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r28-boot-6600.txt --profile boot-idle
-    py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r27-name-6600.txt --profile name
+    py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r29-6600.txt --profile boot
     py recompiler/euser_reloc.py verify 6600_mcu.bin
     py recompiler/euser_reloc.py verify 6600_mcu.bin --profile boot
 """
@@ -62,19 +60,6 @@ LOW_FIXED = {
     0x503B379C: (2, 0x503988F0, "User::Alloc"),
 }
 
-# The DProcess-name cluster, used by both the full and the probe profile.
-NAME_CLUSTER = {    0x503B42C8: (717, 0x5039B230, "DProcess name suffix: [uid]"),
-    0x503B50E4: (1620, 0x5039B364, "TUidType::operator[]"),
-    0x503B38FC: (90, 0x503887C4, "TDes16::Append(const TDesC16&)"),
-    0x503B38A0: (67, 0x50395B8C, "TDes16::AppendNumFixedWidth"),
-    0x503B4DB8: (1417, 0x5039B2A0, "TUidType()"),
-    0x503B4DC0: (1419, 0x5039B2F0, "TUidType(TUid,TUid,TUid)"),
-    0x503B4B98: (1281, 0x503882C4, "TBufBase16(const TDesC16&, int)"),
-    0x503B38F4: (88, 0x5038877C, "TDes16::Append(TChar)"),
-    0x503B3D3C: (362, 0x503A2900, "TDblQueIterBase::DoPostInc"),
-    0x503B4C74: (1336, 0x503A28B8, "TDblQueIterBase(TDblQueBase&)"),
-}
-
 # Local deviations from the K-3 rule: the ROM's export order has an extra
 # symbol in this cluster.  K=1361 constructs the base of the 0x74-byte boot
 # file object; the shifted target (0x5039c148) writes at +0x7c and overruns
@@ -89,17 +74,19 @@ EXCEPTIONS = {
 # operator new(0x74, block); the real base constructor is the buffer/stack
 # constructor 0x503a023c (it stores the size at +0, +4, +0xc and allocates
 # the backing store), not the 16-byte zeroing function 0x503a0224 used by
-# the boot-file object.  The three time slots below are a *local export-order*
-# deviation: their ROM (static) targets are the ones the TTime init path
-# expects, while edata[K-3] points at a different class.  Using the K-3
-# targets makes the ROM header's 2000-01-01 iTime overflow in
-# TTime::SecondsFrom and Kern::Init1 panics KERN-WD2 24.
+# the boot-file object.
+#
+# Round 29 correction: the three time-cluster "static" exceptions added in
+# round 28 were a symptom of the missing ARM long multiply (SMULL/UMULL/
+# UMLAL/SMLAL were executed as a register-shifted SBC).  Once the interpreter
+# computes 64-bit products, the plain edata[K-3] targets are the correct
+# symbols: K=294 -> edata[291] = TTime::DateTime (0x503a4020), K=1069 ->
+# edata[1066] = TDateTime::Set (0x503a3900), K=1375 -> edata[1372] =
+# TTime::TTime(const TDateTime&) (0x503a3af8).  Only K=1361 still needs the
+# local exception.
 BOOT_EXCEPTIONS = dict(EXCEPTIONS)
 BOOT_EXCEPTIONS.update({
-    0x503B4CD8: (1361, 0x503A023C, "TStack/TBuf base ctor (round 28)"),
-    0x503B3C2C: (294, 0x503A532C, "TTime ctor (local time-cluster order)"),
-    0x503B4848: (1069, 0x50397CB4, "TDateTime from TTime (local order)"),
-    0x503B4D10: (1375, 0x50389A40, "TInt64(int) (local order)"),
+    0x503B4CD8: (1361, 0x503A023C, "TStack/TBuf base ctor (boot profile)"),
 })
 
 # Anchors verified by earlier rounds from call-site semantics.  (kernel
@@ -214,27 +201,6 @@ def rows(stream: bytes, euser, edata: list[int], exceptions=None):
     return out
 
 
-def name_map(stream: bytes, euser, edata: list[int]):
-    """The round-26 map plus the DProcess-name / queue-iterator repairs."""
-    base = {}
-    path = "config/imports-r26-6600.txt"
-    if os.path.exists(path):
-        with open(path) as f:
-            for line in f:
-                line = line.split("#")[0].strip()
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) == 2:
-                    base[int(parts[0], 16)] = parts[1]
-    out = dict(base)
-    for slot, (_k, target, _label) in NAME_CLUSTER.items():
-        out[slot] = f"{target:#x}"
-    # The ELocl export-table hole is independent of the EUser relocation.
-    out[0x5037D0E8] = "zero"
-    return out
-
-
 def write_map(path: str, mapping: dict[int, str], header: list[str]):
     with open(path, "w") as f:
         for line in header:
@@ -265,74 +231,27 @@ def cmd_analyze(a):
 def cmd_build(a):
     stream, _images, euser = load(a.rom)
     edata = edata_values(stream, euser)
-    if a.profile == "name":
-        mapping = name_map(stream, euser, edata)
-        header = [
-            "imports-r27-name-6600.txt - DProcess-name probe map",
-            "",
-            "Round 26's map plus the ten DProcess-name / queue-iterator",
-            "repairs from round 27.  This profile deliberately leaves the",
-            "rest of the kernel EUser imports at their ROM ordinals: it is",
-            "the diagnostic that shows the real name cluster without the",
-            "NK_PATCH stand-in.  The full profile is imports-r27-6600.txt.",
-        ]
-    elif a.profile in ("boot", "boot-idle"):
-        mapping = {}
-        for r in rows(stream, euser, edata, BOOT_EXCEPTIONS):
-            if r["kind"] == "keep":
-                continue
-            mapping[r["slot"]] = f"{r['target']:#x}"
-        mapping[0x5037D0E8] = "zero"
-        if a.profile == "boot-idle":
-            # Round 23's explicit mask-ROM HAL hand-off stand-in.  Without
-            # it the TTime init path stops at KERN-WD2 24 (164,731 insns);
-            # with it the kernel reaches its idle/timer wait loop.
-            mapping[0x503B46BC] = "zero"
-        header = [
-            f"{os.path.basename(a.out)} - boot profile (round 28)",
-            "",
-            "The round-27 K-3 relocation plus four call-site-derived local",
-            "exceptions: the initial thread's TStack base constructor",
-            "(0x503a023c), and three TTime/time-cluster functions whose",
-            "ROM (static) targets are correct for the boot path.  With the",
-            "K-3 targets the ROM header's 2000-01-01 iTime overflows in",
-            "TTime::SecondsFrom and Kern::Init1 panics KERN-WD2 24.",
-            "",
-            ("The boot-idle profile additionally zeroes the WD2 time/HAL"
-             if a.profile == "boot-idle" else
-             "This is the faithful boot profile; it leaves the WD2 time/HAL"),
-            ("slot 0x503b46bc as the explicit mask-ROM HAL hand-off stand-in"
-             if a.profile == "boot-idle" else
-             "slot 0x503b46bc at its K-3 TTime target, so the boot stops in"),
-            ("from round 23; that run reaches 3,000,000 instructions and the"
-             if a.profile == "boot-idle" else
-             "TTime::SecondsFrom/MKERN-WD2 24 after 164,731 instructions."),
-            ("kernel's idle/timer wait loop instead of the panic."
-             if a.profile == "boot-idle" else ""),
-            f"Generated by: py recompiler/euser_reloc.py build ... --profile {a.profile}",
-            "Do not hand-edit; add an anchor/exception to the tool instead.",
-        ]
-    else:
-        mapping = {}
-        for r in rows(stream, euser, edata):
-            if r["kind"] == "keep":
-                continue
-            mapping[r["slot"]] = f"{r['target']:#x}"
-        mapping[0x5037D0E8] = "zero"
-        header = [
-            "imports-r27-6600.txt - kernel EUser import relocation (round 27)",
-            "",
-            "The kernel was linked against an EUser .def one export shorter",
-            "than the generic 7.0 list; the ROM EUser.dll is four exports",
-            "shorter.  For kernel ordinal K >= 6 the desired symbol is at",
-            "ROM EUser export K-3.  K=0 (memset), K=1 (Mem::Copy) and K=2",
-            "(User::Alloc) are the low special cases.  K=1361 is a pinned",
-            "local exception (the boot-file base constructor).  The ELocl",
-            "export hole (ordinal 20) remains the zero-return stub.",
-            "",
-            "Generated by: py recompiler/euser_reloc.py build ...",
-            "Do not hand-edit; add an anchor/exception to the tool instead.",
-        ]
+    mapping = {}
+    for r in rows(stream, euser, edata, BOOT_EXCEPTIONS):
+        if r["kind"] == "keep":
+            continue
+        mapping[r["slot"]] = f"{r['target']:#x}"
+    # The ELocl export-table hole is independent of the EUser relocation.
+    mapping[0x5037D0E8] = "zero"
+    header = [
+        f"{os.path.basename(a.out)} - kernel EUser boot relocation (round 29)",
+        "",
+        "The kernel was linked against an EUser .def one export shorter",
+        "than the generic 7.0 list; the ROM EUser.dll is four exports",
+        "shorter.  For kernel ordinal K >= 6 the desired symbol is at",
+        "ROM EUser export K-3.  K=0 (memset), K=1 (Mem::Copy) and K=2",
+        "(User::Alloc) are the low special cases.  K=1361 is the only local",
+        "exception: the initial thread's TStack/TBuf constructor 0x503a023c.",
+        "The ELocl export hole (ordinal 20) is the zero-return stub.",
+        "",
+        "Generated by: py recompiler/euser_reloc.py build ... --profile boot",
+        "Do not hand-edit; add an anchor/exception to the tool instead.",
+    ]
     write_map(a.out, mapping, header)
 
 
@@ -399,8 +318,7 @@ def main():
     p = sub.add_parser("build")
     p.add_argument("rom")
     p.add_argument("out")
-    p.add_argument("--profile", choices=("full", "name", "boot", "boot-idle"),
-                   default="full")
+    p.add_argument("--profile", choices=("boot",), default="boot")
     p.set_defaults(func=cmd_build)
     p = sub.add_parser("verify")
     p.add_argument("rom")

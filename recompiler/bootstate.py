@@ -24,9 +24,11 @@ the kernel's own code and the ROM header:
     exception 0x503a0224 only zeroes 16 bytes and leaves the stack-size
     field at zero; TStack::Set then panics PLAT 0x51.
 
-The tool also pins the next frontier: the time-cluster conversion writes an
-out-of-range TTime at 0x800017ec, TTime::SecondsFrom returns KErrOverflow,
-and Kern::Init1 panics MKERN-WD2 24 at 0x50310b30.
+Round 29 then closed the apparent time-cluster frontier: the out-of-range
+TTime was caused by two ARMv4T interpreter bugs (undecoded long multiply and
+non-S data-processing instructions clobbering the flags).  The static time
+and idle sequences are still pinned here; the live boot acceptance is
+tools/test_round29.sh (NK_SYSTEM_TIME installs the 0x50000084 TTime hand-off).
 
 Commands::
 
@@ -157,7 +159,7 @@ def main() -> int:
 
     if not ok:
         raise SystemExit(1)
-    print("PASS: round-28 boot hand-off, stack constructor and time frontier")
+    print("PASS: round-28 boot hand-off, stack constructor and time/idle sequences")
     return 0
 
 

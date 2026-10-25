@@ -1009,6 +1009,44 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         }
 
         unsigned op4 = (op >> 4) & 0xf;
+        /* ---- long multiply: UMULL/UMLAL/SMULL/SMLAL ----
+         * ARMv4 encodes these as `00001 U A S RdHi RdLo Rs 1001 Rm`, with
+         * RdHi in bits 19-16 and RdLo in bits 15-12.  They are not a variant
+         * of MUL (whose bits 27-22 are all zero): the old decoder tested
+         * bit 22 and let every long multiply fall through to the
+         * data-processing path, where it executed as a register-shifted SBC.
+         * The kernel's TTime/TInt64 arithmetic (`smull` inside the
+         * days-before-year helper 0x503a6094, `umlal` inside the 64-bit
+         * multiply 0x50389f0c) therefore produced garbage that surfaced as
+         * the round-28 MKERN-WD2 24 time panic. */
+        if (op4 == 9 && (op & 0x0f8000f0u) == 0x00800090u) {
+            int s = (op >> 20) & 1;                /* S: set flags   */
+            int acc = (op >> 21) & 1;              /* A: accumulate  */
+            int sgn = (op >> 22) & 1;              /* U: 1 = signed  */
+            unsigned rdhi = (op >> 16) & 0xf;
+            unsigned rdlo = (op >> 12) & 0xf;
+            unsigned rs = (op >> 8) & 0xf;
+            unsigned rm = op & 0xf;
+            uint64_t p;
+            /* Read both operands before writing either half.  The firmware
+             * does use `smull r1,r3,r2,r3` (RdHi == Rs), which is formally
+             * UNPREDICTABLE but well defined on ARM7TDMI/ARM920T. */
+            if (sgn)
+                p = (uint64_t)((int64_t)(int32_t)c->r[rs] *
+                               (int64_t)(int32_t)c->r[rm]);
+            else
+                p = (uint64_t)c->r[rs] * (uint64_t)c->r[rm];
+            if (acc) p += ((uint64_t)c->r[rdhi] << 32) | c->r[rdlo];
+            c->r[rdlo] = (uint32_t)p;
+            c->r[rdhi] = (uint32_t)(p >> 32);
+            if (s) {
+                nk_setf(c, NK_FLAG_N, c->r[rdhi] >> 31);
+                nk_setf(c, NK_FLAG_Z, p == 0);
+                /* ARMv4 leaves C undefined for long multiplies; keep it. */
+            }
+            return 0;
+        }
+
         /* Multiply/MLA: bits 27-22 = 000000 and bits 7-4 = 1001.  The
          * bits-7-4 test alone also matches data-processing immediates whose
          * low byte ends in 9 (for example `sub sp, sp, #0x258`), which then
@@ -1019,26 +1057,15 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
             unsigned rn = (op >> 16) & 0xf;
             unsigned rs = (op >> 8) & 0xf;
             unsigned rm = op & 0xf;
-            if (op & (1u << 22)) {                 /* long multiply */
-                int sign = (op & (1u << 21)) != 0;
-                uint64_t p;
-                if (sign) p = (uint64_t)((int64_t)(int32_t)c->r[rs] * (int64_t)(int32_t)c->r[rm]);
-                else      p = (uint64_t)c->r[rs] * (uint64_t)c->r[rm];
-                if (op & (1u << 21)) p += ((uint64_t)c->r[rn] << 32) | c->r[rd];
-                c->r[rd] = (uint32_t)p;
-                c->r[rn] = (uint32_t)(p >> 32);
-                if (s) { nk_setf(c, NK_FLAG_N, c->r[rn] >> 31); nk_setf(c, NK_FLAG_Z, p == 0); }
-            } else {
-                /* MUL/MLA: bits 19-16 are Rd (bits 15-12 are the MLA
-                 * accumulator, zero for MUL).  The old code stored to
-                 * bits 15-12, so every MUL wrote r0 and r0-resident values
-                 * (including the object-index accessor's result pointer)
-                 * vanished. */
-                uint32_t p = c->r[rs] * c->r[rm];
-                if (op & (1u << 21)) p += c->r[rd]; /* MLA accumulator */
-                c->r[rn] = p;                       /* Rd */
-                if (s) set_nz(c, p);
-            }
+            /* MUL/MLA: bits 19-16 are Rd (bits 15-12 are the MLA
+             * accumulator, zero for MUL).  The old code stored to
+             * bits 15-12, so every MUL wrote r0 and r0-resident values
+             * (including the object-index accessor's result pointer)
+             * vanished. */
+            uint32_t p = c->r[rs] * c->r[rm];
+            if (op & (1u << 21)) p += c->r[rd]; /* MLA accumulator */
+            c->r[rn] = p;                       /* Rd */
+            if (s) set_nz(c, p);
             return 0;
         }
 
@@ -1079,6 +1106,14 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         uint32_t a = rp_arm(c, rn, pc);
         uint32_t r = 0;
         int write = 1;
+        /* SUB/RSC/ADD/ADC/SBC/RSC must only update the condition flags when
+         * the S bit is set.  sub_flags()/add_flags() always write N/Z/C/V, so
+         * the old switch clobbered the flags for every plain `add`/`sub`.
+         * The 64-bit divide loop in EUser is the proof: `adc r3,r3,r3`
+         * (S=0) sits between `sbcs ip,...` and `movhs r6,sl`; clobbering C
+         * there made the conditional remainder update never execute and
+         * every division returned 0xFFFFF instead of 732323. */
+        uint32_t fsave = c->cpsr & (0xfu << NK_FLAG_V);
         switch (opc) {
         case 0x0: r = a & b; if (s) { set_nz(c, r); nk_setf(c, NK_FLAG_C, carry >> NK_FLAG_C); } break;
         case 0x1: r = a ^ b; if (s) { set_nz(c, r); nk_setf(c, NK_FLAG_C, carry >> NK_FLAG_C); } break;
@@ -1097,6 +1132,8 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         case 0xe: r = a & ~b; if (s) { set_nz(c, r); nk_setf(c, NK_FLAG_C, carry >> NK_FLAG_C); } break;
         case 0xf: r = ~b;    if (s) { set_nz(c, r); nk_setf(c, NK_FLAG_C, carry >> NK_FLAG_C); } break;
         }
+        if (opc >= 0x2 && opc <= 0x7 && !s)
+            c->cpsr = (c->cpsr & ~(0xfu << NK_FLAG_V)) | fsave;
         if (write) {
             if (rd == 15) {
                 /* `MOVS PC, LR` / `SUBS PC, LR, #imm` in an exception mode
