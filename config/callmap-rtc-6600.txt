@@ -15,9 +15,8 @@
 #
 #   0x5033f040  the driver asks the kernel's system-time helper for a
 #               64-bit time value.  That helper formats the value through
-#               EUser slot 0x503b4d1c, which config/imports-b7e-6600.txt
-#               rebinds to the 2-arg TPtr16 constructor for the kernel panic
-#               printer.  The two call sites need different ABIs; the driver
+#               EUser slot 0x503b4d1c, which the boot import map binds to
+#               TInt64(int) (0x50389a40).  The two call sites need different ABIs; the driver
 #               only consumes the two output words, so HLE zero2 writes a
 #               zero TTime and returns (0xfffffff9).
 #

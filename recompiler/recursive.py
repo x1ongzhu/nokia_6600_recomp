@@ -12,8 +12,7 @@ garbage, which is exactly where the first kernel trace stops.
 
 This scanner starts at a known entry, follows BL/BLX and `ldr pc, [pc, #imm]`
 veneers, and treats the instruction after a Thumb `mov lr,pc; bx lr` as an ARM
-function.  It writes the same functions.json shape as extract.py, so lift.py and
-gen_register.py work unchanged.
+function.  It writes the functions.json shape consumed by lift.py and gen_register.py.
 
     py recursive.py fw/6600_kernel.bin functions.json \
         --base 0x50310000 --entry 0x50310054 --thumb

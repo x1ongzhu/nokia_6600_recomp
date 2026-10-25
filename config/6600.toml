@@ -2,85 +2,70 @@
 # DCT4 / UPP_WD2 (ARM920T), Symbian OS 7.0s, S60 2nd Edition.
 
 [input]
-# The original download is the WD2 container fw/NHL105530.C1.
-# recompiler/wd2.py extract turns it into the raw EKA1 ROM 6600_mcu.bin.
-#   fw/NHL105530.C1 -> 6600_mcu.bin (23.3 MB flash image, linked at 0x50000000)
-#   kernel           -> fw/6600_kernel.bin (code copied to its link address)
-container   = "fw/NHL105530.C1"
-image       = "6600_mcu.bin"
-kernel      = "fw/6600_kernel.bin"
-source      = "NHL105530.C1 (NHL-10 v5.53.0, WD2 BT2 / WD2 ALGORITHM)"
-cpu         = "armv4t"
+# fw/NHL105530.C1 (WD2 container) -> 6600_mcu.bin (EKA1 flash, 0x50000000)
+container = "fw/NHL105530.C1"
+image     = "6600_mcu.bin"
+kernel    = "fw/6600_kernel.bin"
+source    = "NHL105530.C1 (NHL-10 v5.53.0, WD2 BT2 / WD2 ALGORITHM)"
+cpu       = "armv4t"
 
 [platform]
 family = "DCT4"
-asic   = "UPP_WD2"                 # 104 MHz ARM920T, PDA variant of the UPP
+asic   = "UPP_WD2"                 # 104 MHz ARM920T
 ui     = "S60 2nd Edition (Symbian OS 7.0s)"
 
 [memory]
-rom_base       = 0x50000000        # EKA1 ROM link address
-rom_size       = 0x01600000        # declared 22 MiB (the packed file is 0x1634f5c)
-ram_base       = 0x80000000        # kernel data / RAM (kern_data .. kern_limit)
-ram_size       = 0x00300000        # 3 MiB, from the ROM header
-high_vectors   = 0xffff0000
+rom_base      = 0x50000000         # EKA1 ROM link address
+rom_size      = 0x01600000         # declared 22 MiB
+ram_base      = 0x80000000         # kernel data/RAM
+ram_size      = 0x00300000         # 3 MiB; NK_RAM_EXTRA extends to 6 MiB
+superpage     = 0x40000000         # mask-ROM hand-off page
+high_vectors  = 0xffff0000
 
 [rom]
+# Offsets are in the page-header-free packed stream (pagestream.py build).
 header_offset    = 0x7c            # 6600 EKA1 TRomHeader starts at +0x7c
-kernel_header    = 0x3268c0        # packed file offset of the kernel TRomImageHeader
-kernel_header_va = 0x5030ff9c      # header in the flat runtime image (code - 0x64)
-kernel_text      = 0x326924        # packed file offset of the kernel text
-kernel_code      = 0x50310000      # link address of the kernel code
-kernel_entry     = 0x50310054      # Thumb entry
-kernel_data      = 0x50338ac0      # ROM copy of .data (also copied to RAM 0x80000000)
+root_dir_list    = 0x50300000      # iRomRootDirectoryList (runtime VA)
+kernel_header    = 0x31004c        # TRomImageHeader in the stream
+kernel_text      = 0x3100b0        # header + 0x64
+kernel_header_va = 0x5030ff9c      # flat runtime VA (code - 0x64)
+kernel_code      = 0x50310000
+kernel_entry     = 0x50310054      # ARM
+kernel_data      = 0x50338ac0      # ROM copy of .data; also copied to RAM
 kernel_data_size = 0x500
 kernel_bss       = 0x1c58
-maskrom_entry    = 0x00e0ca39      # boot/mask-ROM entry, not part of the ROM image
-
-# The packed records are a section database, not a linear dump.  The flat
-# runtime image is produced by:
-#   .venv/bin/python recompiler/romimage.py build 6600_mcu.bin out/6600_runtime.bin
+kernel_stack     = 0x4000          # iStackSize
+kernel_heap_min  = 0x20000         # iHeapSizeMin
+kernel_heap_max  = 0x1000000       # iHeapSizeMax
 runtime_image    = "out/6600_runtime.bin"
 
 [romfs]
-# File layouts, not runtime addresses: the root list lives at file 0x3162b0,
-# its runtime address is the stored ROM header pointer 0x50300000.
-root_list_file   = 0x3162b0
-root_list_va     = 0x50300000
-dir_span         = 0x10000          # packed directory block below the kernel
-file_mapping     = "va - 0x50000000" # ROMFS file data is stored linearly
-entry_count      = 171
+# Directory block is read in place at 0x50300000.
+root_list_file = 0x3000b0          # stream offset of the root list
+root_list_va   = 0x50300000
+dir_span       = 0x10000
+libs_entries   = 586               # boot image table
+programs_entries = 55              # server list
+plugins_entries = 171              # \System\Libs\Plugins
 
 [display]
 width  = 176
 height = 208
 color  = true                      # 176x208 16-bit TFT
 
+[boot]
+# Current acceptance profile (see tools/test_round29.sh).
+import_map   = "config/imports-r29-6600.txt"
+callmap      = "config/callmap-rtc-6600.txt"
+system_time  = true                # mask-ROM TTime hand-off at 0x50000084
+boot_handoff = true
+primary_ram  = 0x80900000
+hal_timer_hz = 4
+
 [output]
 dir     = "out/"
 context = "n6600_cpu_t"
 
-[relayout]
-# Round 6: the packed text is missing the ROM linker's 2-byte alignment padding.
-# recompiler/relayout.py reconstructs it by aligning literal pools and function
-# starts to 4 bytes.  The kernel text gains 0x58 bytes on the current image.
-tool            = "recompiler/relayout.py"
-kernel_image    = "out/6600_kernel_relaid.bin"
-runtime_image   = "out/6600_runtime_relaid.bin"
-kernel_data_new = 0x50400000        # free gap before the first ROMFS file
-low_ram_base    = 0x00000000        # pre-MMU physical RAM view (3 MiB)
-low_ram_size    = 0x00300000
-
-[bringup]
-# The packed image's BL targets are stale per call site.  The callmap pins
-# individual sites (and supplies a few host-side helpers); patches restore bytes
-# missing from the packed text.  Both are bring-up aids, not firmware.
-callmap         = "config/callmap-6600.txt"
-patches         = "config/patches-6600.txt"
-runtime_patched = "out/6600_runtime_bringup.bin"
-recover         = true
-snap_window_arm = 0x200
-snap_window_thumb = 0x400
-
 [functions]
-# entry = 0x50310054               # kernel entry (Thumb), after loading code at 0x50310000
+# entry = 0x50310054               # kernel entry (ARM)
 # hints = []

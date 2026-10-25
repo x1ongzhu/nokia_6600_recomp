@@ -161,8 +161,8 @@ N-Gage 应用级兼容层不等于 6600 整机启动；其内存布局也不能�
 
 ### 5. DCT4Crypt：只用于老式 DCT4 路径
 
-入口为 `references/dct4crypt/decr.c`，用于核对 `recompiler/dct4decrypt.py`
-的表与转换过程。**它不是 6600 WD2 BT2 / WD2 ALGORITHM 装载器**，
+入口为 `references/dct4crypt/decr.c`，仅用于核对 6100 等老式 `DCT4` chunk
+格式。**它不是 6600 WD2 BT2 / WD2 ALGORITHM 装载器**，
 不要用于解释 WD2 的 EKA1 头或压缩区域。
 
 ## 使用这些资料时的证据要求
@@ -174,10 +174,10 @@ N-Gage 应用级兼容层不等于 6600 整机启动；其内存布局也不能�
    下载这些资料本身不构成确认，也不能证明高熵区域一定需要某种解压算法。
    第 16 轮已把 `0x20b0` 起的 852 个 `0x20ec` 记录确定为 **`0xec` page
    header + `0x2000` payload**，并用 `recompiler/pagestream.py` 去 header；
-   kernel export 命中率因此从 17.2% 升到 98.1%。第 17 轮把 `0x124` 的
-   `KaeP`/PeaK 容器边界固定为 record `0x20` @ `0x12e`、image `0x1423dc` @
-   `0x14e`，并由 `kaep.py unpack` 导出；但 mask ROM 对 0x20 字节 record 的
-   codec 仍未确认，`install` 的 `ldr pc` handoff 是显式 stand-in。
+   kernel export 命中率因此从 17.2% 升到 98.1%。`0x124` 的 `KaeP`/PeaK
+   容器边界已测量为 record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`；
+   但 mask ROM 对 0x20 字节 record 的 codec 仍未确认，启动 harness 用的是
+   显式 `ldr pc` hand-off stand-in，当前树中没有 KaeP 解包工具。
 5. UPP_WD2 的 LCD、计时器和键盘寄存器仍需另找板级资料或实际访问轨迹，以上资料不能填补这一空白。
 6. `Series60_v20` 提供同代的头文件、符号名和文档，但不提供目标 ROM 的导出表或
    内存布局；不要用 SDK 的 `.lib` 顺序、头文件类布局或模拟器行为替代目标映像证据。

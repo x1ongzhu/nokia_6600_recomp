@@ -2,7 +2,7 @@
 lift.py — ARMv4T (ARM + Thumb) -> C static recompiler.
 
 Ported from ngagerecomp. Reads functions.json (functions + segment bytes from
-extract.py), decodes each function with Capstone, and emits one C function per
+recursive.py), decodes each function with Capstone, and emits one C function per
 guest function operating on `nk_cpu_t` (see runtime/include/nokia_cpu.h, nokia_rt.h).
 
 Thumb-aware (the DCT4 S60 firmware is Thumb): PC reads as addr+4 in Thumb
