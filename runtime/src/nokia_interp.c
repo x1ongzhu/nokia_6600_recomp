@@ -6,17 +6,23 @@
  * can continue past a Thumb/ARM boundary that a flat ROM copy left unlinked.
  *
  * Modelled: ARMv4T data processing, shifts, multiply/long multiply,
- * single/halfword/signed transfers, LDM/STM, B/BL/BX, MRS/MSR, SWI (logged),
+ * single/halfword/signed transfers, LDM/STM, B/BL/BX, MRS/MSR, SWI (logged;
+ * optionally dispatched through the EKA1 executive table with NK_SWI_DIRECT),
  * CP15 (logged, no-op), and the full Thumb-1 set used by S60 2.0 code.
  *
- * Not modelled: exceptions, banked registers, MMU translation, the write
- * buffer, and ARMv5 instructions.  They are reported, not guessed.
+ * Not modelled: exceptions, banked registers, SPSR, MMU translation, the write
+ * buffer, and ARMv5 instructions.  They are reported, not guessed.  The
+ * NK_SWI_DIRECT call gate is a bring-up model of the executive call, not a
+ * replacement for the real SVC exception.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "nokia_interp.h"
 #include "nokia_rt.h"
+
+static int g_bank_log;
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -27,6 +33,95 @@ static inline int thumb(nk_cpu_t* c) { return (c->cpsr & NK_CPSR_T) != 0; }
 static inline void set_thumb(nk_cpu_t* c, int t) {
     if (t) c->cpsr |= NK_CPSR_T;
     else   c->cpsr &= ~NK_CPSR_T;
+}
+
+/* ------------------------------------------------------------------ */
+/* ARM mode banks (opt-in; see nk_interp_t.banked)                      */
+/* ------------------------------------------------------------------ */
+
+static int mode_idx(uint32_t cpsr) {
+    switch (cpsr & NK_CPSR_MODE) {
+    case NK_MODE_FIQ: return 1;
+    case NK_MODE_IRQ: return 2;
+    case NK_MODE_SVC: return 3;
+    case NK_MODE_ABT: return 4;
+    case NK_MODE_UND: return 5;
+    default:          return 0;   /* USR and SYS share the bank */
+    }
+}
+
+static int stack_in_ram(uint32_t sp) {
+    return sp >= NK_RAM_BASE && sp < NK_RAM_BASE + NK_RAM_SIZE;
+}
+
+static void bank_save(nk_cpu_t* c) {
+    int i = mode_idx(c->cpsr);
+    nk_mode_bank* b = &c->bank[i];
+    /* The kernel's mode-stack setup derives its base from boot state we do
+     * not have yet (a missing descriptor makes it 0xfffffffc/0).  If the
+     * harness supplied a sane stack for this bank, keep it until the kernel
+     * produces a valid in-RAM stack of its own. */
+    if (!b->preset || stack_in_ram(c->r[13]))
+        b->sp = c->r[13];
+    b->lr = c->r[14];
+    b->valid = 1;
+    /* FIQ owns r8-r12; every other mode shares the USR bank's copy. */
+    if (i == 1) {
+        b->r8 = c->r[8]; b->r9 = c->r[9]; b->r10 = c->r[10];
+        b->r11 = c->r[11]; b->r12 = c->r[12];
+    } else {
+        nk_mode_bank* u = &c->bank[0];
+        u->r8 = c->r[8]; u->r9 = c->r[9]; u->r10 = c->r[10];
+        u->r11 = c->r[11]; u->r12 = c->r[12];
+    }
+}
+
+static void bank_load(nk_cpu_t* c) {
+    int i = mode_idx(c->cpsr);
+    nk_mode_bank* b = &c->bank[i];
+    if (!b->valid) {              /* first entry: inherit the current stack */
+        b->sp = c->r[13];
+        b->lr = c->r[14];
+        b->valid = 1;
+    }
+    if (!b->preset || stack_in_ram(b->sp))
+        c->r[13] = b->sp;
+    else
+        b->sp = c->r[13];
+    c->r[14] = b->lr;
+    if (i == 1) {
+        c->r[8] = b->r8; c->r[9] = b->r9; c->r[10] = b->r10;
+        c->r[11] = b->r11; c->r[12] = b->r12;
+    } else if (c->bank[0].valid) {
+        c->r[8] = c->bank[0].r8; c->r[9] = c->bank[0].r9;
+        c->r[10] = c->bank[0].r10; c->r[11] = c->bank[0].r11;
+        c->r[12] = c->bank[0].r12;
+    }
+}
+
+static void banked_set_cpsr(nk_cpu_t* c, uint32_t new_cpsr, int enabled) {
+    int old = mode_idx(c->cpsr), nw = mode_idx(new_cpsr);
+    if (!enabled || old == nw) {
+        c->cpsr = new_cpsr;
+        return;
+    }
+    if (g_bank_log)
+        fprintf(stderr, "[bank] mode %#x -> %#x (old sp=%#010x lr=%#010x)\n",
+                c->cpsr & NK_CPSR_MODE, new_cpsr & NK_CPSR_MODE,
+                c->r[13], c->r[14]);
+    bank_save(c);
+    c->cpsr = new_cpsr;
+    bank_load(c);
+    if (g_bank_log)
+        fprintf(stderr, "[bank]   new sp=%#010x lr=%#010x\n", c->r[13], c->r[14]);
+}
+
+void nk_bank_init(nk_cpu_t* c, uint32_t mode, uint32_t sp, uint32_t lr) {
+    int i = mode_idx(mode);
+    c->bank[i].sp = sp;
+    c->bank[i].lr = lr;
+    c->bank[i].valid = 1;
+    c->bank[i].preset = 1;
 }
 
 static inline uint32_t rp_arm(nk_cpu_t* c, unsigned n, uint32_t pc) {
@@ -131,11 +226,52 @@ static uint32_t arm_op2(nk_cpu_t* c, uint32_t op, uint32_t pc, uint32_t* carry) 
 
 static int thumb_ok(uint16_t h);
 static int arm_ok(uint32_t op);
+static int pop_call(nk_interp_t* ip, uint32_t pc, int* out_thumb);
 
 static int in_code(const nk_interp_t* ip, uint32_t a) {
     for (int i = 0; i < ip->code_n; i++)
         if (a >= ip->code[i].lo && a < ip->code[i].hi) return 1;
     return ip->code_n == 0;   /* no ranges declared: preserve old behaviour */
+}
+
+/* EKA1 executive call gate.  A `svc #N` stub in EUser.dll is not followed by
+ * a return sequence: the kernel dispatches to the service function and comes
+ * back to the *caller's* LR (the stub is entered by `bl` or by a tail `b`).
+ * The interpreter does not model the banked SVC exception yet, so this
+ * explicit direct dispatcher keeps the same observable convention.  It is a
+ * bring-up aid: NK_SWI_DIRECT=1, not the final CPU model. */
+static int swi_direct(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm, uint32_t pc) {
+    if (!ip->swi_direct || !ip->swi_table) return 0;
+    uint32_t idx = imm & 0x1ffu;
+    uint32_t slot = ip->swi_table + idx * 4u;
+    if (ip->swi_complete[idx >> 6] & (1ull << (idx & 63u))) {
+        uint32_t status = c->r[0];
+        if (status >= 0x1000u) nk_w32(c, status & ~3u, 0);
+        if (ip->swi_log-- > 0)
+            fprintf(stderr, "[interp] SWI %#x at %#010x -> complete request %#010x\n",
+                    imm, pc, status);
+        c->r[0] = 0;
+        int new_t = (c->r[14] & 1u) ? 1 : 0;
+        int restored = pop_call(ip, c->r[14] & ~1u, &new_t);
+        set_thumb(c, restored ? new_t : (c->r[14] & 1u));
+        c->r[15] = c->r[14] & ~1u;
+        return 1;
+    }
+    uint32_t target = nk_r32(c, slot);
+    if (target < 0x1000u || !in_code(ip, target & ~1u)) {
+        if (ip->swi_log-- > 0)
+            fprintf(stderr, "[interp] SWI %#x at %#010x: slot %#010x -> %#010x "
+                    "(not a service code address); continuing as no-op\n",
+                    imm, pc, slot, target);
+        return 0;
+    }
+    if (ip->swi_log-- > 0)
+        fprintf(stderr, "[interp] SWI %#x at %#010x -> service %#010x "
+                "(r0=%#010x r1=%#010x r2=%#010x r3=%#010x lr=%#010x)\n",
+                imm, pc, target, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+    set_thumb(c, 0);
+    c->r[15] = target & ~1u;
+    return 1;
 }
 
 static void trace_pc(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc, uint32_t insn) {
@@ -666,9 +802,10 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
     if (cond == 0xf) {
         if ((op & 0x0f000000u) == 0x0f000000u) {   /* SWI */
             uint32_t imm = op & 0x00ffffffu;
+            if (ip->stop_on_swi) { ip->st.stop_reason = NK_STOP_SWI; ip->st.stop_pc = pc; return 1; }
+            if (swi_direct(c, ip, imm, pc)) return 0;
             fprintf(stderr, "[interp] SWI %#x at %#010x (r0=%#x r1=%#x)\n",
                     imm, pc, c->r[0], c->r[1]);
-            if (ip->stop_on_swi) { ip->st.stop_reason = NK_STOP_SWI; ip->st.stop_pc = pc; return 1; }
             return 0;
         }
         goto undefined;
@@ -690,25 +827,56 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         return 0;
     }
 
-    /* MRS / MSR */
+    /* MRS / MSR.  Bit 22 selects SPSR instead of CPSR.  When the banked model
+     * is on, MSR CPSR_c also switches the r13/r14 (and FIQ r8-r12) banks. */
     if ((op & 0x0fbf0fffu) == 0x010f0000u) {       /* MRS Rd, CPSR/SPSR */
         unsigned rd = (op >> 12) & 0xf;
-        c->r[rd] = c->cpsr;
+        int i = mode_idx(c->cpsr);
+        if ((op & (1u << 22)) && i != 0 && c->bank[i].spsr_valid)
+            c->r[rd] = c->bank[i].spsr;
+        else
+            c->r[rd] = c->cpsr;
         return 0;
     }
-    if ((op & 0x0fb0fff0u) == 0x0120f000u) {       /* MSR CPSR, Rm */
+    if ((op & 0x0fb0fff0u) == 0x0120f000u) {       /* MSR CPSR/SPSR, Rm */
         unsigned mask = (op >> 16) & 0xf;
         uint32_t v = c->r[op & 0xf];
-        if (mask & 8) c->cpsr = (c->cpsr & ~0xff000000u) | (v & 0xff000000u);
-        if (mask & 1) c->cpsr = (c->cpsr & ~NK_CPSR_MODE) | (v & NK_CPSR_MODE);
+        if (op & (1u << 22)) {
+            int i = mode_idx(c->cpsr);
+            if (i != 0) {
+                uint32_t s = c->bank[i].spsr;
+                if (mask & 8) s = (s & ~0xff000000u) | (v & 0xff000000u);
+                if (mask & 1) s = (s & ~NK_CPSR_MODE) | (v & NK_CPSR_MODE);
+                c->bank[i].spsr = s;
+                c->bank[i].spsr_valid = 1;
+            }
+            return 0;
+        }
+        uint32_t nc = c->cpsr;
+        if (mask & 8) nc = (nc & ~0xff000000u) | (v & 0xff000000u);
+        if (mask & 1) nc = (nc & ~NK_CPSR_MODE) | (v & NK_CPSR_MODE);
+        banked_set_cpsr(c, nc, ip->banked);
         return 0;
     }
-    if ((op & 0x0fb0f000u) == 0x0320f000u) {       /* MSR CPSR, #imm */
+    if ((op & 0x0fb0f000u) == 0x0320f000u) {       /* MSR CPSR/SPSR, #imm */
         unsigned rot = ((op >> 8) & 0xf) * 2;
         uint32_t v = op & 0xff;
         if (rot) v = (v >> rot) | (v << (32 - rot));
-        if (op & (1u << 19)) c->cpsr = (c->cpsr & ~0xff000000u) | (v & 0xff000000u);
-        if (op & (1u << 16)) c->cpsr = (c->cpsr & ~NK_CPSR_MODE) | (v & NK_CPSR_MODE);
+        if (op & (1u << 22)) {
+            int i = mode_idx(c->cpsr);
+            if (i != 0) {
+                uint32_t s = c->bank[i].spsr;
+                if (op & (1u << 19)) s = (s & ~0xff000000u) | (v & 0xff000000u);
+                if (op & (1u << 16)) s = (s & ~NK_CPSR_MODE) | (v & NK_CPSR_MODE);
+                c->bank[i].spsr = s;
+                c->bank[i].spsr_valid = 1;
+            }
+            return 0;
+        }
+        uint32_t nc = c->cpsr;
+        if (op & (1u << 19)) nc = (nc & ~0xff000000u) | (v & 0xff000000u);
+        if (op & (1u << 16)) nc = (nc & ~NK_CPSR_MODE) | (v & NK_CPSR_MODE);
+        banked_set_cpsr(c, nc, ip->banked);
         return 0;
     }
 
@@ -732,7 +900,11 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         }
 
         unsigned op4 = (op >> 4) & 0xf;
-        if (op4 == 9) {                             /* MUL/MLA/UMULL/... */
+        /* Multiply/MLA: bits 27-22 = 000000 and bits 7-4 = 1001.  The
+         * bits-7-4 test alone also matches data-processing immediates whose
+         * low byte ends in 9 (for example `sub sp, sp, #0x258`), which then
+         * executed as a bogus MUL and zeroed SP. */
+        if (op4 == 9 && (op & 0x0fc000f0u) == 0x00000090u) {
             int s = (op >> 20) & 1;
             unsigned rd = (op >> 12) & 0xf;
             unsigned rn = (op >> 16) & 0xf;
@@ -813,6 +985,20 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         }
         if (write) {
             if (rd == 15) {
+                /* `MOVS PC, LR` / `SUBS PC, LR, #imm` in an exception mode
+                 * restores CPSR from SPSR and returns through the bank.  Only
+                 * do that when SPSR actually came from an exception; kernel
+                 * functions also use `mov pc, lr` as an ordinary return. */
+                if (s && ip->banked) {
+                    int i = mode_idx(c->cpsr);
+                    if (i != 0 && c->bank[i].spsr_valid) {
+                        uint32_t nc = c->bank[i].spsr;
+                        c->bank[i].spsr_valid = 0;
+                        banked_set_cpsr(c, nc, 1);
+                        c->r[15] = r & ~1u;
+                        return 0;
+                    }
+                }
                 int new_t;
                 int restored = pop_call(ip, r & ~1u, &new_t);
                 set_thumb(c, restored ? new_t : 0);
@@ -846,7 +1032,12 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
                  * Restrict this to the ip register: a small value loaded from
                  * an arbitrary vtable slot (e.g. `ldr pc,[r3,#0x14]`) is a
                  * missing object, not an import. */
-                if (v < 0x1000u && rn == 12 && off == 0) {
+                /* An import stub is `ldr ip,[pc]; ldr pc,[ip]`; the slot is
+                 * either not relocated yet (0/0xffffffff) or has been bound
+                 * to code.  A slot value outside every declared code range is
+                 * an unbound import, not a legitimate indirect branch. */
+                if (rn == 12 && off == 0 &&
+                    (v < 0x1000u || v >= 0xffff0000u || !in_code(ip, v & ~3u))) {
                     ip->st.iat_hits++;
                     if (ip->iat_log-- > 0)
                         fprintf(stderr, "[interp] unbound IAT slot %#010x at %#010x (caller lr=%#010x)\n",
@@ -907,6 +1098,7 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         }
         unsigned pbit = (op >> 24) & 1, ubit = (op >> 23) & 1;
         unsigned wbit = (op >> 21) & 1, lbit = (op >> 20) & 1;
+        unsigned user_bank = (op >> 22) & 1;
         unsigned rn = (op >> 16) & 0xf;
         uint32_t list = op & 0xffffu;
         unsigned n = 0;
@@ -928,6 +1120,16 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         }
         if (wbit) c->r[rn] = ubit ? base + 4 * n : base - 4 * n;
         if (lbit && pc_loaded) {
+            if (user_bank && ip->banked) {
+                int i = mode_idx(c->cpsr);
+                if (i != 0 && c->bank[i].spsr_valid) {
+                    uint32_t nc = c->bank[i].spsr;
+                    c->bank[i].spsr_valid = 0;
+                    banked_set_cpsr(c, nc, 1);
+                    c->r[15] = pc_val & ~1u;
+                    return 0;
+                }
+            }
             int new_t;
             int restored = pop_call(ip, pc_val & ~1u, &new_t);
             set_thumb(c, restored ? new_t : (pc_val & 1));
@@ -945,7 +1147,10 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
         }
         /* SWI with cond != 1111 (rare but legal). */
         if ((op & 0x0f000000u) == 0x0f000000u) {
-            fprintf(stderr, "[interp] SWI %#x at %#010x\n", op & 0xffffff, pc);
+            uint32_t imm = op & 0xffffffu;
+            if (ip->stop_on_swi) { ip->st.stop_reason = NK_STOP_SWI; ip->st.stop_pc = pc; return 1; }
+            if (swi_direct(c, ip, imm, pc)) return 0;
+            fprintf(stderr, "[interp] SWI %#x at %#010x\n", imm, pc);
             return 0;
         }
         goto undefined;
@@ -1204,9 +1409,11 @@ static int thumb_step(nk_cpu_t* c, nk_interp_t* ip) {
     if ((h & 0xf000) == 0xd000) {
         unsigned cc = (h >> 8) & 0xf;
         if (cc == 0xf) {                           /* SWI */
-            fprintf(stderr, "[interp] SWI %u at %#010x (r0=%#x r1=%#x)\n",
-                    h & 0xff, pc, c->r[0], c->r[1]);
+            uint32_t imm = h & 0xffu;
             if (ip->stop_on_swi) { ip->st.stop_reason = NK_STOP_SWI; ip->st.stop_pc = pc; return 1; }
+            if (swi_direct(c, ip, imm, pc)) return 0;
+            fprintf(stderr, "[interp] SWI %u at %#010x (r0=%#x r1=%#x)\n",
+                    imm, pc, c->r[0], c->r[1]);
             return 0;
         }
         if (cc == 0xe) {                           /* B */
@@ -1306,6 +1513,11 @@ void nk_interp_init(nk_interp_t* ip) {
     ip->watch_hits = 1;
     ip->watch_log = 16;
     ip->require_code = 0;      /* selftests execute tiny snippets in RAM */
+    /* EKA1 kernel executive service table (kernel text + 0x4aec).  Only used
+     * when swi_direct is enabled; the boot harness can override it. */
+    ip->swi_table = 0x50314aecu;
+    ip->swi_log = 16;
+    g_bank_log = getenv("NK_BANK_LOG") != NULL;
 }
 
 /* The 6600 executes code from ROM (0x50000000), the pre-MMU low alias
@@ -1322,6 +1534,7 @@ static int pc_in_code_space(uint32_t pc, int allow_low_alias) {
 
 int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
     if (ip->budget <= 0) ip->budget = 10000000;
+    if (ip->banked) bank_save(c);   /* publish the initial SVC/USR view */
     while (ip->budget-- > 0) {
         if (ip->watch_pc && ip->watch_hits != 0 &&
             (c->r[15] & ~1u) == (ip->watch_pc & ~1u)) {

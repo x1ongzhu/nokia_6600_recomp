@@ -69,11 +69,23 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   `gaps` classifies the header-less block between `.text` and `.data`: most
   records hold strings/pointer tables there, but 15 carry a second
   Thumb/ARM code fragment (the kernel and the big boot DLL stay rodata).
-  `verify` is the machine check used by `../tools/test_layout.sh`.  Small
-  images are stored in their linked layout (the 5-export Thumb DLL is 5/5)
-  but the kernel and the big DLLs are not: the pool-aware census reaches
-  104/478 (21.8%) against a 17.2% baseline, and the drift null test rejects
-  monotone relayout.
+  `verify` is the machine check used by `../tools/test_layout.sh`.  On the
+  page-header-free stream the kernel is **469/478 (98.1%)** and the big DLL
+  **1757/1788 (98.3%)** at shift 0, so the round-9..15 "packed text is not
+  the linked text" figures are historical page-header artifacts.  `drift`
+  remains a control that rejects the padding-only model.
+- **`executive.py`** — decode the EKA1 kernel executive-call (SWI) table.
+  EUser.dll implements the user-side kernel API as a dense table of single-
+  instruction `svc #N` stubs; treating them as no-ops made the kernel fall
+  through the whole table and loop with a `0x4b0`-byte stack leak per
+  iteration (the old 924k "frontier").  The SVC handler at `0x50314f30` bounds
+  the service table with the literal at `0x50314f7c` (`0x444` bytes = **273**
+  entries); every non-zero target at `0x50314aec` is inside the kernel text,
+  and four entries (`0x8a/0x94/0x95/0x96`) are unimplemented.  `verify` pins
+  the handler/table, `list --used` shows which services EUser calls, and
+  `stubs` maps every image's ARM/Thumb SVC instructions back to their service
+  address.  The runtime's `NK_SWI_DIRECT` mode uses this map as an explicit
+  bring-up call gate; `../tools/test_executive.sh` is the acceptance test.
 - **`bootbank.py`** — reconstruct the linked view of the UPP boot bank (flash
   first 64 KiB).  The bank is a concatenation of code fragments linked for
   different bases, so its absolute pointers are not at the stored offsets.

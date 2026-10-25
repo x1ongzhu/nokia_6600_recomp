@@ -70,6 +70,17 @@ carries the CPSR T bit, a shadow call stack for mode restore, and an optional
 Thumb/ARM boundary.  The generator stays simple: lifted C calls `nk_call`,
 which either dispatches to generated C or enters the interpreter.
 
+Round 18 adds an explicit EKA1 **executive call gate**: EUser.dll implements
+the user-side kernel API as single-instruction `svc #N` stubs, and
+`NK_SWI_DIRECT=1` dispatches them through the kernel service table at
+`0x50314aec` with the caller's LR still live.  `recompiler/executive.py`
+decodes and verifies that 273-entry table (270 code targets, four zero slots).
+The mode is a bring-up model, not the real SVC exception: the interpreter
+still lacks banked registers, SPSR and a faithful exception return, which is
+the next CPU-model task.  The run also exposed two loader gaps: the initial
+scheduler/current-thread object (`[0x800017d4]`) and flat-image import binding
+(IAT slot `0x5037d0e8` is `0xffffffff`).
+
 The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
 (first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.
 `recompiler/pagestream.py` removes the headers and makes the packed records

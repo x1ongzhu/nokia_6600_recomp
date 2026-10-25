@@ -69,6 +69,19 @@
  *                           mask-ROM return sentinel)
  *   NK_STOP_PC=0x...        stop when PC reaches this address (default NK_LR)
  *   NK_STOP_ON_SWI=1        stop at the first SWI
+ *   NK_SWI_DIRECT=1         EKA1 executive call gate: dispatch `svc #N` to
+ *                           table[N & 0x1ff] with the caller's LR still live
+ *                           (bring-up model; not the full SVC exception)
+ *   NK_SWI_TABLE=0x...      kernel 32-bit service table (default 0x50314aec)
+ *   NK_SWI_COMPLETE=0x4d    comma-separated service indices modelled as
+ *                           "request already complete": write 0 to [r0]
+ *   NK_SWI_LOG=n            log the first n direct SWI dispatches (default 16)
+ *   NK_FAKE_THREAD=1        install a minimal current-thread object at
+ *                           [0x800017d4] so EUser executive calls have a
+ *                           scheduler object (bring-up stand-in)
+ *   NK_BANKED=1             enable the banked r13/r14, FIQ r8-r12 and SPSR
+ *                           model; the harness presets per-mode stacks
+ *   NK_BANK_LOG=1           log every banked CPSR mode switch
  *   NK_E32_SECTIONS=1       with --e32: place data/exports/dllref at their
  *                           runtime addresses (finds the packed export run)
  *   NK_E32_HDR=0x64         serialized EKA1 image header size (code offset)
@@ -619,6 +632,27 @@ int main(int argc, char** argv) {
         printf("entry override: %#010x (%s)\n", entry, thumb_entry ? "Thumb" : "ARM");
     }
 
+    /* Bring-up stand-in for the kernel scheduler's "current thread" pointer.
+     * The E32 entry calls into EUser, whose executive-call stubs dereference
+     * [0x800017d4].  On a real cold boot the mask ROM/kernel startup creates
+     * the initial thread before that; jumping straight to the E32 entry skips
+     * it.  A minimal object with a vtable slot that returns 0 lets the SWI
+     * call-gate path continue and exposes the next missing state. */
+    if (getenv("NK_FAKE_THREAD")) {
+        uint32_t obj = 0x80003000u, vt = 0x80003040u;
+        uint32_t obj2 = 0x80003100u, vt2 = 0x80003140u;
+        nk_w32(&cpu, 0x800017d4u, obj);
+        nk_w32(&cpu, obj, vt);
+        nk_w32(&cpu, obj + 0x14, 1);
+        nk_w32(&cpu, obj + 0x5c, obj2);         /* thread-local object */
+        nk_w32(&cpu, vt + 0x20, 0x50312e90u);  /* mov r0,#0; bx lr */
+        nk_w32(&cpu, obj2, vt2);
+        nk_w32(&cpu, vt2 + 0x20, 0x50312e90u);
+        nk_w32(&cpu, vt2 + 0x28, 0x50312e90u);
+        printf("fake current thread: [%#010x] = %#010x, vtable %#010x\n",
+               0x800017d4u, obj, vt);
+    }
+
     const char* sp_env = getenv("NK_SP");
     cpu.r[13] = sp_env ? (uint32_t)strtoul(sp_env, NULL, 0) : 0x80300000u;
     cpu.r[0] = (uint32_t)env_ulong("NK_R0", 0);
@@ -641,6 +675,23 @@ int main(int argc, char** argv) {
     cpu.r[14] = (uint32_t)env_ulong("NK_LR", 0xdead0000u);
     cpu.cpsr = 0x400000d3u | (thumb_entry ? NK_CPSR_T : 0);  /* SVC, IRQ/FIQ off */
     cpu.r[15] = entry & ~1u;
+    if (env_ulong("NK_BANKED", 0)) {
+        /* The mask-ROM startup gives each ARM mode its own stack.  The kernel
+         * switches to UND/SVC/ABT while dispatching executive calls; without
+         * banks those writes all land on the SVC stack.  These tops are a
+         * bring-up stand-in, not recovered firmware state. */
+        uint32_t top = 0x80300000u;
+        nk_bank_init(&cpu, NK_MODE_SVC, top, cpu.r[14]);
+        nk_bank_init(&cpu, NK_MODE_UND, top - 0x4000u, cpu.r[14]);
+        nk_bank_init(&cpu, NK_MODE_ABT, top - 0x8000u, cpu.r[14]);
+        nk_bank_init(&cpu, NK_MODE_IRQ, top - 0xc000u, cpu.r[14]);
+        nk_bank_init(&cpu, NK_MODE_FIQ, top - 0x10000u, cpu.r[14]);
+        nk_bank_init(&cpu, NK_MODE_USR, top - 0x14000u, cpu.r[14]);
+        printf("banked mode stacks: svc=%#010x und=%#010x abt=%#010x "
+               "irq=%#010x fiq=%#010x usr=%#010x\n",
+               top, top - 0x4000u, top - 0x8000u, top - 0xc000u,
+               top - 0x10000u, top - 0x14000u);
+    }
 
     ip.budget = (long)env_ulong("NK_BUDGET", 2000000);
     ip.infer_mode = (int)env_ulong("NK_INFER", 1);
@@ -661,6 +712,23 @@ int main(int argc, char** argv) {
     ip.watch_hits = (int)env_ulong("NK_WATCH_HITS", 1);
     ip.watch_log = (int)env_ulong("NK_WATCH_LOG", 16);
     ip.stop_selfb = (int)env_ulong("NK_STOP_SELFB", 1);
+    ip.swi_direct = (int)env_ulong("NK_SWI_DIRECT", 0);
+    ip.swi_table = (uint32_t)env_ulong("NK_SWI_TABLE", 0x50314aec);
+    ip.swi_log = (int)env_ulong("NK_SWI_LOG", 16);
+    ip.banked = (int)env_ulong("NK_BANKED", 0);
+    const char* complete = getenv("NK_SWI_COMPLETE");
+    if (complete) {
+        const char* p = complete;
+        while (*p) {
+            char* end = NULL;
+            unsigned long v = strtoul(p, &end, 0);
+            if (end == p) break;
+            if (v < 512) ip.swi_complete[v >> 6] |= 1ull << (v & 63);
+            p = end;
+            while (*p == ',' || *p == ' ' || *p == '\t') p++;
+        }
+        printf("SWI completion HLE: %s\n", complete);
+    }
     ip.spin_max = (uint32_t)env_ulong("NK_SPIN", 0) ?
         (uint32_t)env_ulong("NK_SPIN_MAX", 20000) : 0;
     ip.require_code = (int)env_ulong("NK_CODE_ONLY", 1);

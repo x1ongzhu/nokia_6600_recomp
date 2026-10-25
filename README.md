@@ -104,7 +104,9 @@ criteria and phased roadmap live in
   frontier at `0x5039b2b8` (the saved `lr` has been zeroed; PC returns to 0).
   The old "12 Thumb instructions → `0x50314c16`" and "197 instructions with 4
   skipped calls" results were executing the **page header**, not the kernel.
-  `tools/test_pagestream.sh` pins the new run.
+  `tools/test_pagestream.sh` pins the new run.  **Round 18 correction:** that
+  924k run is a **runaway SWI fall-through**, not a boot; see the round-18
+  bullet below.
 - [x] **Lifter runs end-to-end on the 6600 kernel** — `recursive.py` (mode-aware
   Thumb/ARM discovery) + `lift.py` produce **131 mixed-mode functions** from the
   kernel (1,873 instructions, 99% lifted). `tools/build_kernel_smoke.sh` compiles
@@ -326,6 +328,36 @@ criteria and phased roadmap live in
   **1,499,999 ARM instructions, 0 undefined, one recovered stale call**, ending
   in the kernel code range.  `tools/test_kaep.sh` and
   `tools/test_bootbringup.sh` pin the container and the kernel-entry run.
+- [x] **The 924k run was a runaway SWI fall-through; the executive call gate is
+  now explicit (round 18)** — EUser.dll implements the user-side kernel API as
+  a dense table of single-instruction `svc #N` stubs
+  (`0x50392b00..0x50392dc8`).  The interpreter logged SWIs and continued, so a
+  branch into one stub fell through the **whole table**, entered the real
+  function after it (`0x50392dcc`) and looped with a **`0x4b0` stack leak per
+  iteration** until the stack left the mapped super page.  The `bx lr` with
+  `lr=0` at `0x5039b2b8` is a symptom, not the stack/super-page frontier.
+  [`executive.py`](recompiler/executive.py) now decodes the kernel SVC handler
+  (`0x50314f30`), its `0x444`-byte bound, and the **273-entry** service table
+  at `0x50314aec` (270 code targets; four unimplemented slots `0x8a/0x94/0x95/
+  0x96`), and maps every SVC stub in every image back to its service.
+  `NK_SWI_DIRECT=1` models the EKA1 call gate: dispatch to the service with the
+  caller's LR still live (the stub is a call gate, not a post-SWI
+  continuation).  Direct dispatch exposes the real blockers: the
+  scheduler/current-thread global `[0x800017d4]` is zero (the E32 entry is run
+  without the mask-ROM/kernel startup that creates the initial thread), and
+  IAT slot `0x5037d0e8` still contains `0xffffffff` (the flat-image builder
+  does not bind imports).  With the explicit `NK_FAKE_THREAD` object and the
+  `NK_SWI_COMPLETE=0x4d` wait-completion stand-in the kernel runs **7,540
+  instructions** (0 undefined) and stops at the **unbound IAT slot
+  `0x5037d0e8`** (`sp=0x802fff08`, `cpsr=0x800000d3`).  A second decoder bug
+  surfaced on this path: the multiply decoder accepted any instruction whose
+  bits 7-4 are `1001`, so `sub sp, sp, #0x258` executed as a bogus MUL and
+  zeroed SP.  Multiply/MLA now also require bits 27-22 = `000000`
+  (`interp_selftest` pins it).  Faking the unbound IAT return
+  (`NK_IAT_FAKE=1`) runs 8,425 instructions and corrupts `r4=0x00730072`
+  until PC 0; that is a control, not the frontier.  `tools/test_executive.sh`
+  pins the table, the stubs and both outcomes.  The old 924k number is kept
+  only as a regression baseline.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -343,12 +375,17 @@ criteria and phased roadmap live in
   **469/478 (98.1%)** and DLL `0x100039e5` **1757/1788 (98.3%)** at shift 0.
   `layout.py verify` now asserts that instead of the old null result;
   `tools/test_layout.sh` pins the new numbers.
-- [ ] **Kernel stack/exception frontier (round 16)** — the real kernel entry
-  now runs 924,964 instructions, installs its vector table and programs the
-  UPP, then returns to 0 from `0x5039b2b8` (`bx lr`) with the saved `lr`
-  zeroed.  Its SVC-mode stack has descended through the 4 KiB super page below
-  `0x80000000` into the kernel `.data` region.  The next task is the kernel's
-  stack/super-page setup (and the exception dispatcher), not another callmap.
+- [ ] **Kernel stack/exception frontier (round 18 reassessment)** — the round-16
+  924,964-instruction run is now explained: it was the SWI-table fall-through
+  loop, with a `0x4b0` stack leak per iteration.  The direct call gate stops
+  earlier (7,540 instructions) at a real missing state: `[0x800017d4]` (the
+  scheduler/current-thread pointer) is zero, and IAT slot `0x5037d0e8` is
+  unbound.  A banked-register model (`NK_BANKED=1`) and mode stacks are
+  implemented, but the kernel's own stack setup derives its base from boot
+  state we do not have yet.  The next tasks are flat-image import binding, a
+  real initial thread/scheduler object, and the **banked-register/SPSR
+  exception model** (so `svc`, mode switches and `movs pc,lr` are faithful) —
+  not more stack window.
 - [ ] **Boot bank board/CPU detection (round 16 stream view)** — after the page
   headers are removed the boot bank is the contiguous stream slice
   `[0xb0, 0x100b0)` and all switch tables measure bias 0.  The **correct**
@@ -363,9 +400,10 @@ criteria and phased roadmap live in
   `build` now places 156 E32Image files and 85 AIF/MBM companions.  The
   remaining ROMFS work is the `.r01`/`.wav` packed data area (B3g).
 - [ ] **Boot continuation** — the real post-entry path (mask ROM → kernel main
-  → scheduler) is still unknown.  The kernel reaches its own exception/stack
-  frontier now, not the mask-ROM sentinel; the next step is to supply the
-  missing kernel object/stack state.
+  → scheduler) is still unknown.  The direct executive-call run now reaches
+  the scheduler/UND-mode frontier; the next step is to supply the initial
+  thread/scheduler object and bind the imports, then implement the banked
+  exception model so the kernel's own mode switches are faithful.
 
 - [ ] **WD2 unpacking** — the extracted 23.3 MB flash image is **not linear**:
   every `TRomImageHeader`+code blob is packed out of line (kernel header at file
@@ -551,6 +589,19 @@ NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
   out/6600_bootbank_kaep_install.bin
 tools/test_kaep.sh
 
+# round 18: the EKA1 executive (SWI) call gate
+.venv/bin/python recompiler/executive.py verify 6600_mcu.bin
+.venv/bin/python recompiler/executive.py list 6600_mcu.bin --used
+.venv/bin/python recompiler/executive.py stubs 6600_mcu.bin --image 0x100039e5
+NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
+  NK_IAT_FAKE=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=20000 NK_MMIO_N=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+# ... 7,540 instructions, 0 undefined, stop at the unbound IAT slot 0x5037d0e8
+# add NK_IAT_FAKE=1 for the 8,425-instruction control that corrupts r4
+# add NK_BANKED=1 for the banked r13/r14 + SPSR model and per-mode stacks
+tools/test_executive.sh
+
 # round 15: relocate fragment C, map the kernel sections and reach the handoff
 .venv/bin/python recompiler/bootbank.py build 6600_mcu.bin \
   out/6600_bootbank_linked.bin
@@ -616,8 +667,8 @@ full analysis and the relayout plan are in [`docs/BOOT.md`](docs/BOOT.md) and
 
 - **Python 3 + Capstone** — the recompiler (`wd2.py`, `extract.py`, `lift.py`,
   `gen_register.py`, `pagestream.py`, `romimage.py`, `relayout.py`, `layout.py`,
-  `bootbank.py`, `bootregions.py`, `kaep.py`, `bootbringup.py`);
-  `dct4decrypt.py` remains for the older 6100 DCT4 chunks.
+  `executive.py`, `bootbank.py`, `bootregions.py`, `kaep.py`,
+  `bootbringup.py`); `dct4decrypt.py` remains for the older 6100 DCT4 chunks.
 - **IDA Pro 9.1 (headless)** — exact function boundaries on the EKA1 image
   (`extract_ida.py`).
 - **clang** — compiles the generated C + runtime.

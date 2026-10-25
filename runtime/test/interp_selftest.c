@@ -121,6 +121,19 @@ int main(void) {
           c.r[3] == 0x1234,
           "ARM and/orr immediate vs extra load/store");
 
+    /* ---- ARM: `sub sp, sp, #0x258` is not a MUL ----
+     * The multiply decoder matched any instruction with bits 7-4 = 1001.
+     * `sub sp, sp, #0x258` (0xe24ddf96) has that nibble pattern, so it was
+     * executed as a bogus MUL and zeroed SP; the kernel then wrote its
+     * stacks through address 0.  Multiply/MLA additionally require bits
+     * 27-22 = 000000. */
+    poke32(&c, 0x80000060u, 0xe24ddf96u);   /* sub sp, sp, #0x258  */
+    poke32(&c, 0x80000064u, 0xe12fff1eu);   /* bx lr               */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000060u, 0);
+    CHECK(r == NK_STOP_RETURN && c.r[13] == 0x8000fda8u,
+          "ARM data-processing immediate with low nibble 9 is not a MUL");
+
     /* ---- pre-MMU low alias: the boot bank really executes at 0 ---- */
     if (nk_alloc_ram(&c, 0x00000000u, 0x20000u) != 0) return 1;
     poke32(&c, 0x00001000u, 0xe3a00007u);   /* mov  r0, #7        */

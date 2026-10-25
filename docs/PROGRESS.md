@@ -17,7 +17,7 @@
 | OS | Symbian OS 7.0s / S60 2nd Edition |
 | 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像现在放置 **725 个 image / 1,833 个 section**（无重叠），并放入 156 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表 |
 | 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP`/PeaK 容器（record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`）已由 `kaep.py unpack` 导出；`install` 在 linked `0x80` 写可执行 handoff，loader 可进入 kernel `0x50310054`；mask ROM 的 record codec 仍未解出（B6a2d2b） |
-| 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
+| 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）、**EKA1 executive call gate**（`NK_SWI_DIRECT`，round 18）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
 
 > 旧的 103 MB `6600_mcu.bin` 没有 WD2 头、EKA1 向量表或 E32Image UID，
@@ -73,6 +73,7 @@
 | M24 | **第 15 轮：boot bank 段 C 重定位；CPU 表命中；loader 到达 boot-image handoff** | (1) **段 C 被重定位**：`0x3d10` 在 linked `0x74b8` 读 0x13 个 16-bit CPU/board 表项，正确值（含 CPU `0x3b`）在文件 `0x782c`，正好 `linked + 0x374`。第 12 轮只搬 A/B，CPU 查表把 `0x3b` 和指令字节比较后在 `0x3d44` 的 `b .` 挂死。`bootbank.py build` 现在搬 C（`0x6000..0x8000 <- 0x6374..0x8374`），`verify` 固定该表。 (2) **显式 KaeP/boot-image 链**：新增 [`recompiler/bootbringup.py`](../recompiler/bootbringup.py)，在 linked `0x80` 写 descriptor（key、entry、code/data、section size、list head），在 `0xfd00 → 0xfd10` 写 **list head → node → terminator**，node 的 `+0x5c=0`、`+0x60=0x05040000`；此前 synth node 的 `+0x5c` 未清零，`0xc58` 跟着垃圾 next 指针返回 0，导致 section descriptor 为空、`0xfb8` 去解析假 KaeP 数据并映射 2 GiB。 (3) **staging boot-region profile**：`bootregions.py --profile staging` 用 type-2 RAM（`linbase=0xffffffff`，`0x18b0` 的 no-expand 哨兵）、type-5 code bank（`0x5030ff9c+0x29064`，section builder 得到 `0x50310000`）、type-5 data bank（`0x50338ac0+0x3000`）和 boot bank；loader 现在把内核 code 映射到 `0x50310000`、data 映射到 `0x80000000`。 (4) **解释器/MMIO**：`b .` 现在以 `NK_STOP_SELF_BRANCH` 硬停（不再被 recovery 吞掉）；MMIO stub 让 UPP `0x58150422` bit `0x400` 和 `0x58120a08` 非零，从而通过两级握手。 (5) **结果**：`tools/test_bootbringup.sh` 跑到 **36,732 条指令、12 次 MMIO 读、46 次写、1 次 stale-call recovery、0 undefined**，停在 **boot-image handoff `0x80`**（`NK_STOP_PC=0x80`）。`0xfb8` 的 KaeP parser 用一条 `mov pc,lr` 显式跳过；真实解包仍未完成 |
 
 | M26 | **第 17 轮：KaeP/PeaK 容器解包；handoff 可执行并进入 kernel** | (1) **头/记录/镜像边界**：`0x124` 的 magic 是 little-endian `0x5065614B`（Nokia 的 **PeaK** 标记），后接 `u32 record_size=0x20`、`u32 image_size=0x1423dc`。0x20 字节 record 从 file **`0x12e`** 开始（其首个半字与 image-size 的高半字重叠，是打包时的 overlay），image 从 **`0x14e`** 开始，首字是干净的 ARM vector table `e59ff018`；image `+0x38`（file `0x186`）是真实 ARM `e59f11a0`，到 `0x14252a` 结束。 (2) **工具**：`kaep.py unpack` 逐字节导出 `out/6600_kaep_record.bin` 与 `out/6600_kaep_image.bin`（含 SHA-256）；`kaep.py install` 在 linked `0x80` 写入 `ldr pc,[pc,#-4]; .word 0x50310054`，保留 loader 需要的 `+0xc/+0x14/+0x1c/+0x20/...` 字段和 `0xfd00→0xfd10` 的 head→node→terminator 链。 (3) **handoff 可执行**：此前去掉 `NK_STOP_PC` 会在 `0x80` 执行 record 字节（`SWI 0xf9ea00`）；现在进入 **kernel entry `0x50310054`**，1.5M budget 下执行 **1,499,999 条 ARM 指令、0 undefined、1 次 stale-call recovery**，结束于 kernel 代码区 `0x5039...`。`bootbringup.py` 不再 patch `0xfb8` 的 parser。 (4) **剩余**：mask ROM 对 0x20 字节 record 的 codec 仍未解出；`unpack` 保留原始 record，`install` 是显式的 handoff stand-in，不是 record 解密。`0x3ae8 → 0x5bb4` stale call 仍在。验收：`tools/test_kaep.sh`、`tools/test_bootbringup.sh` |
+| M27 | **第 18 轮：SWI 不是 no-op —— EKA1 executive call gate 与真实 frontier** | (1) **924k 运行的真正原因**：EUser.dll 的用户侧 kernel API 是一张密集的 `svc #N` stub 表（`0x50392b00..0x50392dc8`）。解释器只打印 SWI 后继续执行，于是从 stub 进入后会**穿过整张表**，落到表后的真实函数 `0x50392dcc`，并进入每轮泄漏 **`0x4b0` 栈**的循环；`0x5039b2b8` 的 `lr=0` 是栈下穿后的症状，不是“kernel stack/super-page frontier”。 (2) **executive 表可读**：kernel SVC handler 在 `0x50314f30`，其 bound literal `[0x50314f7c] = 0x444`，即 **273 项**服务表 `0x50314aec`；269 项是 kernel text 内的代码地址，4 项为零（`0x8a/0x94/0x95/0x96`）。新增 [`executive.py`](../recompiler/executive.py)：`verify` 固定 handler/table/zero slots，`list --used` 统计每个服务的调用点，`stubs` 把所有 image 的 ARM/Thumb SVC stub 映射回服务地址。EUser 的 `0x68 -> 0x5032541c`、`0x4d -> 0x503244e4` 已验证。 (3) **direct call gate**：解释器新增 `NK_SWI_DIRECT=1`，按 EKA1 约定把 `svc #N` 直接派发到 `table[N & 0x1ff]`，并保留 caller 的 LR（stub 是 call gate，不是 SWI 后的继续执行）；这不是完整异常模型，是显式 bring-up 手段。 (4) **新 frontier**：直接派发暴露了两个真实缺口：scheduler/current-thread 全局 `[0x800017d4]` 为 0（直接跑 E32 entry 跳过了 mask ROM/kernel startup 创建初始线程的步骤），以及 IAT slot `0x5037d0e8 = 0xffffffff`（flat image 没有绑定 import）。用 `NK_FAKE_THREAD` 的最小对象 + `NK_SWI_COMPLETE=0x4d` 的“请求立即完成”stand-in 后，kernel 执行 **7,540 条指令、0 undefined**，停在 **unbound IAT slot `0x5037d0e8`**（`sp=0x802fff08`、`cpsr=0x800000d3`）。`NK_IAT_FAKE=1` 的对照跑 8,425 条后因 `r4=0x00730072` 跳到 PC 0，这不是 frontier。这比 924k 早，但第一次走在真实路径上；旧的 924k 只保留为回归基线。 (5) **IAT 检测修正**：import stub 的 slot 值不再只按 `<0x1000` 判定；`0xffffffff` 或任何不在 code range 内的值都按 unbound import 处理，`NK_IAT_FAKE=1` 可显式返回 0。 (6) **第二个解码 bug**：multiply 判定只看 bits 7-4=1001，导致 `sub sp,sp,#0x258` 被执行成 MUL 并清零 SP；现在同时要求 bits 27-22=000000，`interp_selftest` 固定。`NK_BANKED=1` 的 banked/SPSR 模型也已实现（模式栈可由 harness 预置），但 kernel 自己的 mode-stack setup 依赖缺失的 boot state，所以下一缺口仍是 boot descriptor。验收：`tools/test_executive.sh` |
 
 ### 可复现命令
 
@@ -183,6 +184,16 @@ NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
     ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_bootbringup.sh
+
+# round 18: EKA1 executive (SWI) call gate
+.venv/bin/python recompiler/executive.py verify 6600_mcu.bin
+.venv/bin/python recompiler/executive.py list 6600_mcu.bin --used
+.venv/bin/python recompiler/executive.py stubs 6600_mcu.bin --image 0x100039e5
+NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
+  NK_IAT_FAKE=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=20000 NK_MMIO_N=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_executive.sh
 ```
 
 ---
@@ -232,7 +243,15 @@ tools/test_bootbringup.sh
 | `0x5031308c` | smoke test / 解释器自检执行的真实 ARM helper |
 | `0x20b0` / `0x20ec` | 第一个 page header / 记录步长（`0xec` header + `0x2000` payload） |
 | `0x1605ed8` | 去除 page header 后的 packed stream 长度 |
-| `0x5039b2b8` | 真实 kernel 第一次运行的停止点：`bx lr`，`lr` 已被栈数据覆盖为 0 → PC=0 |
+| `0x5039b2b8` | 第 16 轮 924k 运行的停止点；第 18 轮证明是 SWI stub 表 fall-through 循环的栈下穿症状 |
+| `0x50314f30` | kernel SVC (SWI) vector handler；bound literal `0x50314f7c = 0x444` |
+| `0x50314aec` | EKA1 executive 服务表：**273** 项；270 个 kernel text 地址 + 4 个零槽（`0x8a/0x94/0x95/0x96`） |
+| `0x50392b78` | EUser `svc #0x800068` stub → service `0x5032541c` |
+| `0x50392b08` | EUser `svc #0x4d` stub → service `0x503244e4`（`TRequestStatus` wait/poll） |
+| `0x800017d4` | kernel scheduler/current-thread 全局指针；直接跑 E32 entry 时为 0 |
+| `0x5037d0e8` | 第一个未绑定 IAT slot：`0xffffffff`（flat image 未做 import binding） |
+| `0x50392dcc` | SWI 表之后的真实函数；旧 no-op SWI 路径从表尾落入这里并泄漏 `0x4b0` 栈/轮 |
+| `0x5031eb9c` | 第 18 轮 `NK_IAT_FAKE=1` 对照运行的停止返回点；随后 `pc=0`、`cpsr=0x600000db`、`sp=0x802ffc7c`（unbound IAT 返回 0 后对象损坏） |
 | `0x0000624c` | page-header-free boot bank 的 board/CPU detection panic（`b .`） |
 
 ### 引用的 DLL（kernel `TDllRefTable`）
@@ -256,6 +275,34 @@ tools/test_bootbringup.sh
 
 ## 4. 当前阻塞（按优先级）
 
+#### B7 第 18 轮：SWI 语义 / scheduler 初始状态 / import binding
+
+第 18 轮发现 **924,964 条不是 boot**：EUser.dll 的 kernel API 是单指令
+`svc #N` stub 表，解释器把 SWI 当 no-op 后会从 stub 穿过整张表，落到
+`0x50392dcc` 并进入每轮泄漏 `0x4b0` 栈的循环。`0x5039b2b8` 的 `lr=0`
+是这个循环的栈下穿症状，不是“kernel stack/super-page”frontier。
+
+现在可用 `NK_SWI_DIRECT=1` 按 EKA1 call-gate 约定直接派发到
+`0x50314aec` 的 273 项服务表（`executive.py` 可验证/枚举）。真实缺口是：
+
+1. **flat image import binding**：IAT slot `0x5037d0e8 = 0xffffffff`；
+   `--rom-image` 只放置 section，不解析 import。需要把 `--e32` loader 的
+   export/import 绑定逻辑移到 flat image，或在 build 时生成绑定后的 IAT。
+   当前 7,540 条的停止点就是这里；`NK_IAT_FAKE=1` 的 8,425 条对照只是
+   把 0 当作返回值，随后 `r4=0x00730072` 跳到 PC 0。
+2. **初始 scheduler/current-thread 对象**：`[0x800017d4]` 为 0；E32 entry
+   被直接执行，跳过了 mask ROM/kernel startup 创建初始线程的步骤。
+   `NK_FAKE_THREAD` 只是最小 stand-in。
+3. **banked registers / SPSR / 异常模型**：`svc` 目前是直接调用而非进入
+   `0x50314f30` 的 SVC vector；kernel 的 `msr cpsr_c` 模式切换、`mrs spsr`、
+   `movs pc,lr`/`ldm ^` 还没有完整异常语义。`NK_BANKED=1` 已实现 banked/
+   SPSR 模型和 harness 模式栈；kernel 自己的 mode-stack setup 仍依赖
+   缺失的 boot state。
+4. **等待/中断完成路径**：`NK_SWI_COMPLETE=0x4d` 把 `TRequestStatus*` 直接
+   写 0；真实路径需要 timer/interrupt/DMA 的完成投递。
+
+验收：`tools/test_executive.sh`。
+
 #### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
 
 `recompiler/pagestream.py` 去掉每个 `0x20ec` 记录里的 `0xec` 字节 page
@@ -271,10 +318,10 @@ header 后：
 “不同 function order”分支都不需要了。`layout.py verify` 现在直接断言
 kernel ≥95%。旧的 §B1 文本保留为历史。
 
-当前真正的 kernel frontier 变成：真实入口执行 924,964 条 ARM 指令后，
-SVC stack 下穿 `0x7ff00000` super page 进入 `.data`，在 `0x5039b2b8`
-的 `bx lr` 返回到 0（`lr` 已被压栈数据覆盖为 0）。下一步是 kernel 的
-stack/super-page 初始状态，而不是 callmap。
+**第 18 轮更正**：924,964 条 ARM 指令是 SWI stub 表的 fall-through 循环，
+不是 boot。真正的 call-gate 路径在 `NK_SWI_DIRECT=1` 下执行 7,540 条后停在
+unbound IAT slot `0x5037d0e8`（`sp=0x802fff08`、`cpsr=0x800000d3`），
+见 §B7。旧的 stack/super-page 描述保留为历史，不再作为当前 frontier。
 
 ### B1 第 5 轮重写：先修解释器，再谈 veneer
 - **Thumb format-2 解码 bug 已修**：`00011` 组（`add/sub rd,rs,#imm3` 与
@@ -727,7 +774,17 @@ entry：
 - [x] **B1g2a** 单调 drift 模型定量否定：`layout.py drift` 允许 export 匹配任意 `c <= V` 且 drift 非递减，kernel 在 `0x60/0xc0/0x200` 下仍只有 148/182/223，而随机 null 为 140/168/216（1.05/1.08/1.03×）。padding/relayout 不可能恢复 linked layout
 - [x] **B1g2b** ~~layout 级恢复（非 drift）~~：`pagestream.py` 去掉 page header 后，kernel 469/478、DLL2 1757/1788，shift 0 就是 linked layout；不需要 function-order/relocation 表
 - [x] **B1g2c** header-less block 分类：`layout.py gaps`；629 个 gap 中 15 个是第二段 Thumb/ARM code，kernel/DLL2 为 rodata。尚未发现它与 export 布局的对应关系
-- [x] **B1g3** ~~用 B1g2b 的结果重新生成 flat image~~：`romimage.py build` 现在从 page-header-free stream 组装（1,833 section / 725 image），kernel export 98.1% 命中，真实入口运行 924,964 条
+- [x] **B1g3** ~~用 B1g2b 的结果重新生成 flat image~~：`romimage.py build` 现在从 page-header-free stream 组装（1,833 section / 725 image），kernel export 98.1% 命中；旧 924,964 条已被第 18 轮证明是 SWI fall-through 循环，仅作回归基线
+- [x] **B7a** `recompiler/executive.py`：解码 kernel SVC handler（`0x50314f30`）、bound `0x444` 与 273 项服务表 `0x50314aec`；固定 4 个零槽（`0x8a/0x94/0x95/0x96`），并把所有 image 的 SVC stub 映射回服务地址
+- [x] **B7b** 解释器 `NK_SWI_DIRECT=1`：按 EKA1 call-gate 约定直接派发服务，保留 caller LR；`NK_FAKE_THREAD` + `NK_SWI_COMPLETE=0x4d` 把真实路径推进到 7,540 条 / unbound-IAT frontier
+- [x] **B7c** IAT 检测扩展：slot 值 `0xffffffff` 或任何 code range 外的值按 unbound import 处理（`NK_IAT_FAKE=1` 可返回 0）
+- [x] **B7c2** multiply 解码修正：只有 bits 7-4=1001 **且** bits 27-22=000000 才是 MUL/MLA；`sub sp,sp,#0x258` 不再清零 SP。`interp_selftest` 回归
+- [x] **B7d1** banked registers / SPSR 模型（`NK_BANKED=1`）：MSR/MRS CPSR/SPSR、模式 bank、`movs pc,lr`/`ldm ^` 异常返回、harness 模式栈
+- [ ] **B7d2** 真实 SVC/IRQ/FIQ 异常入口：`svc` 进入 `0x50314f30`，设置 SPSR_svc 并用 SPSR 返回；kernel 的 mode-stack setup 仍依赖缺失的 boot state
+- [ ] **B7d3** boot descriptor / 初始模式栈：kernel 从 boot state 推导 `0xfffffffc/0`，需要真实 descriptor 或恢复其字段
+- [ ] **B7e** 初始 scheduler/current-thread 对象：`[0x800017d4]`，替代 `NK_FAKE_THREAD`；从 kernel data/boot descriptor 恢复真实布局
+- [ ] **B7f** flat-image import binding：把 `--e32` loader 的 export/import 解析移到 `--rom-image` 路径，绑定 `0x5037d0e8` 等 IAT slot
+- [ ] **B7g** timer/interrupt/DMA 完成路径：替代 `NK_SWI_COMPLETE`，让 `TRequestStatus` 由设备模型完成
 - [x] **P0-3d** 修复 Thumb BL 返回地址 + ARM PC-relative load 并加回归测试
 - [x] **P0-3e** 修复 ARM data-processing 立即数被误判为 extra load/store（必须要求 bit25=0）；`and r0,r0,#0xff` 不再变成 `LDRH`。`interp_selftest` 新增 `and/orr immediate vs extra load/store` 回归
 - [x] **M13a** 解释器崩溃恢复（caller 快照 + 回滚 + 跳过调用），`NK_RECOVER`
@@ -807,6 +864,31 @@ entry：
 ---
 
 ## 9. 变更记录
+
+- 2026-10-25（本轮 18）：**SWI 不是 no-op：EKA1 executive call gate；924k 运行被重新解释**。
+  EUser.dll 的 kernel API 是密集的单指令 `svc #N` stub 表；解释器把 SWI
+  当 no-op 后，从 stub 进入会穿过整张表，落到 `0x50392dcc`，并进入每轮泄漏
+  `0x4b0` 栈的循环。`0x5039b2b8` 的 `lr=0` 是栈下穿症状，不是 kernel
+  stack/super-page frontier。新增 [`executive.py`](../recompiler/executive.py)：
+  kernel SVC handler `0x50314f30` 的 bound literal 是 `0x444`，服务表
+  `0x50314aec` 有 **273** 项（270 个代码地址 + 4 个零槽
+  `0x8a/0x94/0x95/0x96`），每项都在 kernel text 内；`stubs` 可把所有
+  image 的 SVC stub 映射回服务。解释器新增 `NK_SWI_DIRECT=1`：按 EKA1
+  call-gate 约定直接派发服务并保留 caller LR（不是完整异常模型）。直接
+  派发暴露两个真实缺口：`[0x800017d4]`（scheduler/current-thread）为 0，
+  以及 IAT slot `0x5037d0e8 = 0xffffffff` 未绑定。用 `NK_FAKE_THREAD`
+  最小对象 + `NK_SWI_COMPLETE=0x4d` 立即完成 stand-in 后，kernel 执行
+  **7,540 条指令、0 undefined**，停在 **unbound IAT slot `0x5037d0e8`**
+  （`sp=0x802fff08`、`cpsr=0x800000d3`）。`NK_IAT_FAKE=1` 对照跑 8,425
+  条后因 `r4=0x00730072` 跳到 PC 0，这不是 frontier。这比 924k 早，
+  但第一次走在真实路径上；旧 924k 仅作回归基线。解释器的 IAT 检测也
+  修正为：`0xffffffff` 或 code range 外的 slot 值都算 unbound import。
+  另外修复 multiply 解码与 data-processing immediate 的重叠：只有
+  bits 7-4=1001 且 bits 27-22=000000 才是 MUL/MLA，`sub sp,sp,#0x258`
+  不再被当成 MUL 并清零 SP（`interp_selftest` 回归）。新增 `NK_BANKED=1`
+  banked/SPSR 模型（MSR/MRS、`movs pc,lr`、`ldm ^`、模式栈），但 kernel
+  自己的 mode-stack setup 仍依赖缺失的 boot state。验收：
+  `tools/test_executive.sh`、`tools/test_interp.sh`。
 
 - 2026-10-25（本轮 17）：**KaeP/PeaK 容器解包；handoff 可执行并进入 kernel**。
   `0x124` 的 magic 是 little-endian `0x5065614B`（Nokia **PeaK**），后接

@@ -149,6 +149,24 @@ typedef struct nk_interp {
     int      iat_log;       /* log the first N unbound imports */
     int      stop_on_swi;   /* stop at the first SWI instead of continuing */
     int      stop_selfb;    /* stop at `b .` (firmware panic/halt loop) */
+    /* EKA1 executive calls are `svc #N` stubs.  The real CPU enters the
+     * kernel SVC vector; the kernel then dispatches through a table of
+     * service functions and returns to the caller's LR (the stub is a call
+     * gate, not a normal post-SWI continuation).  Until the banked-register
+     * exception model is in place, `swi_direct` models that call gate by
+     * calling the table entry directly with the caller's LR still live. */
+    int      swi_direct;
+    uint32_t swi_table;     /* kernel 32-bit service table base (0x50314aec) */
+    int      swi_log;       /* log the first N direct SWI dispatches */
+    /* Banked-register / SPSR model.  Off by default so the historical traces
+     * stay comparable; enable with NK_BANKED=1 when the kernel starts
+     * switching modes (the round-18 UND-mode frontier needs it). */
+    int      banked;
+    /* Bitmask of executive-call indices that are modelled as "request
+     * already complete": [r0] (a TRequestStatus*) is set to 0 and the call
+     * returns immediately.  This stands in for the interrupt/DMA completion
+     * path a headless boot does not have yet.  Bit i covers SWI index i. */
+    uint64_t swi_complete[8];
     /* Bring-up recovery: when a callee faults (undefined instruction, PC
      * escape), roll back to the most recent BL/BLX and continue as if that
      * call had returned 0.  Logs the skipped call.  Off by default. */
@@ -211,6 +229,9 @@ typedef struct nk_interp {
 
 void        nk_interp_init(nk_interp_t* ip);
 int         nk_interp_run(nk_cpu_t* c, nk_interp_t* ip);
+/* Initialise one ARM mode bank (USR/FIQ/IRQ/SVC/ABT/UND).  Used by the
+ * boot harness to provide the mode stacks a mask-ROM startup would set up. */
+void        nk_bank_init(nk_cpu_t* c, uint32_t mode, uint32_t sp, uint32_t lr);
 int         nk_interp_call(nk_cpu_t* c, uint32_t target);
 /* Add a call-site fixup (used by the boot harness to load config/callmap-*.txt). */
 int         nk_callmap_add(nk_interp_t* ip, uint32_t call_pc, uint32_t target,

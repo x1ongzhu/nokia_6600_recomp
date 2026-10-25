@@ -926,6 +926,103 @@ kernel-entry run.
 tools/test_kaep.sh
 ```
 
+### Round 18: SWI is not a no-op — the EKA1 executive call gate (2026-10-25)
+
+**1. The 924,964-instruction "kernel boot" was a runaway SWI fall-through.**
+EUser.dll implements the user-side kernel API as a dense table of single-
+instruction stubs:
+
+```
+50392b78  680080ef   svc #0x800068
+50392b7c  6900c0ef   svc #0xc00069
+50392b80  6a00c0ef   svc #0xc0006a
+...
+```
+
+A branch into one stub (`0x50398b5c -> 0x50392b78`) should enter the kernel's
+SVC vector.  The interpreter only logged `SWI` and continued, so execution
+walked the **entire** table, fell into the real function after it at
+`0x50392dcc`, and looped.  Each loop iteration allocated `0x420 + 0xc` bytes
+in `0x50392e94` and leaked a further `0x84`, i.e. **`0x4b0` bytes of stack per
+iteration**.  The `bx lr` with `lr=0` at `0x5039b2b8` is the eventual stack
+underrun, not a kernel stack/super-page frontier.  The old number is kept only
+as a regression baseline.
+
+**2. The executive table is readable in the linked stream.**  The SVC vector
+(`0x50310008`) enters the handler at `0x50314f30`; its bound literal at
+`0x50314f7c` is `0x444`, i.e. **273** 32-bit service addresses at
+`0x50314aec`.  All non-zero entries are inside the kernel text; four entries
+are zero and represent unimplemented services:
+
+| index | target | note |
+|---|---|---|
+| `0x68` | `0x5032541c` | used by the EUser boot path |
+| `0x4d` | `0x503244e4` | `TRequestStatus` wait/poll |
+| `0x8a`, `0x94`, `0x95`, `0x96` | `0` | unimplemented |
+
+`recompiler/executive.py verify` pins the handler bound, the table size, the
+four zero slots and the code-range membership.  `list --used` shows which
+services EUser actually calls; `stubs` scans every image's SVC instructions
+and maps them back to service addresses (EUser alone has 372 mapped stubs,
+including `0x68` and `0x4d`).
+
+**3. `NK_SWI_DIRECT` models the call gate.**  The interpreter now has an
+explicit bring-up mode that dispatches `svc #N` to `table[N & 0x1ff]` with the
+caller's LR still live, because an EKA1 stub is a **call gate**, not a normal
+post-SWI continuation.  This is not the final CPU model: the real CPU enters
+the SVC vector, saves CPSR in SPSR_svc, switches to SVC mode and returns
+through `movs pc,lr`/`ldm ^` with banked registers.  That exception/banking
+model is still missing.
+
+**4. A second decoder bug: `sub sp, sp, #0x258` executed as MUL.**  The
+multiply decoder matched any instruction whose bits 7-4 are `1001`
+(`op4 == 9`).  Data-processing immediates also carry arbitrary bits there:
+`0xe24ddf96` (`sub sp, sp, #0x258`) has `op4 = 9`, so it executed as a MUL
+and wrote zero to SP.  The correct multiply/MLA space also requires bits
+27-22 = `000000`; the decoder now checks
+`(op & 0x0fc000f0) == 0x00000090`.  This is pinned in `interp_selftest`
+("data-processing immediate with low nibble 9 is not a MUL").  It was the
+source of the earlier `sp=0xffffffd4`, not a missing bank.
+
+**5. Direct dispatch exposes two real blockers.**  The kernel's
+scheduler/current-thread global `[0x800017d4]` is zero, because the E32 entry
+is run without the mask-ROM/kernel startup that creates the initial thread.
+The flat image also leaves IAT slot `0x5037d0e8` at `0xffffffff`; the
+`--e32` loader binds imports, but `--rom-image` only places sections.  The
+new IAT detector now treats `0xffffffff` (and any value outside a declared
+code range) as an unbound import instead of branching to it.
+
+With the minimal `NK_FAKE_THREAD` object and `NK_SWI_COMPLETE=0x4d` (the wait
+request is completed immediately), the kernel runs **7,540 instructions**,
+dispatches `0x68`/`0x4d`, and stops at the real next blocker:
+
+```
+--- stop: unbound import (IAT) (4) at 0x50336fe8 ---
+insns=7540 (ARM 7540 / Thumb 0), undefined=0, unbound IAT=1, recoveries=0
+regs: sp=0x802fff08 lr=0x50326178 pc=0x50336fec cpsr=0x800000d3
+```
+
+The IAT slot is `0x5037d0e8 = 0xffffffff`.  A **control** with
+`NK_IAT_FAKE=1` returns 0 from the unbound import and runs 8,425
+instructions, but `r4` becomes `0x00730072` (UTF-16-looking data) and the
+indirect call at `0x5031eb98` jumps to 0; that is a symptom, not the
+frontier.  The next tasks are (a) flat-image import binding, (b) the initial
+thread/scheduler object, (c) banked registers/SPSR and a real SVC exception
+(`NK_BANKED=1` now has the bank model and harness mode stacks, but the
+kernel's own mode-stack setup still derives from missing boot state), and
+(d) timer/interrupt completion so `NK_SWI_COMPLETE` is no longer needed.
+
+```
+.venv/bin/python recompiler/executive.py verify 6600_mcu.bin
+.venv/bin/python recompiler/executive.py list 6600_mcu.bin --used
+.venv/bin/python recompiler/executive.py stubs 6600_mcu.bin --image 0x100039e5
+NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
+  NK_IAT_FAKE=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=20000 NK_MMIO_N=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_executive.sh
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):

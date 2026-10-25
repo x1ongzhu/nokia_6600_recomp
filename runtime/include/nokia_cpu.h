@@ -27,12 +27,28 @@ extern "C" {
 
 typedef struct nk_bus nk_bus_t;
 
+/* ARMv4T banked registers.  r13/r14 are banked for every exception mode;
+ * FIQ also banks r8-r12.  SPSR exists for FIQ/IRQ/SVC/ABT/UND only.  The
+ * interpreter's mode model is opt-in (`NK_BANKED=1`) during bring-up; the
+ * plain `r[]`/`cpsr` view remains the default so existing traces are stable. */
+typedef struct nk_mode_bank {
+    uint32_t sp;
+    uint32_t lr;
+    uint32_t spsr;
+    uint32_t r8, r9, r10, r11, r12;   /* FIQ only */
+    uint8_t valid;                     /* sp/lr have been initialised */
+    uint8_t spsr_valid;                /* spsr came from a real exception */
+    uint8_t preset;                    /* harness supplied this stack */
+} nk_mode_bank;
+
 typedef struct nk_cpu {
     uint32_t r[16];   /* r0..r15; r13=sp, r14=lr, r15=pc */
-    uint32_t cpsr;    /* NZCV condition flags (+ mode bits, later) */
+    uint32_t cpsr;    /* NZCV condition flags + mode bits */
     uint8_t* mem;     /* optional flat base (kept for simple test harnesses) */
     uint8_t** pages;  /* sparse guest page map: pages[va >> 16] */
     nk_bus_t* bus;    /* MMIO / device dispatch */
+    nk_mode_bank bank[8];  /* USR/SYS, FIQ, IRQ, SVC, ABT, UND */
+    uint32_t cp15_c1;      /* CP15 control register (MMU/cache/V bits) */
 } nk_cpu_t;
 
 enum { NK_FLAG_N = 31, NK_FLAG_Z = 30, NK_FLAG_C = 29, NK_FLAG_V = 28 };
