@@ -593,6 +593,41 @@ criteria and phased roadmap live in
   wrong-import detours.  A `NK_BOOTTABLE_RAM` model copies the 64 KiB ROMFS
   directory to RAM but does not change the 108k stop.
   `tools/test_round27.sh` pins all four runs.
+  `tools/test_round27.sh` pins all four runs.
+- [x] **Round 28: mask-ROM boot hand-off; real TStack constructor; first idle
+  loop** — the 117,923-instruction stop was not the real timer frontier.  The
+  kernel expects the mask ROM to leave `[0x400000d0]` = the `ekern.exe`
+  `TRomEntry` (`0x50301ec4`) in the fixed super page; `[entry+4]` is its own
+  `TRomImageHeader` at `0x5030ff9c` (`iStackSize=0x4000`,
+  `iHeapSizeMin=0x20000`, `iHeapSizeMax=0x1000000`).  Without it the kernel
+  reads address 4 as a header and the initial DThread/DProcess fields are
+  garbage.  The initial `TStack` object is allocated at
+  `iPrimaryFile + iStackSize` (`0x50301ec4 + 0x4000 = 0x50305ec4`), inside
+  the read-only ROMFS directory block, so `NK_PRIMARY_RAM=addr` copies that
+  64 KiB block to RAM and repoints **only** `iPrimaryFile`
+  (`config/imports-r28-6600.txt` keeps variant/extension in ROM).  The
+  round-27 `K=1361` exception was also refined: `operator new(0x74, block)`
+  needs the TStack/TBuf constructor **`0x503a023c`** (stores the size at
+  `+0/+4/+0xc` and allocates the backing store), not the 16-byte zeroing
+  `0x503a0224`; otherwise `TStack::Set 0x50321d84` sees `[obj] == 0`, not
+  `iHeapSizeMin`, and panics **PLAT 0x51**.  Three time-cluster slots
+  (`K=294/1069/1375`) keep their ROM static targets: the K-3 targets turn
+  the ROM header's 2000-01-01 iTime into `0x296c5c00_fc636590`, and
+  `TTime::SecondsFrom` returns `-9` (all eight static/K-3 combinations of
+  the three slots were measured; 140,104..165,249 instructions, all at the
+  same panic).  The faithful path
+  ([`config/imports-r28-6600.txt`](config/imports-r28-6600.txt)) with
+  `NK_BOOT_HANDOFF=1 NK_PRIMARY_RAM=0x80900000 NK_HAL_TIMER_HZ=4` runs
+  **164,731 instructions, 0 undefined, 0 unbound IAT, 0 recoveries** and
+  still stops at **MKERN-WD2 24** (`0x50310b30`) because the TTime structure
+  passed to `SecondsFrom` is out of range.  Adding round 23's explicit WD2
+  time/HAL zero ([`config/imports-r28-boot-6600.txt`](config/imports-r28-boot-6600.txt))
+  gets the kernel to its **idle/timer wait loop**:
+  **3,000,000 instructions, 0 undefined, 0 unbound, 0 recoveries**, spinning
+  at `0x50310f84`/`0x50310f88` on `[0x8000000c]`.  This is the first idle-loop
+  boot; the next step is the initial TTime hand-off/ABI and the timer/DFC
+  interrupt that sets `[0x8000000c]`.  [`bootstate.py`](recompiler/bootstate.py)
+  and `tools/test_round28.sh` pin the hand-off, stack, time and idle states.
 - [ ] **Initial thread trap frame (remaining after round 25)** — the handler
   and cleanup stack are real now, but `SThread::iFrame` (`+0x38`) is still
   zero.  A guest `TTrap::Trap` pushes and pops frames correctly; a `Leave`
@@ -652,7 +687,13 @@ criteria and phased roadmap live in
   vtable+0x5c returns 0 and the kernel divides by it).  Poking vtable+0x5c to
   a constant advances to **117,923**.  The name probe reaches **128,663
   instructions** without a stand-in; the call-inference control
-  (14,354/MATHX) is an artifact, not truth.
+  (14,354/MATHX) is an artifact, not truth.  **Round 28 recovers the mask-ROM
+  super-page hand-off and the real TStack constructor**, then reaches
+  **164,731 instructions** on the faithful path (MKERN-WD2 24 at the
+  time-cluster TTime conversion) and **3,000,000 instructions** in the
+  kernel's first idle/timer wait loop with the documented WD2 stand-in.  See
+  the round-28 bullet above for the exact hand-off, stack and relocation
+  details.
 - [ ] **File server for UI/app loads (round 22 reclassification)** — the
   round-21 ECons.dll / **KERN-NO-SESSION 22** stop was the RTC driver's
   misbound `operator new` import entering EUser's `RTest` console path.  With
@@ -1017,6 +1058,23 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
     --rom-image out/6600_runtime.bin
 tools/test_round27.sh
 
+# round 28: the mask-ROM super-page hand-off, real TStack constructor and
+#   the first kernel idle loop.  bootstate.py pins each recovered sequence.
+.venv/bin/python recompiler/bootstate.py verify 6600_mcu.bin
+.venv/bin/python recompiler/euser_reloc.py verify 6600_mcu.bin --profile boot
+.venv/bin/python recompiler/euser_reloc.py build 6600_mcu.bin     config/imports-r28-6600.txt --profile boot
+.venv/bin/python recompiler/euser_reloc.py build 6600_mcu.bin     config/imports-r28-boot-6600.txt --profile boot-idle
+
+# faithful: [0x400000d0] = ekern.exe TRomEntry; iPrimaryFile on a RAM copy;
+#   TStack ctor 0x503a023c; HAL timer +0x5c = 4.
+#   164,731 insns, 0 undefined/unbound/recoveries, MKERN-WD2 24 at 0x50310b30
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1   NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r28-6600.txt   NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1   NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0   NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 NK_HLE_HEAP=0x80700000   NK_CALLMAP=config/callmap-rtc-6600.txt   NK_BOOT_HANDOFF=1 NK_PRIMARY_RAM=0x80900000 NK_HAL_TIMER_HZ=4   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin     --rom-image out/6600_runtime.bin
+
+# idle: the same boot state plus round 23's explicit WD2 time/HAL zero.
+#   3,000,000 insns (budget), idle/timer wait loop at 0x50310f84/88
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1   NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r28-boot-6600.txt   NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1   NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0   NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 NK_HLE_HEAP=0x80700000   NK_CALLMAP=config/callmap-rtc-6600.txt   NK_BOOT_HANDOFF=1 NK_PRIMARY_RAM=0x80900000 NK_HAL_TIMER_HZ=4   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin     --rom-image out/6600_runtime.bin
+tools/test_round28.sh
+
 # round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
 # code+text_size; the default runtime image now includes it
 .venv/bin/python recompiler/romimage.py build 6600_mcu.bin \
@@ -1088,8 +1146,9 @@ full analysis and the relayout plan are in [`docs/BOOT.md`](docs/BOOT.md) and
 
 - **Python 3 + Capstone** — the recompiler (`wd2.py`, `extract.py`, `lift.py`,
   `gen_register.py`, `pagestream.py`, `romimage.py`, `relayout.py`, `layout.py`,
-  `executive.py`, `bootbank.py`, `bootregions.py`, `kaep.py`,
-  `bootbringup.py`); `dct4decrypt.py` remains for the older 6100 DCT4 chunks.
+  `executive.py`, `euser_reloc.py`, `bootstate.py`, `bootbank.py`,
+  `bootregions.py`, `kaep.py`, `bootbringup.py`); `dct4decrypt.py` remains for
+  the older 6100 DCT4 chunks.
 - **IDA Pro 9.1 (headless)** — exact function boundaries on the EKA1 image
   (`extract_ida.py`).
 - **clang** — compiles the generated C + runtime.

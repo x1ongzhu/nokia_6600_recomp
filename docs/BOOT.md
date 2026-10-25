@@ -2074,3 +2074,148 @@ Acceptance: `tools/test_round27.sh` runs the faithful 108,231-instruction
 path, the 14,354/MATHX control, the 117,923-instruction HAL timer probe and
 the 128,663-instruction name probe, and checks the DProcess UIDs, the 236/47
 override counts and the K=1361 exception.
+
+### Round 28: the mask ROM hand-off, the real TStack constructor, and the first idle loop
+
+Round 27's 108,231-instruction stop was only one level below the real
+problem.  Poking the HAL timer frequency to 4 advanced the run to 117,923,
+where the initial DThread/DProcess fields were still garbage.  The kernel's
+own code shows why: `0x5031e5a8` and `0x5031e594` expect the mask ROM to have
+left a *ROM-image hand-off* in the fixed super page.
+
+#### The hand-off is `[0x400000d0] = ekern.exe TRomEntry`
+
+```
+0x5031e5a8: ldr r3,[ip,#0xd0]      ; ip = 0x40000000
+0x5031e5ac: ldr sb,[r3,#4]         ; TRomEntry -> TRomImageHeader
+0x5031e5b0: ldr r0,[pc,#0x3d0]     ; timer-frequency argument
+0x5031e5b4: bl  0x5031b80c
+...
+0x5031e63c: ldr r2,[r7]            ; initial process
+0x5031e640: str r3,[r2,#0x80]      ; fields copied from sb+0x10..
+```
+
+The real value is `0x50301ec4` (the `ekern.exe` TRomEntry); its `+4` is the
+kernel `TRomImageHeader` at `0x5030ff9c` with `iStackSize=0x4000`,
+`iHeapSizeMin=0x20000` and `iHeapSizeMax=0x1000000`.  Without the hand-off
+the field reads 0, the kernel loads `[0+4]` (the low exception vector word)
+as a header, and the initial thread fields become meaningless.  The harness
+option is **`NK_BOOT_HANDOFF=1`**; it writes the primary/variant/extension
+TRomEntry pointers to super-page `+0xc4/+0xc8/+0xcc` and the primary entry to
+`+0xd0`.
+
+#### The first TStack object is `iPrimaryFile + iStackSize`
+
+`Kern::Init1` computes the initial thread-stack object address directly:
+
+```
+0x5031ede4: mov r3,#0x40000000
+0x5031ede8: ldr r3,[r3,#0xd0]      ; primary TRomEntry
+0x5031edec: ldr r2,[r3,#4]         ; kernel header
+0x5031edf0: mov r3,#0x50000000
+0x5031edf4: ldr r3,[r3,#0x9c]      ; iPrimaryFile
+0x5031edf8: ldr r0,[r2,#0x34]      ; iStackSize
+0x5031edfc: add r0,r3,r0           ; 0x50301ec4 + 0x4000
+0x5031ee00: ldr r1,[r2,#0x2c]      ; iHeapSizeMin
+0x5031ee04: bl  0x50321cf0
+```
+
+`0x50305ec4` is inside the read-only 64 KiB ROMFS directory block.  The mask
+ROM must give the kernel a writable copy of that block.  Round 27's
+`NK_BOOTTABLE_RAM` copied it but repointed four TRomHeader fields, which made
+the variant/extension loader take the wrong path.  Round 28 adds
+**`NK_PRIMARY_RAM=addr`**: copy the directory, then repoint only
+`iPrimaryFile` (0x5000009c).  The variant and extension entries stay at their
+ROM addresses.
+
+#### K=1361 is the TStack/TBuf constructor, not the zeroing constructor
+
+`0x50321cf0` creates a 0x74-byte object with `operator new(0x74, block)`, then
+calls `0x50321cd0`; its base constructor goes through `0x503360e0` and slot
+`0x503b4cd8`.  Round 27 pinned that slot to `0x503a0224` (it only zeroes
+`+0/+4/+8/+0xc`) because the boot-file object needed a small zeroed base.
+That is the wrong target for the stack object: `TStack::Set 0x50321d84`
+checks `[obj] == iHeapSizeMin` (0x20000) and otherwise panics **PLAT 0x51**
+via `0x50321a74`.  The real boot target is **`0x503a023c`**:
+
+```
+0x503a023c: push {r4,lr}
+0x503a0240: mov r4,r0
+0x503a0244: str r1,[r4,#4]
+0x503a0248: str r1,[r4]
+0x503a024c: str r1,[r4,#0xc]
+0x503a0250: mov r0,r1
+0x503a0254: bl 0x5039a9a8        ; allocate the backing store
+0x503a025c: add r0,r0,[r4,#4]
+0x503a0260: str r0,[r4,#8]
+```
+
+With `0x503a023c` the stack object carries its size and the PLAT 0x51 stop
+disappears.  This is the round-28 `--profile boot` K=1361 exception.
+
+#### The time cluster is a local export-order exception
+
+The next stop is the system-time path.  `0x5031380c` reads the ROM header's
+iTime, builds a TTime and calls `0x503126d0`; that function loads the 64-bit
+TTime from `0x800017ec` and calls `TTime::SecondsFrom` (K=970, slot
+`0x503b46bc`).  Three time-cluster slots do **not** follow the K-3 rule at
+their boot call sites:
+
+| K | slot | round-27 K-3 target | round-28 boot target |
+|---|---|---|---|
+| 294 | `0x503b3c2c` | `0x503a4020` | `0x503a532c` |
+| 1069 | `0x503b4848` | `0x503a3900` | `0x50397cb4` |
+| 1375 | `0x503b4d10` | `0x503a3af8` | `0x50389a40` |
+
+With the K-3 targets the 2000-01-01 iTime is turned into
+`0x296c5c00_fc636590`; `SecondsFrom` returns **-9** and `Kern::Init1` panics
+**MKERN-WD2 24** at `0x50310b30`.  With the ROM's static targets the TTime is
+`0x00e0ca39_91f6bc80` (the correct 2000-01-01 build time), but the function
+still uses the out-of-range TTime at `r0` (the stack frame), so the faithful
+run still stops at the same panic.  `NK_BOOT_TIME=1` replaces only the global
+`0x800017ec`; it is a useful diagnostic, not yet a fix.  The new frontier is
+the initial TTime hand-off / the `TTime::SecondsFrom` ABI, not the stack.
+
+All eight static/K-3 combinations of the three time slots were measured to
+rule out a simple mix: they reach 140,104..165,249 instructions, every one
+stops at the same MKERN-WD2 24.  The best (K=294 static, K=1069/1375 K-3)
+reaches 165,249 but still produces an out-of-range TTime, so this cluster
+needs a dedicated call-site ABI map rather than another global rule.
+
+#### Result: the first kernel idle loop
+
+The faithful path (`config/imports-r28-6600.txt`, no WD2 stand-in):
+
+```
+164,731 instructions
+0 undefined, 0 unbound IAT, 0 recoveries
+stop: MKERN-WD2 24 at 0x50310b30
+```
+
+Adding round 23's explicit WD2 time/HAL zero (`config/imports-r28-boot-6600.txt`)
+lets `Kern::Init1` finish.  The kernel then runs to the 3,000,000-instruction
+budget:
+
+```
+3,000,000 instructions
+0 undefined, 0 unbound IAT, 0 recoveries
+stop: budget at 0x50310f88
+```
+
+That address is the idle/timer wait loop:
+
+```
+0x50310f84: bl  0x5031252c      ; returns immediately
+0x50310f88: ldr r3,[r4]         ; r4 = 0x8000000c
+0x50310f8c: cmp r3,#0
+0x50310f90: beq 0x50310f84
+```
+
+This is the first time the recompiled kernel reaches an idle loop instead of
+a panic.  The next step is to model the timer/DFC interrupt that sets
+`[0x8000000c]`, so the scheduler can leave the loop.
+
+Acceptance: **`tools/test_round28.sh`** verifies the boot hand-off, the stack
+constructor, the two relocation profiles, the 164,731-instruction faithful
+path and the 3,000,000-instruction idle run.  `recompiler/bootstate.py verify`
+pins each instruction sequence and the time/idle frontier.

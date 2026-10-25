@@ -142,6 +142,22 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   `NK_IMPORTMAP` (`config/imports-6600.txt`); `../tools/test_imports.sh` also
   checks that the ROM header's primary/secondary/variant/extension entries
   resolve to `ekern.exe`/`EFile.exe`/`ecust.dll`/`rtc.dll` in `\System\Libs`.
+- **`euser_reloc.py`** — recover the kernel→EUser import order.  The kernel
+  was linked against an EUser `.def` one export shorter than the generic 7.0
+  list, while the ROM EUser is four exports shorter, so kernel ordinal `K`
+  maps to ROM export `K-3` for `K>=6` (with low specials and documented local
+  exceptions).  `verify` pins 49 call-site anchors; `build --profile boot`
+  (round 28) adds the boot TStack constructor `0x503a023c` and three
+  time-cluster local exceptions; `--profile boot-idle` also emits the explicit
+  WD2 time/HAL zero used by the idle-loop run
+  (`../tools/test_round27.sh`, `../tools/test_round28.sh`).
+- **`bootstate.py`** — pin the mask-ROM boot hand-off recovered in round 28:
+  `[0x400000d0]` is the `ekern.exe` TRomEntry, the kernel reads its own
+  `TRomImageHeader` from `[entry+4]`, the first TStack object is
+  `iPrimaryFile+iStackSize`, and `TStack::Set` panics PLAT 0x51 when the
+  stack constructor is wrong.  It also pins the TTime/MKERN-WD2 frontier and
+  the idle loop at `0x50310f84`
+  (`../tools/test_round28.sh`).
 - **`kaep.py`** — unpack the KaeP/PeaK boot container (`0x124`: magic, record
   size `0x20`, image size `0x1423dc`) and measure the page grid.  `unpack`
   extracts the 0x20-byte record at `0x12e` and the 0x1423dc-byte image at

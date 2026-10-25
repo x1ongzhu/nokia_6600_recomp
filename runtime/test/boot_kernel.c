@@ -77,6 +77,22 @@
  *                           pointers (round 27 experiment: a writable boot
  *                           table for the loader; not required after the
  *                           K=1361 import exception)
+ *   NK_BOOT_HANDOFF=1       install the mask-ROM super-page hand-off
+ *                           ([0x400000c4/c8/cc/d0] = primary/variant/
+ *                           extension/kernel TRomEntry pointers).  Without it
+ *                           the kernel reads address 4 as its own image
+ *                           header and the initial thread fields are garbage.
+ *   NK_PRIMARY_RAM=addr      copy the 64 KiB ROMFS directory block to RAM and
+ *                           repoint only iPrimaryFile (0x5000009c); the
+ *                           initial TStack object is iPrimaryFile+iStackSize.
+ *   NK_HAL_TIMER_HZ=n        with NK_B7E: make the fake HAL's vtable+0x5c
+ *                           (timer frequency) return n.  4 is the round-27
+ *                           probe value, not recovered firmware state.
+ *   NK_BOOT_TIME=1           replace the kernel's computed system time with
+ *                           the ROM header iTime (0x50000080/84) after the
+ *                           store.  Diagnostic: the TTime conversion is the
+ *                           round-28 frontier; this hook alone does not fix
+ *                           the following TTime::SecondsFrom call.
  *   NK_SUPERPAGE_BASE=0x... override the super page address (default 0x40000000)
  *   NK_SUPERPAGE_TOTAL=0x... override iTotalRamSize (default: mapped RAM size)
  *   NK_ENTRY=0x...          override the entry address (e.g. 0x50000000 to
@@ -251,6 +267,48 @@ static void install_super_page(nk_cpu_t* c, uint32_t base, uint32_t total) {
     printf("\n");
 }
 
+/* Round 28: the E32-entry boot is normally preceded by the mask ROM, which
+ * builds the kernel's super-page hand-off.  The kernel reads
+ * [0x400000d0] -> the ekern.exe TRomEntry and then [TRomEntry+4] -> its own
+ * TRomImageHeader.  Without it the kernel reads address 4 (the low exception
+ * vector word) as a header and the initial thread/process fields are
+ * garbage.  NK_BOOT_HANDOFF installs the primary/variant/extension TRomEntry
+ * pointers the mask ROM would leave in the super page. */
+static void install_boot_handoff(nk_cpu_t* c) {
+    uint32_t primary = nk_r32(c, 0x5000009cu);
+    uint32_t variant = nk_r32(c, 0x500000c8u);
+    uint32_t extension = nk_r32(c, 0x500000ccu);
+    nk_w32(c, 0x400000c4u, primary);
+    nk_w32(c, 0x400000c8u, variant);
+    nk_w32(c, 0x400000ccu, extension);
+    nk_w32(c, 0x400000d0u, primary);
+    printf("boot handoff: superpage c4/c8/cc/d0 = %#010x/%#010x/%#010x/%#010x\n",
+           primary, variant, extension, primary);
+}
+
+/* Round 28: the initial DThread's TStack object is taken from
+ * iPrimaryFile + iStackSize (the kernel uses the TRomEntry address as a
+ * writable base).  In the flash image that lands inside the read-only ROMFS
+ * directory block.  Copy the 64 KiB directory to RAM and repoint only
+ * iPrimaryFile; the variant/extension entries stay at their ROM addresses so
+ * the extension loader keeps working.  This mirrors the mask ROM's
+ * writable boot-table copy. */
+static void install_primary_ram(nk_cpu_t* c, uint32_t to) {
+    const uint32_t from = 0x50300000u;
+    const uint32_t size = 0x10000u;
+    if (nk_alloc_ram(c, to, size) != 0) {
+        fprintf(stderr, "primary RAM: cannot map %#010x\n", to);
+        return;
+    }
+    for (uint32_t i = 0; i < size; i += 4)
+        nk_w32(c, to + i, nk_r32(c, from + i));
+    uint32_t primary = nk_r32(c, 0x5000009cu);
+    uint32_t rel = primary - from;
+    nk_w32(c, 0x5000009cu, to + rel);
+    printf("primary RAM: %#010x..%#010x -> %#010x, iPrimaryFile %#010x -> %#010x\n",
+           from, from + size, to, primary, to + rel);
+}
+
 /* Round 27 experiment: give the boot loader a writable copy of the ROMFS
  * directory block.  With K=1361 misbound to the larger constructor the loader
  * writes 0x84 into the rtc.dll TRomEntry (0x50301f40); the K=1361 exception
@@ -287,6 +345,29 @@ static void install_boot_table_ram(nk_cpu_t* c, uint32_t to) {
 static uint32_t g_ww_addr;
 static long     g_ww_max = 8;
 static long     g_ww_hits;
+
+/* Round 28: initial system time.  A cold boot copies the ROM header's iTime
+ * (a TTime built into the image) into the kernel's system-time global.  The
+ * direct E32-entry path reaches the same code with a TDateTime built by
+ * EUser's calendar helper, but that conversion produces an out-of-range
+ * TTime, so the following TTime::SecondsFrom fails and Kern::Init1 panics
+ * KERN-WD2 24.  Model the mask-ROM hand-off by replacing the computed value
+ * with the header's iTime.  This is boot state, not a firmware patch. */
+#define NK_BOOT_TIME_GLOBAL 0x800017ecu
+static void boot_time_raw_w32(nk_cpu_t* c, uint32_t a, uint32_t v) {
+    uint8_t* p = nk_page_ptr(c, a);
+    if (p) {
+        p += a & NK_PAGE_MASK;
+        p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+        p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+    }
+}
+static void boot_time_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
+    (void)addr; (void)value;
+    /* Write directly: nk_w32 would re-enter this same watch hook. */
+    boot_time_raw_w32(c, NK_BOOT_TIME_GLOBAL, nk_r32(c, 0x50000080u));
+    boot_time_raw_w32(c, NK_BOOT_TIME_GLOBAL + 4u, nk_r32(c, 0x50000084u));
+}
 
 static void debug_write_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     if (g_ww_hits >= g_ww_max) return;
@@ -1318,9 +1399,37 @@ int main(int argc, char** argv) {
                0x800017d4u);
     }
 
+    /* Round 28: the real mask ROM leaves the kernel's ROM-image hand-off in
+     * the super page and gives the ROMFS directory a writable RAM copy. */
+    if (env_ulong("NK_BOOT_HANDOFF", 0))
+        install_boot_handoff(&cpu);
+    {
+        uint32_t primary_ram = (uint32_t)env_ulong("NK_PRIMARY_RAM", 0);
+        if (primary_ram) install_primary_ram(&cpu, primary_ram);
+    }
+
     /* Some extension records carry a nested image with no export table; the
      * EKA1 extension loader still calls export 1 after the image entry. */
     install_extension_stub(&cpu, &ip);
+
+    /* Round 28: the HAL timer channel (+0x5c) is the first HAL service the
+     * boot path uses.  The fake HAL's vtable is zero-return, so the kernel
+     * divides 1,000,000 by zero.  NK_HAL_TIMER_HZ installs an explicit
+     * constant-return stub; 4 is the round-27 probe value, not recovered
+     * firmware state. */
+    if (env_ulong("NK_B7E", 0)) {
+        uint32_t hz = (uint32_t)env_ulong("NK_HAL_TIMER_HZ", 0);
+        if (hz) {
+            const uint32_t stub = 0xffff0700u;
+            nk_w32(&cpu, stub + 0, 0xe59f0000u);  /* ldr r0,[pc,#0] */
+            nk_w32(&cpu, stub + 4, 0xe12fff1eu);  /* bx lr         */
+            nk_w32(&cpu, stub + 8, hz);
+            nk_w32(&cpu, B7E_VT_HAL + 0x5cu, stub);
+            nk_code_range_add(&ip, stub, stub + 12u);
+            printf("HAL timer frequency: vtable+0x5c -> stub %#010x = %u Hz\n",
+                   stub, hz);
+        }
+    }
 
     /* NK_POKE=addr:value[,addr:value...]: explicit bring-up writes.  Used to
      * probe missing boot descriptors without rebuilding a harness per try. */
@@ -1436,6 +1545,14 @@ int main(int argc, char** argv) {
         if (g_ww_max <= 0) g_ww_max = 0;
         nk_dbg_watch_write2(g_ww_addr, debug_write_hook);
         printf("write watch: %#010x (max %ld stores)\n", g_ww_addr, g_ww_max);
+    }
+    if (env_ulong("NK_BOOT_TIME", 0)) {
+        /* The guest writes the TInt64 with one 64-bit store; watch the high
+         * word so the correction runs after both words have landed. */
+        nk_dbg_watch_write2(NK_BOOT_TIME_GLOBAL + 4u, boot_time_hook);
+        printf("boot time: %#010x <- ROM header iTime %#010x:%#010x\n",
+               NK_BOOT_TIME_GLOBAL, nk_r32(&cpu, 0x50000080u),
+               nk_r32(&cpu, 0x50000084u));
     }
     ip.stop_selfb = (int)env_ulong("NK_STOP_SELFB", 1);
     ip.swi_direct = (int)env_ulong("NK_SWI_DIRECT", 0);

@@ -86,6 +86,7 @@
 
 | M35 | **第 26 轮：EUser CObject/DProcess 基类 ABI；进程注册进入容器；126,866 条** | (1) **目标 EUser 的 CObject 类是实数**：vtable 在 `0x503b362c`，顺序为 `+0x08 ~CObject 0x50384ac8`、`+0x0c Open 0x50384b28`、`+0x10 Close 0x50384b3c`、`+0x14 Name 0x50384bf8`、`+0x18 FullName 0x50384c34`；构造 `0x50384a98`（ord 1393）写入 vptr 并置 `iAccessCount=1`。kernel 的 DProcess vtable `0x50338690` 继承这套布局，因此 round 25 的 `+0xc` 不是 Close，而是 **Open**。 (2) **基类构造/析构/Open/Close/FullName 修正**：旧绑定把基构造 slot 指向 `0x503a2ec0`（一个 list/array 构造，写 `[this+0xc]/[this+0x10]`），`iAccessCount` 保持 0；现在分别 rebind 到 `0x50384a98/0x50384ac8/0x50384b28/0x50384b3c/0x50384c34`。process 对象 `0x806008b8` 在 `0x80600500` 容器里的注册因此第一次走真实 `CObject::Open`。 (3) **CObjectCon::AddL 不是 CheckUniqueFullName**：target ord 9 的旧函数会 panic E32USER-CBase 44；target 的真实 AddL 是 **`0x503851e0`（ord 6）**，它调用 `CheckUniqueFullName 0x50385598`、扩容、把对象写进 `[this+0x10]` 数组、`count++` 并设置 `object+0xc = this`。 (4) **Name 的隐藏返回 ABI**：`CObject::Name()` 返回 `TName`，ARM ABI 是 `r0=TName*, r1=CObject*`；DProcess 的 Name override `0x5032b5d4` 先调用 base `CObject::Name`，slot `0x503b42cc` 应指向 **`0x50384bf8`**（不是 CHeartbeat::NewL）。 (5) **memcpy**：DProcess::Name 末尾把 0x108 字节临时 TName 复制到调用者；kernel slot ord 1 原指向 locale/date helper，现 rebind 到 EUser 的共享 memmove `0x5038cfe0`（ord 239）。 (6) **结果与新 frontier**：38 个 override，真实路径 **126,866 条 ARM、0 undefined、0 unbound IAT、0 recoveries、22 call fixups**；process 成功构造、Open 并加入 `K::Containers[EProcess]`，随后 kernel 自己的 `DProcess::Name` override 仍用 stale descriptor ordinal 覆盖临时 TName，停在 `CObjectCon::CheckUniqueFullName` 的 **USER 7 (ETDes16BadDescriptorType)**。把 DProcess vtable `+0x14` 临时指向 EUser 的真实 `CObject::Name`（`NK_PATCH=0x503386a4:0x50384bf8,0x503384bc:0x50384bf8`，显式 stand-in）可越过 Names，运行 **126,778 条**，停在 **DProcess::Loaded 的零返回地址**（`pc=0`、`lr=0x5031fe84`），说明下一项是 descriptor ABI + Loaded 回调栈。新增 LDMDB/STMDB 回归（memmove 反向路径）。验收：`tools/test_round26.sh`；`test_round25` 与 `test_interp` 保持通过 |
 | M36 | **第 27 轮：kernel→EUser 导入是固定 -3 重定位；真实 DProcess 名字 ABI；K=1361 例外与 HAL timer frontier** | (1) **不是零散 ABI，而是整张表错位**：kernel 镜像链接时使用的 EUser `.def` 比通用 7.0 列表少 1 个导出（kernel 序号 K = generic G-1），ROM 里的 EUser.dll 少 4 个（ROM 序号 M = G-4），所以 **K≥6 时目标就在 ROM 导出 M=K-3**。用 49 个由调用点语义独立确定的锚点验证：CObject（K=177/480/718/799/1266/1396）、CObjectCon/ObjectIx（6/9/10/421/725/277）、TInt64/TTime（970/1147/1378/1455/1457/1484/1486/1562/1611）、descriptor/name（67/88/90/717/1281/1282/1417/1419/1620）、队列迭代（362/1336）全部命中。低序号是特例：K=0 是 ROM memset，K=1 是 `Mem::Copy`，K=2 是 `User::Alloc`。新增 [`euser_reloc.py`](../recompiler/euser_reloc.py)，`verify` 断言 236 个 kernel EUser 槽中 232 个服从 K-3，另 1 个 local exception（K=1361）、2 个低序号特例、1 个保留，`build` 生成 `config/imports-r27-6600.txt`（236 override）与 47 项的 name probe。 (2) **DProcess::Name 是真的名字 ABI**：`0x5032b5d4` 不是 Copy 链，而是 `name = CObject::Name(); name.Append('[uid]'); name.AppendNumFixedWidth(iGeneration, EDecimal, 4)`。`0x5032b5f8` 的 K=1620 是 **`TUidType::operator[]` `0x5039b364`**（`cmp r1,#2` + `add r0,r0,r1,lsl#2`），`0x5032b608` 的 K=717 是 **`[uid]` 格式化器 `0x5039b230`**（TBuf10 → `[XXXXXXXX]`），K=90 是 `TDes16::Append(TDesC16&)` `0x503887c4`，K=67 是 `TDes16::AppendNumFixedWidth` `0x50395b8c`；构造器里的 K=1417/1419 分别是 **`TUidType()` `0x5039b2a0`** 和 **`TUidType(TUid,TUid,TUid)` `0x5039b2f0`**，K=1281 是 `TBufBase16(const TDesC16&,int)` `0x503882c4`。K=1302/1328 也因此改回 `TDblQueBase(int)` `0x503a25a4` / `TDblQueBase()` `0x503a2684`（此前把队列当成 TBuf8/TBuf16，是 latent corruption）。name probe 路径下 process `0x806008b8` 的 UID 为 **1000007a/1000008b/100000b9**，名字注册通过 `CheckUniqueFullName`，**无需 NK_PATCH stand-in**，运行 **128,663 条、0 undefined、0 unbound、0 recoveries**，停在 `0x5031fe2c` 对 `0x30000000` 的代码段队列元素解引用（缺初始 code-seg 队列）。 (3) **K=1361 例外与忠实路径的 HAL timer frontier**：完整 236 槽重定位后，K=1361 的 K-3 目标 `0x5039c148` 是更大的类，构造时在 `+0x7c` 执行 `str`，越过 0x74 字节的 boot-file 对象写进下一个 `TRomEntry`（`0x50301f40` 被写成 0x84），随后 `0x5031eb98` 以 `r4=0x84` 解引用。把 K=1361 固定回 ROM 自己的目标 **`0x503a0224`**（清零 16 字节基类）后，**关闭 `NK_CALL_INFER`**（flat image 是 linked image，直接 BL 已经精确）的忠实路径运行 **108,231 条、0 undefined、0 unbound IAT、0 recoveries、0 call fixups**，在 `K::Init1` 的初始 process/thread 创建中停在 **USER-EXEC 3**（`0x50312b88`）：`0x50399484` 返回 handle `0xffff8001`（KErrGeneral），随后 `CObjectIx::At(handle=0xffff8001)`（`0x5038e4b4`，K=109 的 K-3 目标）返回 0，调用者 raise。根因是 **HAL timer frequency 为 0**：`0x5031b80c` 调的 `0x503109d0` 读 `[0x800003ac]->vtable+0x5c`（HAL timer channel），把返回值存进 `0x800017f4`；当前 HAL stand-in 在 `+0x5c` 返回 0，随后 `K::Init1` 做 `1,000,000 / 0`。`__divsi3` 的除零慢路径（`0x503891c0 → 0x50399484`）返回 KErrGeneral，调用者把这个负数当 handle 传给 `CObjectIx::At`，于是 USER-EXEC 3。**把 vtable `+0x5c` 指到常量返回 stub `0x503109a0`（返回 4）后，运行推进到 117,923 条**，并进入新的 KERN panic（`0x5031c9d0 → 0x503309fc → 0x50334f70`，panic code 0x1a）。所以下一项是 **HAL timer 频率/通道**，不是 object index 图。**`NK_CALL_INFER=1` 的 14,354 条/MATHX 是 call-inference 伪影**：解释器把 EUser 内部合法调用 `0x5038ad44` snap 到 `0x5038ad20`，改变 TRealX 包装 ABI 后触发 MATHX panic；它保留为 control，不代表真实进度。`NK_BOOTTABLE_RAM`（把 64 KiB ROMFS 目录拷到 RAM 并重指四个 `TRomHeader` 指针）已实现，但对 108k 路径不是必要条件。126k/128k 的旧数字是错误导入绕开 boot loader 的支路。 (4) **工具/测试**：`NK_MAX_IMPORT_OVERRIDES` 从 64 提到 512；`euser_reloc.py` 增加 1 个 local exception（K=1361）并生成 236 槽 full map 与 47 槽 name probe；`NK_BOOTTABLE_RAM` 提供启动表 RAM 模型；`tools/test_round27.sh` 固定 full（236，`NK_CALL_INFER=0`，108,231 条，USER-EXEC 3/0xffff8001）、control（`NK_CALL_INFER=1`，14,354 条，MATHX 伪影）与 name（47，128,663 条，UID 1000007a/8b/b9，无 NK_PATCH）三条路径。验收：`tools/test_round27.sh` |
+| M37 | **第 28 轮：mask ROM 的 super-page/boot hand-off；TStack 真构造；内核首次进入 idle loop** | (1) **初始线程字段是坏的，不是 HAL timer**：round 27 把 HAL vtable `+0x5c`  poke 成 4 后推进到 117,923 条，但 `0x5031e594` 从 `[0x400000d0]` 读到的不是内核自己的 `TRomImageHeader`，而是地址 4 的低异常向量字；因此 process/thread 字段、`iPrimaryFile`/`iStackSize` 都是垃圾。真实 hand-off 是 **`[0x400000d0] = ekern.exe TRomEntry (0x50301ec4)`**，kernel 用 `[entry+4] = 0x5030ff9c` 找到自己的 header（`iStackSize=0x4000`、`iHeapSizeMin=0x20000`、`iHeapSizeMax=0x1000000`）。新增 `NK_BOOT_HANDOFF=1` 安装 super-page `c4/c8/cc/d0`。 (2) **初始 TStack 在 iPrimaryFile+iStackSize**：`0x5031ede4..0x5031ee04` 的计算结果是 `0x50301ec4+0x4000=0x50305ec4`，落在只读 ROMFS 目录块；mask ROM 必须提供可写副本。新增 `NK_PRIMARY_RAM=addr` 把 64 KiB 目录拷到 RAM 并**只**重指 `iPrimaryFile`（variant/extension 保持 ROM 地址，避免 round 27 四个指针全重指导致的早退）。 (3) **K=1361 的真正目标是 TStack/TBuf 构造 `0x503a023c`，不是零化构造 `0x503a0224`**：`0x50321cf0` 用 `operator new(0x74, block)` 创建 stack 对象，随后 `TStack::Set 0x50321d84` 断言 `[obj] == iHeapSizeMin`（0x20000）否则 panic **PLAT 0x51**；`0x503a0224` 只清 16 字节，`[obj]` 仍为 0。改成 `0x503a023c`（写 `+0/+4/+0xc` 并分配 backing store）后通过。 (4) **时间簇是局部导出顺序例外**：K=294/1069/1375 的 K-3 目标把 ROM header 的 2000-01-01 iTime 送进 `TTime::SecondsFrom` 后溢出；保持 ROM 静态目标 `0x503a532c/0x50397cb4/0x50389a40`。新增 `--profile boot`：236 槽、229 槽服从 K-3、4 个 local exception（K=1361 + 三个时间槽）。 (5) **结果与新 frontier**：`NK_BOOT_HANDOFF=1 NK_PRIMARY_RAM=0x80900000 NK_HAL_TIMER_HZ=4` + `config/imports-r28-6600.txt` 的忠实路径运行 **164,731 条、0 undefined、0 unbound、0 recoveries**，在 `0x50310b30` panic **MKERN-WD2 24**：`0x5031380c` 的系统时间路径把 TTime 写成 `0x296c5c00_fc636590`（越界），`TTime::SecondsFrom` (`0x503126e4`) 返回 **-9**，`Kern::Init1` 判定失败。`NK_BOOT_TIME=1` 纠正全局值仍不够，因为 `SecondsFrom` 使用的是 `r0` 指向的 TTime 结构，不是全局；这是下一个真实缺口（初始 TTime hand-off）。 (6) **首次 idle loop**：加上 round 23 的 `0x503b46bc zero`（WD2 time/HAL stand-in）得到 `config/imports-r28-boot-6600.txt`，运行 **3,000,000 条**（预算耗尽）、0 undefined/unbound/recoveries，停在 **`0x50310f88`**：`0x50310f84` 调 `0x5031252c`（立即返回）后循环检查 `[0x8000000c]`，等待 timer/DFC 中断。这是第一次让内核走到 idle/等待循环，而不是 panic。 (7) **工具/测试**：新增 [`bootstate.py`](../recompiler/bootstate.py) 静态断言 super-page、stack 序列、PLAT 0x51、TStack 构造、TTime/MKERN-WD2 和 idle loop；`euser_reloc.py --profile boot/boot-idle`；`boot_kernel` 新增 `NK_BOOT_HANDOFF`/`NK_PRIMARY_RAM`/`NK_HAL_TIMER_HZ`/`NK_BOOT_TIME`；`tools/test_round28.sh` 固定 faithful 164,731 + idle 3,000,000 两条路径。验收：`tools/test_round28.sh`；`test_round27` 与 `test_interp/imports/romimage/layout/pagestream/bootregions/round26` 保持通过 |
 
 ### 可复现命令
 
@@ -831,6 +832,88 @@ kernel ≥95%。旧的 §B1 文本保留为历史。
 unbound IAT slot `0x5037d0e8`（`sp=0x802fff08`、`cpsr=0x800000d3`），
 见 §B7。旧的 stack/super-page 描述保留为历史，不再作为当前 frontier。
 
+#### B15 第 28 轮：mask ROM 的 boot hand-off；TStack 真构造；内核首次进入 idle loop
+
+round 27 的 `108,231` 条忠实路径停在 USER-EXEC 3，根因被归到 HAL timer 频率
+为 0。把 vtable `+0x5c` poke 成常量 4 后确实推进到 `117,923` 条，但新的
+KERN 不是 timer，而是 `0x5031e594` 在初始 thread/process 构造中读到了坏的
+`[0x400000d0]`。
+
+1. **super page 的 boot hand-off 是 `[0x400000d0] = ekern.exe TRomEntry`**。
+   `0x5031e5a8` 的 `ldr r3,[ip,#0xd0]; ldr sb,[r3,#4]` 说明 `[0x400000d0]`
+   指向一个 `TRomEntry`，其 `+4` 是 `TRomImageHeader`。真实值是
+   `0x50301ec4 -> 0x5030ff9c`；header 的 `iStackSize=0x4000`、
+   `iHeapSizeMin=0x20000`、`iHeapSizeMax=0x1000000`。直接 E32-entry boot
+   让该字段为 0，kernel 于是从地址 4 读低异常向量字当 header，初始
+   process/thread 的 `+0x80..+0x9c`、`iPrimaryFile` 全部是垃圾。新增
+   `NK_BOOT_HANDOFF=1` 写 super page 的 `c4/c8/cc/d0`（primary/variant/
+   extension/primary）。
+
+2. **第一个 TStack 对象在 `iPrimaryFile + iStackSize`**。
+   `0x5031ede4..0x5031ee04` 的序列是：
+
+   ```
+   r3 = [0x400000d0]            ; primary TRomEntry
+   r2 = [r3+4]                  ; kernel TRomImageHeader
+   r3 = [0x5000009c]            ; iPrimaryFile
+   r0 = [r2+0x34] + r3          ; iStackSize + iPrimaryFile
+   r1 = [r2+0x2c]               ; iHeapSizeMin
+   bl 0x50321cf0                ; operator new(0x74, stack block)
+   ```
+
+   在 flash 里 `iPrimaryFile=0x50301ec4`，所以对象落在 `0x50305ec4`——只读
+   ROMFS 目录块内。mask ROM 必须给目录提供可写副本。`NK_PRIMARY_RAM=addr`
+   把 64 KiB 目录拷到 RAM，并**只**重指 `iPrimaryFile`；variant/extension
+   指针保持 ROM 地址。round 27 的 `NK_BOOTTABLE_RAM` 会重指四个指针，
+   反而让 variant/extension loader 提前走错。
+
+3. **K=1361 是 TStack/TBuf 构造，不是 16 字节零化**。`0x50321cf0` 分配
+   0x74 字节对象后调用 `0x50321cd0`，后者走 `0x503360e0` -> slot
+   `0x503b4cd8`。round 27 把该 slot 固定到 `0x503a0224`（只清 `+0/+4/+8/+0xc`），
+   但 `TStack::Set 0x50321d84` 断言 `[obj] == iHeapSizeMin`（0x20000），
+   否则调用 `0x50321a74` panic **PLAT 0x51**。ROM 中的 `0x503a023c`
+   才是 stack/buffer 基构造：`str r1,[this]`、`str r1,[this+4]`、
+   `str r1,[this+0xc]`，再 `bl 0x5039a9a8` 分配 backing store。把 K=1361
+   例外改成 `0x503a023c` 后 PLAT 0x51 消失。
+
+4. **时间簇是局部导出顺序例外**。`0x5031380c` 从 ROM header 的
+   `0x50000084` 读 iTime，构造 TTime 并调用 `0x503126d0`；后者从
+   `0x800017ec` 取 64-bit TTime 调 `TTime::SecondsFrom`（slot K=970）。
+   round 27 的 K-3 规则把 K=294/1069/1375 分别指到 `0x503a4020/
+   0x503a3900/0x503a3af8`，这三者在 boot 调用点上把 2000-01-01
+   iTime 变成越界值 `0x296c5c00_fc636590`，`SecondsFrom` 返回 **-9**，
+   `Kern::Init1` 在 `0x50310b30` panic **MKERN-WD2 24**。保留 ROM 静态
+   目标 `0x503a532c/0x50397cb4/0x50389a40` 后，时间结构正确到
+   `0x00e0ca39_91f6bc80`，但 `SecondsFrom` 仍用 `r0` 指向的栈上
+   TTime（还是越界），所以 `NK_BOOT_TIME=1` 只修全局值不够。这是新的
+   真实缺口：**初始 TTime 的 hand-off / 时间簇 ABI**。三个时间槽的
+   8 种 static/K-3 组合都测过：运行 140,104..165,249 条，全部停在同一
+   MKERN-WD2 24；最好的一组（K=294 static、K=1069/1375 K-3）到 165,249
+   条仍得到越界 TTime。因此这一簇需要逐调用点的 ABI 映射，而不是再定一条
+   全局规则。
+
+5. **首次 idle/timer 等待循环**。加上 round 23 的 `0x503b46bc zero`
+   （WD2 time/HAL stand-in）后，kernel 越过 `Kern::Init1`，在
+   `0x50310f84` 调 `0x5031252c`（立即返回）并循环检查 `[0x8000000c]`；
+   3,000,000 条预算耗尽时 PC 仍在 `0x50310f88`。没有 undefined、
+   unbound IAT 或 recovery。这是第一次让内核走到 idle loop，而不是 panic。
+
+6. **验收与工具**。新增 [`bootstate.py`](../recompiler/bootstate.py) 静态
+   断言上述 super-page/stack/PLAT/TStack/TTime/idle 事实；`euser_reloc.py`
+   增加 `--profile boot` 与 `--profile boot-idle`（236 槽；229 槽服从
+   K-3，4 个 local exception）；`boot_kernel` 增加
+   `NK_BOOT_HANDOFF`/`NK_PRIMARY_RAM`/`NK_HAL_TIMER_HZ`/`NK_BOOT_TIME`。
+   `tools/test_round28.sh` 固定：
+
+   ```
+   faithful: 164,731 insns, MKERN-WD2 24 at 0x50310b30
+   idle:     3,000,000 insns, budget stop at 0x50310f88
+   ```
+
+   下一步不是继续放大 budget，而是恢复初始 TTime 结构（或让
+   `TTime::SecondsFrom` 的 ABI 与调用点一致），然后给 `[0x8000000c]`
+   建模 timer/DFC 中断，让 idle loop 真正被调度器打断。
+
 ### B1 第 5 轮重写：先修解释器，再谈 veneer
 - **Thumb format-2 解码 bug 已修**：`00011` 组（`add/sub rd,rs,#imm3` 与
   `add/sub rd,rs,rn`）的 bit 10 含义是「1=立即数，0=寄存器」，旧实现正好
@@ -1304,6 +1387,10 @@ entry：
 - [x] **B7h** ~~ROMFS/E32 file-server session~~：round 21 的 KERN-NO-SESSION 22 在 round 22 被重新定性为 RTC 驱动 allocator import 的 ABI mismatch（EUser export 1504 = `RTest::operator()`，driver 期望 `operator new`），不是真实的 file-server 依赖。`config/callmap-rtc-6600.txt` 用 HLE alloc 修掉两个 `new` 站点；RTC 扩展完整初始化后 boot 到 27,470 条。真正的 ROMFS/E32 文件服务留到 P3（UI/app 加载）。
 - [x] **B7h2** RTC 扩展的嵌套 E32Image：`rtc.dll` 记录里第二个 image（uid2 `0x100058d8`，text `0x5033ee14..0x50341414`，export_count 0）；kernel extension loader 调 entry 后还会调 export 1。`NK_EXT_STUB=1` 安装单入口 stub；HAL channel 返回真实对象；`NK_HLE_ZERO2` 处理 64-bit time 输出。验收：`tools/test_rtc.sh`（27,470 条、0 undefined/recoveries）。
 - [ ] **B7h3** post-extension boot descriptor：`0x5031f3a8` 检查 `[0x80000b5c] == 0xff`，否则 PLAT 21；调用点先构造 `"IrqTimer0"` descriptor（`0x50337200`），所以这是 kernel timer/DFC 对象；下一步是恢复其初始 queue/state（与 B7d3 同源），而不是用 `NK_PATCH` 跳过。
+- [x] **B7h4** mask-ROM super-page hand-off（round 28）：`[0x400000d0] = ekern.exe TRomEntry 0x50301ec4`，kernel 用 `[entry+4]` 取自己的 `TRomImageHeader`；`NK_BOOT_HANDOFF=1`。`bootstate.py` 固定 `0x5031e5a8` 和 `0x5031ede4..0x5031ee04` 的序列。
+- [x] **B7h5** 初始 TStack 与 K=1361（round 28）：对象在 `iPrimaryFile+iStackSize`，mask ROM 需给 ROMFS 目录可写副本（`NK_PRIMARY_RAM`）；`TStack::Set 0x50321d84` 断言 `[obj]==iHeapSizeMin`，否则 PLAT 0x51。K=1361 的 boot 目标是 **`0x503a023c`**（TStack/TBuf 构造），不是 `0x503a0224`（16 字节零化）。验收：`tools/test_round28.sh`
+- [ ] **B7h6** 初始 TTime hand-off（round 28 新 frontier）：`0x5031380c -> 0x503126d0` 从 `0x800017ec` 取 TTime，`TTime::SecondsFrom`（K=970，`0x5033645c`）返回 -9；`Kern::Init1` 在 `0x50310b30` panic MKERN-WD2 24。时间簇 K=294/1069/1375 已作为局部例外保留 ROM 静态目标，但 `r0` 指向的栈上 TTime 仍越界。需要恢复真实 TTime 结构/ABI，而不是把 slot 970 归零。
+- [ ] **B7h7** timer/DFC 中断让 idle loop 前进（round 28 新 frontier）：`0x50310f84` 循环检查 `[0x8000000c]`；预算 3,000,000 时仍停在 `0x50310f88`，无 undefined/unbound/recovery。下一步是给 timer 通道/DFC 建模，让 `[0x8000000c]` 由真实中断置位，而不是继续放大预算。
 - [ ] **B7e3** `CObjectIx::At` 的 handle→object 语义：`NK_B7E` 目前对 handle 0 返回 live current thread；需要真实 object index 元素（thread/process/chunk/…）
 - [x] **B7e4** EUser `CObject` 基类 ABI（round 26）：target vtable `0x503b362c` 的 `+0x0c/+0x10/+0x14/+0x18` 是 `Open/Close/Name/FullName`，构造 `0x50384a98` 置 `iAccessCount=1`；DProcess vtable `0x50338690` 的 `+0xc` 是 **Open**。五个基类 slot 已 rebind。验收：`tools/test_round26.sh`
 - [x] **B7e5** `CObjectCon::AddL`（round 26）：kernel slot ord 9 的真实目标是 `0x503851e0`（ord 6），不是 `CheckUniqueFullName 0x50385598`；它把 process 插入 `K::Containers[EProcess]` 并设置 `object+0xc`。验收：同上

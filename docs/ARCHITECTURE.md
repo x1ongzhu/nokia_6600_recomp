@@ -146,6 +146,27 @@ model copies the 64 KiB ROMFS directory to RAM but does not change the 108k
 stop.  The old 126k/128k paths are wrong-import detours, not later boot
 progress.
 
+Round 28 recovers the **mask-ROM boot hand-off** that the direct E32-entry
+path skips.  The fixed super page at `0x40000000` must contain
+`[0x400000d0] = 0x50301ec4`, the `ekern.exe` `TRomEntry`; the kernel reads
+`[entry+4]` to find its own `TRomImageHeader` at `0x5030ff9c`
+(`iStackSize=0x4000`, `iHeapSizeMin=0x20000`, `iHeapSizeMax=0x1000000`).
+The initial `TStack` object lives at `iPrimaryFile + iStackSize`
+(`0x50301ec4 + 0x4000`), inside the read-only ROMFS directory block, so the
+mask ROM gives the directory a writable RAM copy and repoints only
+`iPrimaryFile` (`NK_PRIMARY_RAM`).  The boot `K=1361` target is the
+TStack/TBuf constructor **`0x503a023c`** (it stores the size at
+`+0/+4/+0xc` and allocates the backing store), not the 16-byte zeroing
+`0x503a0224`; otherwise `TStack::Set 0x50321d84` sees a zero size and panics
+**PLAT 0x51**.  Three time-cluster slots (`K=294/1069/1375`) keep their ROM
+static targets; the K-3 targets put the ROM header's 2000-01-01 iTime out of
+range in `TTime::SecondsFrom`.  The faithful path reaches **164,731
+instructions** and stops at **MKERN-WD2 24** in `Kern::Init1`; adding the
+round-23 WD2 time/HAL zero lets the kernel run to its **first idle/timer
+wait loop** at `0x50310f84` (3,000,000-instruction budget, no
+undefined/unbound/recovery).  [`bootstate.py`](../recompiler/bootstate.py)
+pins the hand-off, stack, time and idle facts.
+
 The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
 (first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.
 `recompiler/pagestream.py` removes the headers and makes the packed records

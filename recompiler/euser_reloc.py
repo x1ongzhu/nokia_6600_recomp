@@ -17,19 +17,30 @@ semantics: CObject (K=177/178/480/799/1266/1396), CObjectCon / ObjectIx
 1417/1419/1620) and the queue iterators (K=362/1336).  The first three
 entries are special: K=0 is the ROM's memset, K=1 is ``Mem::Copy`` and K=2
 is ``User::Alloc`` (the kernel's low ordinal block is not the generic one).
-One local exception is pinned too: K=1361 constructs the base of the
-0x74-byte boot-file object and the ROM's own target (`0x503a0224`) is the
-16-byte-zeroing constructor; the K-3 target overruns the object at +0x7c.
+The round-27 profile also pins K=1361: the ROM's own target (`0x503a0224`)
+is the 16-byte-zeroing constructor used by the boot-file object.
 
-This tool emits the full 236-slot kernel -> EUser relocation map and the
-smaller DProcess-name probe map, and verifies the known anchors.
+Round 28's boot profile keeps four call-site-derived local exceptions.  The
+first boot thread is allocated with `operator new(0x74, block)` and needs the
+buffer/stack constructor `0x503a023c` (stores the size and allocates the
+backing store), not the zeroing constructor.  Three time-cluster slots
+(K=294/1069/1375) must keep their ROM (static) targets: the K-3 targets put
+the ROM header's 2000-01-01 iTime out of range in TTime::SecondsFrom and
+Kern::Init1 then panics KERN-WD2 24.
+
+This tool emits the full 236-slot kernel -> EUser relocation maps (round 27
+and the round-28 boot profile), the smaller DProcess-name probe map, and
+verifies the known anchors.
 
 Commands::
 
     py recompiler/euser_reloc.py analyze 6600_mcu.bin
     py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r27-6600.txt
+    py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r28-6600.txt --profile boot
+    py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r28-boot-6600.txt --profile boot-idle
     py recompiler/euser_reloc.py build 6600_mcu.bin config/imports-r27-name-6600.txt --profile name
     py recompiler/euser_reloc.py verify 6600_mcu.bin
+    py recompiler/euser_reloc.py verify 6600_mcu.bin --profile boot
 """
 from __future__ import annotations
 
@@ -73,6 +84,23 @@ NAME_CLUSTER = {    0x503B42C8: (717, 0x5039B230, "DProcess name suffix: [uid]")
 EXCEPTIONS = {
     0x503B4CD8: (1361, 0x503A0224, "boot file base ctor (local ROM order)"),
 }
+
+# Round 28 boot profile.  The first boot thread is allocated with
+# operator new(0x74, block); the real base constructor is the buffer/stack
+# constructor 0x503a023c (it stores the size at +0, +4, +0xc and allocates
+# the backing store), not the 16-byte zeroing function 0x503a0224 used by
+# the boot-file object.  The three time slots below are a *local export-order*
+# deviation: their ROM (static) targets are the ones the TTime init path
+# expects, while edata[K-3] points at a different class.  Using the K-3
+# targets makes the ROM header's 2000-01-01 iTime overflow in
+# TTime::SecondsFrom and Kern::Init1 panics KERN-WD2 24.
+BOOT_EXCEPTIONS = dict(EXCEPTIONS)
+BOOT_EXCEPTIONS.update({
+    0x503B4CD8: (1361, 0x503A023C, "TStack/TBuf base ctor (round 28)"),
+    0x503B3C2C: (294, 0x503A532C, "TTime ctor (local time-cluster order)"),
+    0x503B4848: (1069, 0x50397CB4, "TDateTime from TTime (local order)"),
+    0x503B4D10: (1375, 0x50389A40, "TInt64(int) (local order)"),
+})
 
 # Anchors verified by earlier rounds from call-site semantics.  (kernel
 # ordinal, slot, expected ROM target, human label)
@@ -159,15 +187,17 @@ def generic_symbols() -> dict[int, str]:
     return out
 
 
-def rows(stream: bytes, euser, edata: list[int]):
+def rows(stream: bytes, euser, edata: list[int], exceptions=None):
+    if exceptions is None:
+        exceptions = EXCEPTIONS
     res = imports.scan(stream, KERNEL_UID3)
     out = []
     for r in res["rows"]:
         if r["owner"] != EUSER_UID3:
             continue
         k = r["ordinal"]
-        if r["slot"] in EXCEPTIONS:
-            target = EXCEPTIONS[r["slot"]][1]
+        if r["slot"] in exceptions:
+            target = exceptions[r["slot"]][1]
             kind = "exception"
         elif k >= 6:
             target = edata[k - 3]
@@ -246,6 +276,42 @@ def cmd_build(a):
             "the diagnostic that shows the real name cluster without the",
             "NK_PATCH stand-in.  The full profile is imports-r27-6600.txt.",
         ]
+    elif a.profile in ("boot", "boot-idle"):
+        mapping = {}
+        for r in rows(stream, euser, edata, BOOT_EXCEPTIONS):
+            if r["kind"] == "keep":
+                continue
+            mapping[r["slot"]] = f"{r['target']:#x}"
+        mapping[0x5037D0E8] = "zero"
+        if a.profile == "boot-idle":
+            # Round 23's explicit mask-ROM HAL hand-off stand-in.  Without
+            # it the TTime init path stops at KERN-WD2 24 (164,731 insns);
+            # with it the kernel reaches its idle/timer wait loop.
+            mapping[0x503B46BC] = "zero"
+        header = [
+            f"{os.path.basename(a.out)} - boot profile (round 28)",
+            "",
+            "The round-27 K-3 relocation plus four call-site-derived local",
+            "exceptions: the initial thread's TStack base constructor",
+            "(0x503a023c), and three TTime/time-cluster functions whose",
+            "ROM (static) targets are correct for the boot path.  With the",
+            "K-3 targets the ROM header's 2000-01-01 iTime overflows in",
+            "TTime::SecondsFrom and Kern::Init1 panics KERN-WD2 24.",
+            "",
+            ("The boot-idle profile additionally zeroes the WD2 time/HAL"
+             if a.profile == "boot-idle" else
+             "This is the faithful boot profile; it leaves the WD2 time/HAL"),
+            ("slot 0x503b46bc as the explicit mask-ROM HAL hand-off stand-in"
+             if a.profile == "boot-idle" else
+             "slot 0x503b46bc at its K-3 TTime target, so the boot stops in"),
+            ("from round 23; that run reaches 3,000,000 instructions and the"
+             if a.profile == "boot-idle" else
+             "TTime::SecondsFrom/MKERN-WD2 24 after 164,731 instructions."),
+            ("kernel's idle/timer wait loop instead of the panic."
+             if a.profile == "boot-idle" else ""),
+            f"Generated by: py recompiler/euser_reloc.py build ... --profile {a.profile}",
+            "Do not hand-edit; add an anchor/exception to the tool instead.",
+        ]
     else:
         mapping = {}
         for r in rows(stream, euser, edata):
@@ -273,10 +339,12 @@ def cmd_build(a):
 def cmd_verify(a):
     stream, _images, euser = load(a.rom)
     edata = edata_values(stream, euser)
-    allrows = rows(stream, euser, edata)
+    profile = getattr(a, "profile", "full")
+    exceptions = BOOT_EXCEPTIONS if profile == "boot" else EXCEPTIONS
+    allrows = rows(stream, euser, edata, exceptions)
     by_slot = {r["slot"]: r for r in allrows}
     ok = True
-    print(f"kernel EUser imports: {len(allrows)}")
+    print(f"kernel EUser imports: {len(allrows)} ({profile} profile)")
     if len(allrows) != 236:
         print(f"FAIL: expected 236 EUser imports, got {len(allrows)}")
         ok = False
@@ -291,7 +359,7 @@ def cmd_verify(a):
             ok = False
         else:
             print(f"ok: K={k:4d} {label:38} -> {want:#010x}")
-    for slot, (k, want, label) in EXCEPTIONS.items():
+    for slot, (k, want, label) in exceptions.items():
         r = by_slot.get(slot)
         if r is None or r["target"] != want:
             print(f"FAIL: exception K={k} {label}: "
@@ -331,10 +399,12 @@ def main():
     p = sub.add_parser("build")
     p.add_argument("rom")
     p.add_argument("out")
-    p.add_argument("--profile", choices=("full", "name"), default="full")
+    p.add_argument("--profile", choices=("full", "name", "boot", "boot-idle"),
+                   default="full")
     p.set_defaults(func=cmd_build)
     p = sub.add_parser("verify")
     p.add_argument("rom")
+    p.add_argument("--profile", choices=("full", "boot"), default="full")
     p.set_defaults(func=cmd_verify)
     a = ap.parse_args()
     a.func(a)
