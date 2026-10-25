@@ -56,6 +56,18 @@ NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_b7e.sh
+
+# round 23: super page, RAM bank table, page bitmap, WD2 CTSI DMA
+tools/test_round23.sh
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-wd2-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x503994e8 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
 ```
 
 ### Round 19: the ROMFS boot table and image imports (2026-10-25)
@@ -214,6 +226,129 @@ NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
   NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
   NK_WATCH=0x5031f3c0 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+```
+
+### Round 23: PLAT 21 was a TDesC8 ABI; super page, page bitmap, WD2 DMA (2026-10-25)
+
+Round 22 left the run at the `"IrqTimer0"` gate `0x5031f3a8`
+(`[0x80000b5c] == 0xff`, else PLAT 21) and concluded that the direct E32 entry
+skipped the mask-ROM boot descriptor.  Round 23 re-read the static
+constructor that fills that address and found an EUser ABI mismatch instead.
+
+**1. An 8-byte name array and a 12-byte constructor.**  The second entry of
+the kernel's static-constructor table is `0x50311508`.  It first calls
+`0x50310dbc(0x80000b5c)`, which constructs the kernel timer object
+(`0x5031f35c` sets `[obj] = 0xff`, `[obj+0x10] = 0x50338340`).  It then uses
+kernel import slot `0x503b4d34` (this ROM's EUser export index 1384) to
+initialise eight-byte `TDesC8` names at `0x80000b54`, `b4c`, `b44`, ... —
+`"FiqTimer0"`, `"FiqTimer1"`, the DMA channels, and so on.  In this ROM that
+slot holds a **12-byte** default constructor `0x5038a234`:
+
+```
+mov r1,#0
+str r1,[r0]
+str r1,[r0,#4]
+str r1,[r0,#8]
+```
+
+The third store for `r0 = 0x80000b54` lands on `0x80000b5c` and clears the
+timer state.  Rebinding the slot to `TDesC8(const char*)` **`0x50388984`**
+makes the timer start normally; PLAT 21 disappears.  The old `NK_PATCH` of
+`cmp r3,#0xff` was only hiding the symptom.
+
+**2. The name lookup used `DObject::Close`.**  Timer start calls
+`0x5031ba2c -> 0x50311104 -> 0x50310d5c`, which scans the name table at
+`[0x80000020]` and compares each entry with the stack descriptor.  Slot
+`0x503b3ac4` (index 204) is `DObject::Close` `0x5039d870` in this ROM; it
+treated the descriptor length word `0x1000000d` as a handle and called
+`svc 0x6b`, which panicked KERN-EXEC.  The correct target is
+**`TDesC8::Compare`'s EABI entry `0x50388e30`**.  Do not bind
+`0x50388e34`: that is the compare body and expects `ip` to hold the
+memcompare helper, so it would `bx ip` back to the import slot.
+
+**3. The super page is at `0x40000000`, not `0x7ff00000`.**  The kernel's
+super-page accessor and `0x5031c0ac` show:
+
+```
+[0x40000010]   iTotalRamSize   (EKA1 7.0s offset)
+[0x40000018]   iRamBootData    -> SRamBank{base,size}[]
+[0x40000800]   TMachineConfig
+```
+
+The harness had mapped `0x7ff00000..0x80000000`, so every one of these reads
+hit the MMIO bus and returned zero; the RAM allocator saw no banks and
+panicked with the chunk name `TheRamDriveChunk`.  `NK_SUPERPAGE=1` maps the
+fixed page and publishes a 6 MiB bank list split into power-of-two blocks:
+`{0, 0x400000}` and `{0x400000, 0x200000}`.  The allocator then builds its
+page bitmap and the page-table code runs.
+
+```
+super page 0x40000000: total RAM 0x600000, 2 banks at 0x40000100:
+  {0,0x400000} {0x400000,0x200000}
+```
+
+**4. Three more wrong-ABI slots on the page bitmap.**  The allocator imports
+`CBitMapAllocator` methods from EUser.  In this ROM those slots hold:
+
+| slot | index | this ROM | kernel expected | rebind |
+|---|---|---|---|---|
+| `0x503b433c` | 746 | `0x50394b60` 2-byte array allocator | `CBitMapAllocator::New` | `0x50381b28` |
+| `0x503b3980` | 123 | `0x50383718` CBufSeg helper | `CBitMapAllocator::Alloc` | `0x50381b84` |
+| `0x503b3efc` | 474 | `0x503a2980` refcounted buffer release | `CBitMapAllocator::AllocAt(pos,count)` | `0x50382418` |
+
+The wrong `New` returned a zeroed 2-byte array, so `AllocFrom` panicked
+E32USER-CBase 80; the wrong `AllocFrom` then hit a CBufSeg panic 14.  The
+real implementations are identifiable from their object layout
+(CBase vtable +0, `iAvail` +4, `iSize` +8, `iLength` +0xc, `iMap` +0x10).
+
+**5. B7e must follow the real DProcess.**  The kernel replaces the provisional
+thread→process pointer with a real `DProcess` it allocates from the harness
+heap; that process starts with `+0x38` (the `CObjectIx`) null, so
+`0x50318410` eventually calls `CObjectIx::At` with `this = 0`.  The harness
+now follows the live thread's process field (third write-watch slot), attaches
+`B7E_OBJIDX` to the real DProcess, restores the last live thread when the
+scheduler transiently clears `[0x800017d4]`, and supplies a thread-local
+object at `[thread+0x5c]` whose vtable `+0x24` returns success.  The debug
+`NK_WRITE_WATCH` hook now runs **after** the store, so a hook can replace the
+value the guest just wrote.
+
+**6. WD2 CTSI DMA hand-off.**  `0x5031380c` calls a HAL routine through
+EUser index 970 (`0x503a14ec`); the E32-entry boot has no mask-ROM HAL state,
+so it returned an error and `0x50310b30` panicked **KERN-WD2 24, "Invalid
+CTSI DMA"**.  `config/imports-wd2-6600.txt` maps that slot to `zero` (success)
+as an explicit stand-in.
+
+**7. Result and the next frontier.**  The run now reaches **139,784
+instructions, 0 undefined, 0 unbound IAT, 0 recoveries, 15 call fixups**,
+passes the 6 MiB RAM bank table, page bitmap, page tables and WD2 CTSI DMA
+init, and stops at `0x503994e8` with **USER-EXEC 3**:
+
+```
+insns=139784 (ARM 139779 / Thumb 0), undefined=0, call fixups=15,
+unbound IAT=0, recoveries=0
+mmio: 4106 reads, 7706 writes
+stop: self-branch (panic halt) at 0x50312b88
+[watch] pc=0x503994e8 ... r1=0x3
+```
+
+`0x503994b0` formats `"USER-EXEC"` and raises code 3 when
+`0x50399504` returns zero: the current thread has no trap/exception handler.
+The direct E32 entry skipped the scheduler's initial trap state.  The next
+task is therefore the **initial thread's trap/exception state**, not another
+import, layout or page-table fix.
+
+```
+tools/test_round23.sh
+
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-wd2-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x503994e8 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 ```

@@ -15,7 +15,7 @@
 | Kernel | 链接地址 `0x50310000`，入口 `0x50310054`（**ARM**，`push {r4,r5,r6,lr}` / `0xe92d4070`）；page-header-free stream 中 header `0x31004c`、text `0x3100b0`、text_size `0x28ac0` |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像默认 **725 个 image / 1,847 个 section**（无重叠），`--place-rodata` 为 **726 / 2,335**（含 RTC PDD 的 header-less block）；放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole，并可对已绑定 slot 做 ABI rebind（round 21，`config/imports-b7e-6600.txt`）；`NK_B7E` 安装初始 thread→process→CObjectIx 图并 watch `[0x800017d4]`（round 20/21）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 在真实 `RHeap::Alloc` 入口提供 bump heap；`NK_WATCH_MEM=rN:len` 在 watch 命中时 dump guest 内存；`NK_EXT_STUB=1` 给无 export 的嵌套 extension 安装 export 1；`NK_HLE_ZERO2` 清零 64-bit time 输出；`NK_POKE`/`NK_PATCH` 做 bring-up 探测 |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel **super page `0x40000000`**（round 23 修正；`NK_SUPERPAGE=1` 写入 `iTotalRamSize`/`iRamBootData` 与 6 MiB bank 表，`TMachineConfig` 在 `+0x800`；旧 `0x7ff00000..0x80000000` 窗口保留为异常栈控制）、high vectors `0xffff0000`、MMIO bus；扁平镜像默认 **725 个 image / 1,847 个 section**（无重叠），`--place-rodata` 为 **726 / 2,335**（含 RTC PDD 的 header-less block）；放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole，并可对已绑定 slot 做 ABI rebind（round 21，`config/imports-b7e-6600.txt`；round 23 全量 map 为 `config/imports-wd2-6600.txt`，11 个 override）；`NK_B7E` 安装初始 thread→process→CObjectIx 图、watch `[0x800017d4]`，并跟随真实 DProcess 与 `[thread+0x5c]`（round 20/21/23）；`NK_WRITE_WATCH`/`NK_WRITE_WATCH_MAX` 在 store 后记录写入 PC（依赖写 watch 的 hook 可覆盖刚写入的值）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 在真实 `RHeap::Alloc` 入口提供 bump heap；`NK_WATCH_MEM=rN:len` 在 watch 命中时 dump guest 内存；`NK_EXT_STUB=1` 给无 export 的嵌套 extension 安装 export 1；`NK_HLE_ZERO2` 清零 64-bit time 输出；`NK_POKE`/`NK_PATCH` 做 bring-up 探测 |
 | 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP`/PeaK 容器（record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`）已由 `kaep.py unpack` 导出；`install` 在 linked `0x80` 写可执行 handoff，loader 可进入 kernel `0x50310054`；mask ROM 的 record codec 仍未解出（B6a2d2b） |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）、**EKA1 executive call gate**（`NK_SWI_DIRECT`，round 18）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
@@ -80,6 +80,7 @@
 | M29 | **第 20 轮：MUL/MLA 目标寄存器修正；B7e 重新定性为 CObjectIx / 初始 process** | (1) **解释器 MUL/MLA bug**：`nokia_interp.c` 把 `Rd` 取成 bits 15-12，而 ARM 的 `Rd` 是 **bits 19-16**（bits 15-12 只是 MLA 的累加寄存器）。结果每条普通 `mul rd,rm,rs` 都写 **r0**，真正的目标不变；对象访问器（`0x50380270`）里的 `mul r2,r3,r2` 因此清掉 r0（结果指针）。修正为写 `c->r[rn]`，MLA 从 `c->r[rd]` 累加；`interp_selftest` 新增 `mul r2,r0,r1` / `mla` / 链式 `mul` 回归，断言 r0 不再被改写。 (2) **round 19 的 “RHeap::Alloc / null heap” 定性是错的**：`0x50380270` 不是堆分配器，而是**对象数组访问器**（`[this+0x18]` = array、`[this+0x14]` = element size、`[this]` = base）；调用者 `0x50318410` 是 handle→object 路径，读取 `[thread+0x18] -> [process+0x38]`。这与 SDK EUser ordinal 109 的 **`CObjectIx::At`** 一致。真正缺的是**初始 process 及其 object index**，不是 heap。 (3) **`NK_B7E` bring-up**：harness 新增单字写 watch（`nk_dbg_watch_write`，在 `nk_w32` 快路径触发），在 kernel 发布 current-thread 时安装 thread → process → `CObjectIx` → array 图；array 的 element fetch 返回 live current thread，vtable 用 `mov r0,#0; bx lr` 占位；另有一个 guest bump allocator。kernel 先后发布 `0x802ffd00` 和 `0x80001860`，都得到该图。 (4) **结果**：`NK_B7E=1` 运行 **5,575,900 条 ARM 指令、0 undefined、0 call fixups、0 recoveries**，越过 round-19 的 8,512 条 stop；新 frontier 是第二个 thread `0x80001860` 的栈下穿（`sp=0`、`pc=0`）。 (5) **低物理别名修正**：pre-MMU 的 `0x00000000` alias 现在跟随 `NK_RAM_EXTRA` 的大小（原先固定 3 MiB，6 MiB boot profile 会读到 alias 外）。验收：`tools/test_b7e.sh`；`tools/test_imports.sh` 的 import/ROMFS 断言保持通过 |
 | M30 | **第 21 轮：EUser import ABI 修正；RTC 驱动 rodata；KERN-NO-SESSION 22** | (1) **四个 kernel EUser import slot 的 ABI 不匹配**：kernel 链接时使用的 EUser `.def` 与本 ROM 的 EUser DLL 顺序不同，导致 panic printer 的 `0x503b391c`（ord 98）拿到 array accessor 而不是 `TDesC16::AtC`；panic init 的 `0x503b4d1c`（ord 1378）拿到 3-arg `TPtr16` ctor 而不是 2-arg；object-container init 的 `0x503b4b9c`（ord 1282）拿到字符串 copy 而不是 `TBuf16(int)`；locale init 的 `0x503b3b70`（ord 247）拿到 descriptor copy 而不是 `TDes16::Copy(buf,len)`。flat loader 现在对**已绑定** slot 也应用 `NK_IMPORTMAP` override，[`config/imports-b7e-6600.txt`](../config/imports-b7e-6600.txt) 显式 rebind 这 4 个 slot；确认用 map 仍是 `config/imports-6600.txt`（1 个 hole）。 (2) **B7E element fetch 修正**：`CObjectIx` 的 array vtable 必须填一个 **`TDesC8` descriptor**（随后调用 `TDesC8::Ptr` `0x5038891c`），不能只写裸指针；handle 路径还要返回带 vtable 的 harness CObject（`B7E_THREAD`），不能返回 live scheduler stack block。 (3) **RTC PDD rodata**：RTC 物理驱动 uid3 `0x100000d8`（header `0x33e340`，code `0x5033e2f4`，rodata `0x279c` @ stream `0x33ee40`）的 vtable/字符串在 `.text` 后的 header-less block。`romimage.py --place-rodata` 把 driver image 的 block 放到 `code+text_size`（仅在不越过下一个 packed header 时），RTC vtable `0x503413e8` 的 `+0x18` 现在是 `0x5033ef98`。默认 build 仍 725 image / 1,847 section；`--place-rodata` 为 726 / 2,335。 (4) **分配器/HAL stand-in**：RTC 构造函数用 `User::AllocZ -> RHeap::Alloc`（真实入口 `0x5038e2ec`）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 从 harness bump heap 返回清零块。HAL 全局 `[0x800003ac]` 由 `0x80003c00` 的 vtable 占位，`+0x108` 按 `r1` 返回 0/1。 (5) **新 frontier**：RTC 构造完成，kernel 在加载 **Econs.dll**（uid3 `0x100039e7`，code `0x5079d244`）时要求 file-server session，panic **KERN-NO-SESSION 22** 并在 `0x50312b88` halt。运行 **8,655 条、0 undefined、0 call fixups、0 unbound IAT、0 recoveries**。这是 ROMFS/file-server 任务，不是 import/layout/stack 问题；round 20 的 5,575,900 条实际是 panic printer 在坏 import/descriptor 上循环。新增 `NK_WATCH_MEM=rN:len`。验收：`tools/test_b7e.sh` |
 | M31 | **第 22 轮：RTC 扩展是嵌套 E32Image；分配器 ABI、HAL channel 与 27,470 条 boot** | (1) **“RTC rodata block” 是第二个 E32Image**：uid2 `0x100058d8`、text `0x5033ee14..0x50341414`（`0x2600`）、data `0x50341414`、export_count **0**。kernel 的 extension loader 先调用 image entry `0x5033ee14`（driver object 构造），随后通过 `[hdr+0x40]` 调 **export ordinal 1**；export_dir 为 0 时直接跳到 0。`NK_EXT_STUB=1` 在 high vector 安装一个单入口 export stub，并返回 HAL-like object 供 kernel 写入 `[0x800003ac]`。 (2) **RTC 驱动 `new` 的 ABI 不匹配**：`0x5033efa8`/`0x5033eff0` 以 `r0=0x38`/`8` 调用 EUser export index **1504**；该 ROM 的 export table 在该 index 是 **`RTest::operator()`**（引用 `": FAIL : ..."`/`"Checkpoint-fail"`），不是 `operator new`。driver 和 EUser 是用不同 `.def` revision 链接的。RTest 路径调用 `Console::NewL` → `RLibrary::Load("econs")` → `svc 0x76`，在没有 session 时 panic KERN-NO-SESSION。round 21 的 “file-server session” 因此是 ABI mismatch 的**症状**。`config/callmap-rtc-6600.txt` 用 `NK_HLE_ALLOC` 服务这两个 `new`。 (3) **HAL channel 必须是对象**：B7e HAL stub 旧版对 `r1=0` 返回整数 1；RTC driver 把它存到 `[this+8]`，随后 `ldr r3,[r0]; ldr pc,[r3,#0x18]` 解引用，跳到 0。现在返回 `0x80003a40`（vtable `0x80003c00`）。 (4) **系统时间/格式化路径**：`0x5033f040` 调 kernel 的 64-bit time helper，后者经 EUser slot `0x503b4d1c` 格式化；该 slot 在 round 21 被 rebind 成 2-arg `TPtr16` ctor 以修 panic printer，两个调用点需要不同 ABI。`NK_HLE_ZERO2=0xfffffff9` 直接把 64-bit 输出清零。 (5) **结果**：RTC 扩展完整初始化，kernel 进入 extension 之后的 boot init `0x50310fa4`；运行 **27,470 条、0 undefined、0 unbound IAT、0 recoveries**。新 frontier 是 `0x5031f3a8` 检查 kernel `.bss` 的 boot/timer descriptor `[0x80000b5c] == 0xff`（否则 panic PLAT 21）；调用点先构造 `"IrqTimer0"` descriptor（字面量 `0x50337200`），所以这是 kernel 的 timer/DFC 初始化，不是通用 HAL 表。直接跑 E32 entry 跳过了 mask ROM/kernel startup 对该结构的初始化。验收：`tools/test_rtc.sh` |
+| M32 | **第 23 轮：PLAT 21 是 TDesC8 ABI；超页模型、RAM 位图、页表与 WD2 CTSI DMA；139,784 条** | (1) **PLAT 21 不是缺失的 boot descriptor**：`0x50311508` 先构造 `0x80000b5c` 的 timer 对象（state `0xff`），随后用 kernel import slot `0x503b4d34` 初始化 **8 字节** `TDesC8` 名字数组（`0x80000b54, b4c, …`）。该 slot 在本 ROM 指向 idx 1384 的 **12 字节**默认构造 `0x5038a234`，其 `str r1,[r0,#8]` 正好把 timer 的 state 清成 0，后续 `"IrqTimer0"` start 于是 panic PLAT 21。把 slot rebind 到 `TDesC8(const char*)` `0x50388984` 后 timer 正常启动。 (2) **第二个 ABI**：timer 名字查表 `0x50310d5c` 调 slot `0x503b3ac4`（idx 204），本 ROM 是 `DObject::Close` `0x5039d870`，把 descriptor 长度 `0x1000000d` 当 handle 并 panic KERN-EXEC。rebind 到 `TDesC8::Compare` 的 EABI 入口 **`0x50388e30`**（不是 body `0x50388e34`；后者会 `bx ip` 到 stale slot 地址）。 (3) **超页在 `0x40000000`，不是 0x7ff00000**：kernel 的 `TheSuperPage` 是 `0x40000000`（`iTotalRamSize` +0x10、`iRamBootData` +0x18），`TMachineConfig` 在 `+0x800`。`NK_SUPERPAGE=1` 映射该 64 KiB 页并写入 6 MiB RAM bank 表（`4 MiB + 2 MiB`，`SRamBank{base,size}`）；RAM allocator 从此能建立页位图。 (4) **CBitMapAllocator ABI**：slot `0x503b433c`（idx 746）是 2 字节数组 allocator `0x50394b60`，不是 `New`；slot `0x503b3980`（idx 123）是 CBufSeg helper `0x50383718`，不是 `Alloc`；slot `0x503b3efc`（idx 474）是引用计数 buffer release `0x503a2980`，不是 `AllocAt(pos,count)`。分别 rebind 到 **`0x50381b28` / `0x50381b84` / `0x50382418`**。 (5) **B7e 跟随真实 DProcess**：kernel 在启动中把 thread→process 换成自己分配的 DProcess，其 `+0x38` 为 0；harness 现在 watch thread 的 process 字段，给真实 DProcess 挂上 `CObjectIx`，并在 current-thread 被瞬时清零时恢复最后一个 live thread；`[thread+0x5c]` 也提供带 vtable 的 thread-local 对象（`+0x24` 返回 1）。 (6) **WD2 CTSI DMA**：`0x5031380c` 的 HAL 调用在 E32-entry boot 中失败并 panic KERN-WD2 24；`config/imports-wd2-6600.txt` 用 `zero` 提供服务成功的 stand-in。 (7) **结果**：**139,784 条 ARM、0 undefined、0 unbound IAT、0 recoveries**，穿过页表与 WD2 CTSI DMA init，最后在 `0x503994e8` 以 **USER-EXEC 3** 停下：当前 thread 没有 trap/exception handler，E32 entry 跳过了 scheduler 的初始 trap state。新 frontier 是 thread 的 exception/trap 状态，不是 import/layout/页表。验收：`tools/test_round23.sh`；旧 `test_b7e/test_rtc/test_imports/test_interp` 保持通过 |
 
 ### 可复现命令
 
@@ -241,6 +242,19 @@ NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_rtc.sh
+
+# round 23: super page at 0x40000000, RAM bank list, CBitMapAllocator ABI,
+# page tables, WD2 CTSI DMA; 139,784 insns, USER-EXEC 3 trap frontier
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-wd2-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x503994e8 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_round23.sh
 ```
 
 ---
@@ -471,6 +485,81 @@ extension 之后的 boot init。
    `mmio 42 reads / 22 writes`。验收：`tools/test_rtc.sh`；旧的
    `tools/test_b7e.sh`（8,655 / KERN-NO-SESSION 22）保持通过，作为
    历史基线。
+
+#### B11 第 23 轮：PLAT 21 是 TDesC8 ABI；超页、RAM 位图、页表与 WD2 CTSI DMA
+
+第 22 轮的结论是“直接 E32 entry 跳过了填充 `0x80000b5c` 的 boot 初始化”。
+第 23 轮从 **static constructor 的实际布局**重新检查，发现门槛是另一个
+EUser ABI 错误，并把 boot 推进到 **139,784 条**。
+
+1. **12 字节构造函数覆盖 8 字节名字对象**。`0x50311508`（entry 的 static
+   ctor 表第二项）先调用 `0x50310dbc(0x80000b5c)` 构造 timer：`0x5031f35c`
+   写入 `[obj]=0xff`、`[obj+0x10]=0x50338340`。随后它用 kernel import
+   slot `0x503b4d34`（本 ROM export idx 1384）初始化
+   `0x80000b54, b4c, b44, …` 的 **8 字节** `TDesC8` 名字（`"FiqTimer0"` 等）。
+   该 slot 在本 ROM 指向 **12 字节**默认构造 `0x5038a234`：
+   `str r1,[r0]; str r1,[r0,#4]; str r1,[r0,#8]`。对 `r0=0x80000b54`
+   的第三次 store 正好写到 `0x80000b5c`，把 timer state 清成 0；
+   `0x5031f3a8` 的 `cmp [0x80000b5c],#0xff` 于是 panic PLAT 21。
+   rebind 到 `TDesC8(const char*)` **`0x50388984`** 后 timer 正常启动。
+   `NK_PATCH=0x5031f3b8:0xe3530000` 的旧实验只是绕过症状。
+2. **名字查表用了 `DObject::Close`**。timer start 进入
+   `0x5031ba2c -> 0x50311104 -> 0x50310d5c`，后者遍历
+   `[0x80000020]` 的名字表并用 slot `0x503b3ac4`（idx 204）比较。
+   本 ROM 的 idx 204 是 `DObject::Close` `0x5039d870`，它把栈上 descriptor
+   的 length word `0x1000000d` 当 handle 调 `svc 0x6b`，panic KERN-EXEC。
+   rebind 到 `TDesC8::Compare` 的 **EABI 入口 `0x50388e30`**。注意
+   `0x50388e34` 是 compare body，直接 bind 会保留 stale `ip=slot`，
+   `bx ip` 跳回 slot 地址形成循环；`0x50388e30` 先 `ldr ip,=memcompare`。
+3. **超页在 `0x40000000`**。kernel 的 `TheSuperPage` 访问器
+   （`0x5032211c` 返回 `0x40000800` 的 MachineConfig）和
+   `0x5031c0ac` 的 `mov r3,#0x40000000; ldr r6,[r3,#0x18]` 表明：
+   super page base `0x40000000`，`iTotalRamSize` 在 `+0x10`，
+   `iRamBootData` 在 `+0x18`，`TMachineConfig` 在 `+0x800`。旧 harness
+   映射的是 `0x7ff00000..0x80000000`，所以这些读全部落到 MMIO 返回 0，
+   RAM allocator 看不到任何 bank。`NK_SUPERPAGE=1` 映射该 64 KiB 页并写入
+   6 MiB 的 `SRamBank{base,size}` 表（`0x000000..0x400000` +
+   `0x400000..0x600000`，最小 bank 必须是 2 的幂），同时保留
+   MachineConfig 区域供 kernel 自己写。日志：
+   `super page 0x40000000: total RAM 0x600000, 2 banks ... {0,0x400000} {0x400000,0x200000}`。
+4. **CBitMapAllocator 的 ABI 也不同**。RAM allocator 用 bitmap 管理页和
+   页表；本 ROM 的三个 kernel import slot 都指向语义不同的 EUser 函数：
+   - `0x503b433c`（idx 746）→ `0x50394b60`（2 字节数组 allocator，分配
+     `2*n+4` 并只清首字），kernel 期望 `CBitMapAllocator::New`；正确实现
+    是 **`0x50381b28`**（`((n+31)>>5)`、`0x14 + 4*sz`、构造
+     `iAvail/iSize/iLength/iMap`）。
+   - `0x503b3980`（idx 123）→ `0x50383718`（CBufSeg helper），kernel
+     期望 `CBitMapAllocator::Alloc()`；正确实现是 **`0x50381b84`**。
+   - `0x503b3efc`（idx 474）→ `0x503a2980`（引用计数 buffer release），
+     kernel 期望 `CBitMapAllocator::AllocAt(pos,count)`；正确实现是
+     **`0x50382418`**。
+   对应 panic 依次是 E32USER-CBase 80（AllocFrom offset out of range）和
+   CBufSeg 14；修正后页表分配正常推进。
+5. **B7e 需要跟随 kernel 自己创建的 DProcess**。kernel 在 boot 中把
+   thread→process 从 `B7E_PROCESS` 换成自己分配的真实 DProcess，其
+   `+0x38`（CObjectIx）为 0；`0x50318410` 于是在 handle 路径把 0 传给
+   `CObjectIx::At`。harness 现在：
+   - 在每次 `[0x800017d4]` 发布时也 watch `thread+0x18`（第三个写 watch
+     slot），给真实 DProcess 挂 `B7E_OBJIDX`；
+   - current-thread 被瞬时清零时恢复最后一个 live thread（直接 E32 entry
+     没有 scheduler startup）；
+   - 给 `[thread+0x5c]` 提供带 vtable 的 thread-local 对象，`+0x24` 返回 1。
+   同时 `nk_w32` 的 debug hook 改为**在 store 之后**调用，hook 才能覆盖
+   guest 刚写入的值（`NK_WRITE_WATCH` 的语义也据此更新）。
+6. **WD2 CTSI DMA 的 HAL stand-in**。`0x5031380c` 在
+   `0x503126d0` 通过 EUser idx 970（`0x503a14ec`）调用 HAL 时间/DMA
+   服务；直接 E32 entry 没有 mask-ROM 的 HAL 状态，返回非零后
+   `0x50310b30` panic **KERN-WD2 24 "Invalid CTSI DMA"**。
+   `config/imports-wd2-6600.txt` 用 `zero` 让该调用返回 0（成功）。
+7. **结果与新 frontier**：**139,784 条 ARM、0 undefined、0 unbound IAT、
+   0 recoveries、15 call fixups**；穿过 6 MiB RAM bank 表、页位图、页表
+   和 WD2 CTSI DMA init，在 `0x503994e8` 以 **USER-EXEC 3** 停下。
+   `0x503994b0` 在 `0x50399504` 返回 0 时格式化 `"USER-EXEC"` 并 panic；
+   当前 thread 没有 trap/exception handler。直接 E32 entry 跳过了
+   scheduler 的初始 trap 状态，因此下一项是 **initial thread 的
+   trap/exception state**，不是 import/layout/页表。
+   验收：`tools/test_round23.sh`（super page、11 个 override、139,784 条、
+   USER-EXEC 3）；旧的 `test_b7e/test_rtc/test_imports/test_interp` 保持通过。
 
 #### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
 

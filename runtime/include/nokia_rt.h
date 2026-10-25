@@ -35,15 +35,26 @@ uint8_t* nk_page_ptr(nk_cpu_t* c, uint32_t a);
 uint32_t nk_read_slow(nk_cpu_t* c, uint32_t a, unsigned size);
 void     nk_write_slow(nk_cpu_t* c, uint32_t a, uint32_t v, unsigned size);
 
-/* Bring-up observability: a single guest word can be watched for writes.
- * The boot harness uses this to install the initial thread/process/object-index
- * graph the moment the kernel publishes its current thread (B7e).  The check
- * lives
- * in the inline fast path so it sees every store, not just MMIO. */
+/* Bring-up observability: a guest word can be watched for writes.  The boot
+ * harness uses this to install the initial thread/process/object-index graph
+ * the moment the kernel publishes its current thread (B7e).  The check lives
+ * in the inline fast path so it sees every store, not just MMIO.  Hooks run
+ * *after* the store, so a hook may replace the value the guest just wrote. */
 typedef void (*nk_write_hook_fn)(nk_cpu_t* c, uint32_t addr, uint32_t value);
 extern uint32_t          nk_dbg_write_watch;
 extern nk_write_hook_fn  nk_dbg_write_hook;
 void nk_dbg_watch_write(uint32_t addr, nk_write_hook_fn fn);
+
+/* A second watch is reserved for bring-up diagnostics (NK_WRITE_WATCH), so a
+ * debug run can keep the B7e current-thread hook installed.  The third slot
+ * follows a live thread's process field after the kernel installs a real
+ * DProcess object. */
+extern uint32_t          nk_dbg_write_watch2;
+extern nk_write_hook_fn  nk_dbg_write_hook2;
+void nk_dbg_watch_write2(uint32_t addr, nk_write_hook_fn fn);
+extern uint32_t          nk_dbg_write_watch3;
+extern nk_write_hook_fn  nk_dbg_write_hook3;
+void nk_dbg_watch_write3(uint32_t addr, nk_write_hook_fn fn);
 
 static inline uint32_t nk_r32(nk_cpu_t* c, uint32_t a) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {
@@ -69,16 +80,21 @@ static inline uint8_t nk_r8(nk_cpu_t* c, uint32_t a) {
 static inline void nk_dbg_note_write(nk_cpu_t* c, uint32_t a, uint32_t v) {
     if (a == nk_dbg_write_watch && nk_dbg_write_hook)
         nk_dbg_write_hook(c, a, v);
+    if (a == nk_dbg_write_watch2 && nk_dbg_write_hook2)
+        nk_dbg_write_hook2(c, a, v);
+    if (a == nk_dbg_write_watch3 && nk_dbg_write_hook3)
+        nk_dbg_write_hook3(c, a, v);
 }
 static inline void nk_w32(nk_cpu_t* c, uint32_t a, uint32_t v) {
-    nk_dbg_note_write(c, a, v);
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {
         uint8_t* p = nk_page_ptr(c, a);
         if (p) { p += a & NK_PAGE_MASK;
                  p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8);
-                 p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); return; }
+                 p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24);
+                 nk_dbg_note_write(c, a, v); return; }
     }
     nk_write_slow(c, a, v, 4);
+    nk_dbg_note_write(c, a, v);
 }
 static inline void nk_w16(nk_cpu_t* c, uint32_t a, uint16_t v) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 2) {

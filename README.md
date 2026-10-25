@@ -458,6 +458,38 @@ criteria and phased roadmap live in
   `0x80000b5c` (`[0x80000b5c] == 0xff`, else panic PLAT 21); the direct E32
   entry skipped the mask-ROM/kernel startup that fills it.
   `tools/test_rtc.sh` is the acceptance test.
+- [x] **Round 23: timer names, RAM page bitmap, super page, WD2 CTSI DMA** —
+  the PLAT 21 gate was **another EUser ABI mismatch**, not missing boot state.
+  The kernel's `"IrqTimer0"`/FIQ-name initialiser constructs 8-byte `TDesC8`
+  names at `0x80000b54, b4c, ...`; the ROM's export index 1384 is a **12-byte**
+  default constructor, so it overwrote the timer object's state word at
+  `0x80000b5c` with zero.  Rebinding the slot to `TDesC8(const char*)`
+  (`0x50388984`) lets the timer start cleanly.  The next lookup used
+  `DObject::Close` as `TDesC8::Compare` (descriptor length `0x1000000d` was
+  treated as a handle) and panicked KERN-EXEC; it is rebound to
+  `0x50388e30`.  The kernel's fixed bootstrap page is **`0x40000000`**
+  (`iTotalRamSize` at `+0x10`, `iRamBootData` at `+0x18`,
+  `TMachineConfig` at `+0x800`), not the `0x7ff00000` window the harness
+  used to map.  `NK_SUPERPAGE=1` maps it and publishes a 6 MiB RAM bank list
+  (`4 MiB + 2 MiB`); the RAM allocator then builds its page bitmap.  That
+  exposed two more wrong-ABI slots: a 2-byte array allocator used as
+  `CBitMapAllocator::New`, and a `CBufSeg` helper used as `AllocFrom`; the
+  round-23 map rebinds `New`/`Alloc`/`AllocAt(pos,count)` to the real
+  implementations at `0x50381b28`/`0x50381b84`/`0x50382418`.  The B7e stand-in
+  now follows the kernel's real `DProcess` (not just the first thread) and
+  supplies the live thread's `[thread+0x5c]` object.  With one HAL stand-in
+  for the WD2 CTSI DMA hand-off the run reaches **139,784 instructions,
+  0 undefined, 0 unbound IAT, 0 recoveries**, through page tables and WD2
+  CTSI DMA init, and stops in a deliberate **USER-EXEC 3** because the current
+  thread has no trap/exception handler: the direct E32 entry skipped the
+  scheduler's initial trap state.  That is the new frontier.
+  [`config/imports-wd2-6600.txt`](config/imports-wd2-6600.txt) pins all
+  11 overrides; `tools/test_round23.sh` is the acceptance test.
+- [ ] **Initial thread trap/exception state (round 23)** — the `USER-EXEC 3`
+  stop is the user-side exception path with no handler installed.  The next
+  step is to model the initial thread's trap stack/`TExceptionHandler` (and
+  the scheduler's first request completion), not another import or page-table
+  fix.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -489,7 +521,10 @@ criteria and phased roadmap live in
   banked-register model (`NK_BANKED=1`) and mode stacks remain available but
   are no longer on the critical path to the next boot step.  **Round 22
   reclassifies the ECons stop** (RTest console via the misbound RTC
-  allocator) and advances the run to 27,470 instructions.
+  allocator) and advances the run to 27,470 instructions.  **Round 23 then
+  shows the PLAT 21 gate was a TDesC8 ABI mismatch** and follows the RAM
+  allocator, page tables and WD2 CTSI DMA init to **139,784 instructions**,
+  ending in USER-EXEC 3 (the missing trap/exception state).
 - [ ] **File server for UI/app loads (round 22 reclassification)** — the
   round-21 ECons.dll / **KERN-NO-SESSION 22** stop was the RTC driver's
   misbound `operator new` import entering EUser's `RTest` console path.  With
@@ -757,6 +792,19 @@ NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
 # ... 27,470 instructions, 0 undefined/unbound/recoveries, stop panic PLAT 21
 #     at 0x5031f3a8 (boot descriptor [0x80000b5c] == 0xff is missing)
 tools/test_rtc.sh
+
+# round 23: the 0x40000000 super page, RAM bank list, CBitMapAllocator ABI,
+# page tables and WD2 CTSI DMA; 139,784 instructions, USER-EXEC 3 frontier
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-wd2-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x503994e8 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_round23.sh
 
 # round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
 # code+text_size; the default runtime image now includes it

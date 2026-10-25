@@ -59,11 +59,22 @@
  *                           exception vector table) to 0x0 and 0xffff0000
  *   NK_NO_SUPER_PAGE=1      do not map the 0x7ff00000..0x80000000 kernel
  *                           super-page window (control run)
+ *   NK_SUPERPAGE=1          model the 6600's boot super page at 0x40000000:
+ *                           iTotalRamSize, iRamBootData and an SRamBank list
+ *                           (base+size pairs, largest power-of-two blocks)
+ *                           plus the machine-config area at +0x800.  The mask
+ *                           ROM normally fills this before the E32 entry.
+ *   NK_SUPERPAGE_BASE=0x... override the super page address (default 0x40000000)
+ *   NK_SUPERPAGE_TOTAL=0x... override iTotalRamSize (default: mapped RAM size)
  *   NK_ENTRY=0x...          override the entry address (e.g. 0x50000000 to
  *                           run the ROM's exception-vector code)
  *   NK_WATCH=0x...          dump registers + the call ring when PC hits this
  *   NK_WATCH_HITS=n         how many times to report (default 1)
  *   NK_WATCH_LOG=n          how many recent calls to print (default 16)
+ *   NK_WATCH_MEM=rN[:len]   at a watch hit, dump len bytes at rN (default 0x40)
+ *   NK_WRITE_WATCH=0x...    log stores to this guest word with the writing PC
+ *                           (second watch slot; coexists with the B7e hook)
+ *   NK_WRITE_WATCH_MAX=n    stop reporting after n stores (default 8)
  *   NK_SPIN=1               enable the tight-loop watchdog
  *   NK_SPIN_MAX=n           visits to one PC before it is a spin (default 20000)
  *   NK_CODE_ONLY=0|1        reject a PC outside ROM/low-RAM/high vectors
@@ -178,6 +189,70 @@ static void load_callmap(nk_interp_t* ip, const char* path) {
     printf("callmap %s: %d call-site fixups\n", path, n);
 }
 
+/* The 6600 kernel's fixed bootstrap page is at 0x40000000, with the machine
+ * configuration (TMachineConfig) at +0x800.  EKA1's mask ROM fills the super
+ * page before jumping to the E32 entry: iTotalRamSize and iRamBootData (an
+ * SRamBank {base,size} list).  Jumping straight to the entry leaves the whole
+ * page as unmapped MMIO, so every read returns 0 and the RAM allocator sees
+ * no banks.  This is a model of that bootstrap hand-off, not a firmware
+ * patch.  The bank list is split into power-of-two blocks because the
+ * allocator derives its zone shift from the smallest bank.
+ */
+static void install_super_page(nk_cpu_t* c, uint32_t base, uint32_t total) {
+    if (nk_alloc_ram(c, base, NK_PAGE_SIZE) != 0) return;
+    uint32_t list = base + 0x100;
+    uint32_t off = 0, remain = total, n = 0;
+    uint32_t blocks[32];
+    while (remain && n < 30) {
+        uint32_t chunk = 1u << (31 - (uint32_t)__builtin_clz(remain));
+        if (chunk > remain) chunk = remain;
+        blocks[n++] = chunk;
+        off += chunk;
+        remain -= chunk;
+    }
+    if (n == 1) {                    /* the allocator wants >= 2 banks */
+        blocks[n++] = blocks[0] >> 1;
+        blocks[0] >>= 1;
+    }
+    off = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        nk_w32(c, list + 8 * i, off);
+        nk_w32(c, list + 8 * i + 4, blocks[i]);
+        off += blocks[i];
+    }
+    nk_w32(c, base + 0x10, total);   /* iTotalRamSize (EKA1 7.0s offset) */
+    nk_w32(c, base + 0x18, list);    /* iRamBootData */
+    printf("super page %#010x: total RAM %#x, %u banks at %#010x:",
+           base, total, n, list);
+    off = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        printf(" {%#x,%#x}", off, blocks[i]);
+        off += blocks[i];
+    }
+    printf("\n");
+}
+
+/* NK_WRITE_WATCH: a bring-up store watch that reports the writer.  The B7e
+ * graph owns the first nk_dbg watch slot (current-thread publication), so
+ * this uses the second one.  Frame pointers are not reliable in ARM code; the
+ * PC/LR pair plus r0-r3 is enough to identify the clearing loop. */
+static uint32_t g_ww_addr;
+static long     g_ww_max = 8;
+static long     g_ww_hits;
+
+static void debug_write_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
+    if (g_ww_hits >= g_ww_max) return;
+    if (g_ww_hits == 0)
+        printf("[write-watch] %#010x:\n", addr);
+    printf("[write-watch] pc=%08x lr=%08x sp=%08x store=%08x "
+           "r0=%08x r1=%08x r2=%08x r3=%08x\n",
+           c->r[15], c->r[14], c->r[13], value,
+           c->r[0], c->r[1], c->r[2], c->r[3]);
+    if (++g_ww_hits == g_ww_max)
+        printf("[write-watch] %ld stores seen; suppressing the rest\n",
+               g_ww_hits);
+}
+
 /* Some ROM extension records (rtc.dll is the first one) carry a nested
  * E32 image whose header has no export table.  The EKA1 extension loader
  * calls export ordinal 1 unconditionally after the image entry
@@ -257,26 +332,62 @@ static void install_extension_stub(nk_cpu_t* c, nk_interp_t* ip) {
 #define B7E_HAL         0x80003a00u   /* stand-in kernel HAL object         */
 #define B7E_HAL_CHAN    0x80003a40u   /* object returned by HAL map/channel */
 #define B7E_VT_HAL      0x80003c00u   /* its vtable (>= 0x108 bytes)        */
+#define B7E_TLS         0x80003f00u   /* thread-local object [thread+0x5c]  */
+#define B7E_VT_TLS      0x80003e00u
+#define B7E_ONE_STUB    0xffff0500u   /* mov r0,#1; bx lr                  */
 #define B7E_VT_ENTRIES  64
 
 static int      b7e_enabled;
 static int      b7e_installs;
 static uint32_t b7e_heap_cur, b7e_heap_end;
+static uint32_t b7e_current_thread;
 
 static void b7e_fill_vtable(nk_cpu_t* c, uint32_t vt, uint32_t stub) {
     for (int i = 0; i < B7E_VT_ENTRIES; i++)
         nk_w32(c, vt + 4u * (uint32_t)i, stub);
 }
 
+/* The kernel later replaces the provisional thread->process pointer with a
+ * real DProcess allocated from the bring-up heap.  That process starts with a
+ * null +0x38 (its CObjectIx), so every handle lookup would call
+ * CObjectIx::At with this=0.  Follow the thread's process field and attach
+ * the stand-in object index to whatever DProcess the kernel installs. */
+static void b7e_process_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
+    if (!b7e_enabled) return;
+    if (value < NK_RAM_BASE || value >= 0x80400000u) {
+        /* The kernel clears the process field while tearing down a thread.
+         * Keep the live thread attached: the direct E32-entry boot has no
+         * scheduler startup to recreate the graph. */
+        nk_w32(c, addr, B7E_PROCESS);
+        return;
+    }
+    nk_w32(c, value + 0x38, B7E_OBJIDX);
+    if (b7e_installs <= 8)
+        printf("B7e: process %#010x -> object index %#010x\n",
+               value, B7E_OBJIDX);
+}
+
 static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     (void)addr;
-    if (!b7e_enabled || value < NK_RAM_BASE || value >= 0x80400000u)
+    if (!b7e_enabled) return;
+    if (value < NK_RAM_BASE || value >= 0x80400000u) {
+        /* A scheduler transient clears the current-thread slot before the
+         * next switch.  The E32-entry boot has no real scheduler startup, so
+         * a handle lookup in that window would dereference a null process.
+         * Keep the last live thread published. */
+        if (b7e_current_thread)
+            nk_w32(c, 0x800017d4u, b7e_current_thread);
         return;
+    }
     uint32_t t = value & ~3u;
+    b7e_current_thread = t;
     /* Only the kernel's scheduler publishes current-thread pointers here.
      * Re-install on every switch so the graph survives a hand-off. */
     nk_w32(c, t + 0x18, B7E_PROCESS);       /* thread -> process       */
+    nk_w32(c, t + 0x5c, B7E_TLS);           /* thread-local vtable obj */
     nk_w32(c, t + 0x64, B7E_OBJIDX);        /* 0x40000000 branch       */
+    /* Watch the process field for the kernel's later, real DProcess. */
+    nk_dbg_watch_write3(t + 0x18, b7e_process_hook);
     /* The handle path treats the result as a CObject: it needs a vtable at
      * [0].  Keep the harness object rather than the live scheduler block. */
     nk_w32(c, B7E_CUR_OBJ, B7E_THREAD);
@@ -312,7 +423,10 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_w32(c, B7E_HAL_STUB + 0x08, 0x13a00000u); /* movne r0,#0 */
     nk_w32(c, B7E_HAL_STUB + 0x0c, 0xe12fff1eu); /* bx lr */
     nk_w32(c, B7E_HAL_STUB + 0x14, B7E_HAL_CHAN);
+    nk_w32(c, B7E_ONE_STUB, 0xe3a00001u);        /* mov r0,#1 */
+    nk_w32(c, B7E_ONE_STUB + 4, 0xe12fff1eu);    /* bx lr     */
     nk_code_range_add(ip, B7E_ZERO_STUB, B7E_ZERO_STUB + 8);
+    nk_code_range_add(ip, B7E_ONE_STUB, B7E_ONE_STUB + 8);
     nk_code_range_add(ip, B7E_HAL_STUB, B7E_HAL_STUB + 0x18);
     nk_code_range_add(ip, B7E_ALLOC_STUB, B7E_ALLOC_STUB + 0x20);
     nk_code_range_add(ip, B7E_AT_STUB, B7E_AT_STUB + 0x20);
@@ -386,6 +500,13 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     /* The channel handle call (r1=0) must return a dereferenceable object. */
     nk_w32(c, B7E_HAL_CHAN, B7E_VT_HAL);
     nk_w32(c, 0x800003acu, B7E_HAL);          /* Kern::TheKernel/HAL global */
+
+    /* The thread object at [thread+0x5c] is dereferenced through vtable+0x24
+     * when the scheduler completes a request on the current thread.  A zero
+     * return is treated as failure and raises USER-EXEC 3, so report success. */
+    b7e_fill_vtable(c, B7E_VT_TLS, B7E_ZERO_STUB);
+    nk_w32(c, B7E_VT_TLS + 0x24, B7E_ONE_STUB);
+    nk_w32(c, B7E_TLS, B7E_VT_TLS);
 
     printf("B7e boot state: thread %#010x, process %#010x, objidx %#010x, "
            "bump %#010x..%#010x\n",
@@ -865,6 +986,12 @@ int main(int argc, char** argv) {
     if (hle_heap < 0x80400000u) hle_heap = 0x80400000u;
     if (nk_alloc_ram(&cpu, hle_heap, 0x400000u) != 0) return 1;
 
+    if (env_ulong("NK_SUPERPAGE", 0)) {
+        uint32_t sb = (uint32_t)env_ulong("NK_SUPERPAGE_BASE", 0x40000000u);
+        uint32_t total = (uint32_t)env_ulong("NK_SUPERPAGE_TOTAL", ram_size);
+        install_super_page(&cpu, sb, total);
+    }
+
     nk_interp_t ip;
     nk_interp_init(&ip);
 
@@ -1181,6 +1308,13 @@ int main(int argc, char** argv) {
                 ip.watch_mem_len = len;
             }
         }
+    }
+    g_ww_addr = (uint32_t)env_ulong("NK_WRITE_WATCH", 0);
+    g_ww_max = (long)env_ulong("NK_WRITE_WATCH_MAX", 8);
+    if (g_ww_addr) {
+        if (g_ww_max <= 0) g_ww_max = 0;
+        nk_dbg_watch_write2(g_ww_addr, debug_write_hook);
+        printf("write watch: %#010x (max %ld stores)\n", g_ww_addr, g_ww_max);
     }
     ip.stop_selfb = (int)env_ulong("NK_STOP_SELFB", 1);
     ip.swi_direct = (int)env_ulong("NK_SWI_DIRECT", 0);

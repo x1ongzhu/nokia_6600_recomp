@@ -1,0 +1,68 @@
+# imports-wd2-6600.txt - round-23 bring-up rebinds for the WD2 boot frontier
+#
+# Syntax: <slot-va> <target-va|zero>
+#
+# A flat runtime image already binds every real export: the slot *is* the
+# exporting image's export-table entry.  The 6600's kernel, however, was linked
+# against EUser/SDK .def revisions that do not match the EUser DLL in this ROM.
+# These slots therefore resolve to functions with the wrong ABI.  Every entry
+# below was identified from the call site's object layout, not guessed:
+#
+#   0x503b4d34  EUser idx 1384 -> 0x5038a234 (12-byte zeroing ctor)
+#               caller: the FIQ/timer name initialiser 0x50311508, which
+#               constructs 8-byte TDesC8 names at 0x80000b54, b4c, ...  The
+#               12-byte store clobbered the timer object's state word at
+#               0x80000b5c; the later "IrqTimer0" start then panicked PLAT 21.
+#               want: TDesC8(const char*)      -> 0x50388984
+#
+#   0x503b3ac4  EUser idx  204 -> 0x5039d870 (DObject::Close)
+#               caller: the timer-name lookup 0x50310d5c compares the names in
+#               0x80000b54.. against a stack descriptor.  Close treated the
+#               descriptor length 0x1000000d as a handle and panicked
+#               KERN-EXEC.  want: TDesC8::Compare         -> 0x50388e30
+#               (0x50388e30 is the EABI entry that loads the memcompare helper;
+#                0x50388e34 is the body and would branch through stale ip.)
+#
+#   0x503b433c  EUser idx  746 -> 0x50394b60 (2-byte array allocator)
+#               caller: the RAM/page allocator 0x5031c0ac.  It expects
+#               CBitMapAllocator::New(pages); the returned array had no
+#               iAvail/iSize/iLength fields and AllocFrom panicked
+#               E32USER-CBase 80.
+#               want: CBitMapAllocator::New             -> 0x50381b28
+#
+#   0x503b3980  EUser idx  123 -> 0x50383718 (CBufSeg helper)
+#               caller: the page-table allocator 0x5031702c/0x503166c8.  It
+#               calls Alloc() on the bitmap and uses the returned page-table
+#               index.  want: CBitMapAllocator::Alloc          -> 0x50381b84
+#
+#   0x503b3efc  EUser idx  474 -> 0x503a2980 (refcounted buffer release)
+#               caller: page-table setup marks a range (pos,count) in the same
+#               bitmap.  want: CBitMapAllocator::AllocAt(pos,count)
+#                                                       -> 0x50382418
+#
+#   0x503b46bc  EUser idx  970 -> 0x503a14ec (UserHal wrapper)
+#               caller: WD2 CTSI DMA init 0x5031380c.  The HAL operation fails
+#               in the E32-entry boot (no boot-time HAL state), and the kernel
+#               panics KERN-WD2 24 "Invalid CTSI DMA".  Returning success is an
+#               explicit stand-in for the mask-ROM HAL hand-off.
+#
+# The four round-21 EUser ABI rebinds and the ELocl export hole are repeated
+# here so a single NK_IMPORTMAP reproduces the whole round-23 boot.
+#
+# These are explicit bring-up rebinds, not recovered ROM state.
+
+0x5037d0e8 zero
+
+# round 21: panic printer / object container / locale ABI
+0x503b391c 0x50388474
+0x503b4d1c 0x503880ec
+0x503b4b9c 0x50388254
+0x503b3b70 0x503883c0
+
+# round 23: timer names, RAM page bitmap, page-table allocator, WD2 HAL
+0x503b4d34 0x50388984
+0x503b3ac4 0x50388e30
+0x503b433c 0x50381b28
+0x503b3980 0x50381b84
+0x503b3efc 0x50382418
+0x503b46bc zero
