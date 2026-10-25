@@ -382,6 +382,26 @@ criteria and phased roadmap live in
   `RHeap::Alloc` with a null current-thread heap (the kernel overwrote
   `[0x800017d4]`).  `tools/test_imports.sh` pins the import map, the ROM-header
   boot entries and the new frontier.
+- [x] **Round 20: MUL destination bug + the real B7e state** — two
+  corrections.  First, the ARM interpreter decoded MUL/MLA's destination from
+  bits 15-12, but `Rd` is bits 19-16 (bits 15-12 are only MLA's accumulator).
+  Every plain `mul rd, rm, rs` therefore wrote **r0** and left the real
+  destination unchanged; the object-index accessor's size multiply lost its
+  result pointer this way.  The fix is in [`nokia_interp.c`](runtime/src/nokia_interp.c)
+  with an `interp_selftest` regression (`mul r2,r0,r1` must leave r0 alone).
+  Second, the round-19 "EUser `RHeap::Alloc` with a null heap" diagnosis was
+  wrong: the accessor at `0x50380270` indexes an object array
+  (`[this+0x18]` array, `[this+0x14]` element size, `[this]` base), and its
+  caller `0x50318410` is the handle-to-object path
+  `[thread+0x18] -> [process+0x38]`.  That is **`CObjectIx::At`**, so the
+  missing boot state is the initial **process and its object index**, not a
+  heap.  `NK_B7E=1` installs thread → process → `CObjectIx` → element fetch and
+  follows every current-thread update with a new guest write watch.  The run
+  leaves the old 8.5k stop behind: **5,575,900 instructions, 0 undefined,
+  0 call fixups, 0 recoveries**, including the kernel's second thread
+  `0x80001860`; the next frontier is that thread's stack underflow (`pc=0`).
+  The pre-MMU low alias now also tracks `NK_RAM_EXTRA`.
+  `tools/test_b7e.sh` is the acceptance test.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -405,14 +425,16 @@ criteria and phased roadmap live in
   earlier (7,540 instructions) at a real missing state: `[0x800017d4]` (the
   scheduler/current-thread pointer) is zero.  Round 19 fixed the ROMFS boot
   table and the import hole, so the same path now runs the real `rtc.dll`
-  extension load and stops at **EUser `RHeap::Alloc` with a null heap** — the
-  kernel's post-return write to `[0x800017d4]` (`0x802ffd00`) replaces the
-  bring-up object.  A banked-register model (`NK_BANKED=1`) and mode stacks are
-  implemented, but the kernel's own stack setup derives its base from boot
-  state we do not have yet.  The next task is a real initial
-  thread/process/heap object (B7e) plus the **banked-register/SPSR exception
-  model** (so `svc`, mode switches and `movs pc,lr` are faithful) — not more
-  stack window.
+  extension load and stops in the handle-to-object path.  Round 20 identifies
+  it as **`CObjectIx::At`**: the missing state is the initial process and its
+  object index, not a heap.  `NK_B7E` supplies that graph and the same path
+  runs **5,575,900 instructions** before the kernel's second thread
+  (`0x80001860`) underflows its stack (`pc=0`).  A banked-register model
+  (`NK_BANKED=1`) and mode stacks are implemented, but the kernel's own stack
+  setup derives its base from boot state we do not have yet.  The next tasks
+  are the initial thread's **stack/object fields** and the
+  **banked-register/SPSR exception model** (so `svc`, mode switches and
+  `movs pc,lr` are faithful) — not more stack window.
 - [ ] **Boot bank board/CPU detection (round 16 stream view)** — after the page
   headers are removed the boot bank is the contiguous stream slice
   `[0xb0, 0x100b0)` and all switch tables measure bias 0.  The **correct**
@@ -641,12 +663,20 @@ NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
   NK_BUDGET=200000 NK_MMIO_N=0 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
-# ... 8,512 instructions, 0 unbound IAT, stop at EUser RHeap::Alloc (null heap)
+# ... 8,512 instructions, 0 unbound IAT, stop in the CObjectIx::At path
 .venv/bin/python recompiler/imports.py verify 6600_mcu.bin
 tools/test_imports.sh
-# add NK_IAT_FAKE=1 for the 8,510-instruction control that reaches the same heap
+# add NK_IAT_FAKE=1 for the 8,510-instruction control that reaches the same stop
 # add NK_BANKED=1 for the banked r13/r14 + SPSR model and per-mode stacks
 tools/test_executive.sh
+
+# round 20: initial thread -> process -> CObjectIx -> array; 5,575,900 insns
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=6000000 NK_B7E=1 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_b7e.sh
 
 # round 15: relocate fragment C, map the kernel sections and reach the handoff
 .venv/bin/python recompiler/bootbank.py build 6600_mcu.bin \

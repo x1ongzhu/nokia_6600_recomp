@@ -200,6 +200,23 @@ int main(void) {
     r = run(&c, 0x800001c0u, 1);
     CHECK(r == NK_STOP_RETURN && c.r[0] == 2, "Thumb conditional branch");
 
+    /* ---- ARM MUL/MLA: Rd is bits 19-16, not bits 15-12 ----
+     * The old decoder stored the product in bits 15-12 (r0 for a plain MUL),
+     * so `mul r2,r0,r1` silently zeroed r0.  The object-index accessor's
+     * size multiply hit exactly this and lost its result pointer. */
+    poke32(&c, 0x80000060u, 0xe3a00010u);   /* mov r0, #0x10       */
+    poke32(&c, 0x80000064u, 0xe3a01020u);   /* mov r1, #0x20       */
+    poke32(&c, 0x80000068u, 0xe3a02030u);   /* mov r2, #0x30       */
+    poke32(&c, 0x8000006cu, 0xe0020190u);   /* mul r2, r0, r1      */
+    poke32(&c, 0x80000070u, 0xe0232190u);   /* mla r3, r0, r1, r2  */
+    poke32(&c, 0x80000074u, 0xe0040392u);   /* mul r4, r3, r2      */
+    poke32(&c, 0x80000078u, 0xe12fff1eu);   /* bx   lr             */
+    memset(&c.r, 0, sizeof c.r);
+    r = run(&c, 0x80000060u, 0);
+    CHECK(r == NK_STOP_RETURN && c.r[0] == 0x10 && c.r[1] == 0x20 &&
+          c.r[2] == 0x200 && c.r[3] == 0x400 && c.r[4] == 0x80000,
+          "ARM MUL/MLA write bits 19-16 and leave r0 alone");
+
     /* ---- ARM: PC-relative ldr uses instruction+8, not instruction+4 ---- */
     poke32(&c, 0x80000240u, 0xe59f1008u);   /* ldr r1, [pc, #8]   */
     poke32(&c, 0x80000244u, 0xe3a0002au);   /* mov r0, #0x2a      */

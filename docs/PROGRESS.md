@@ -15,7 +15,7 @@
 | Kernel | 链接地址 `0x50310000`，入口 `0x50310054`（**ARM**，`push {r4,r5,r6,lr}` / `0xe92d4070`）；page-header-free stream 中 header `0x31004c`、text `0x3100b0`、text_size `0x28ac0` |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像放置 **725 个 image / 1,847 个 section**（无重叠），并放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole（round 19） |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像放置 **725 个 image / 1,847 个 section**（无重叠），并放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole（round 19）；`NK_B7E` 安装初始 thread→process→CObjectIx 图并 watch `[0x800017d4]`（round 20） |
 | 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP`/PeaK 容器（record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`）已由 `kaep.py unpack` 导出；`install` 在 linked `0x80` 写可执行 handoff，loader 可进入 kernel `0x50310054`；mask ROM 的 record codec 仍未解出（B6a2d2b） |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）、**EKA1 executive call gate**（`NK_SWI_DIRECT`，round 18）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
@@ -76,6 +76,8 @@
 | M26 | **第 17 轮：KaeP/PeaK 容器解包；handoff 可执行并进入 kernel** | (1) **头/记录/镜像边界**：`0x124` 的 magic 是 little-endian `0x5065614B`（Nokia 的 **PeaK** 标记），后接 `u32 record_size=0x20`、`u32 image_size=0x1423dc`。0x20 字节 record 从 file **`0x12e`** 开始（其首个半字与 image-size 的高半字重叠，是打包时的 overlay），image 从 **`0x14e`** 开始，首字是干净的 ARM vector table `e59ff018`；image `+0x38`（file `0x186`）是真实 ARM `e59f11a0`，到 `0x14252a` 结束。 (2) **工具**：`kaep.py unpack` 逐字节导出 `out/6600_kaep_record.bin` 与 `out/6600_kaep_image.bin`（含 SHA-256）；`kaep.py install` 在 linked `0x80` 写入 `ldr pc,[pc,#-4]; .word 0x50310054`，保留 loader 需要的 `+0xc/+0x14/+0x1c/+0x20/...` 字段和 `0xfd00→0xfd10` 的 head→node→terminator 链。 (3) **handoff 可执行**：此前去掉 `NK_STOP_PC` 会在 `0x80` 执行 record 字节（`SWI 0xf9ea00`）；现在进入 **kernel entry `0x50310054`**，1.5M budget 下执行 **1,499,999 条 ARM 指令、0 undefined、1 次 stale-call recovery**，结束于 kernel 代码区 `0x5039...`。`bootbringup.py` 不再 patch `0xfb8` 的 parser。 (4) **剩余**：mask ROM 对 0x20 字节 record 的 codec 仍未解出；`unpack` 保留原始 record，`install` 是显式的 handoff stand-in，不是 record 解密。`0x3ae8 → 0x5bb4` stale call 仍在。验收：`tools/test_kaep.sh`、`tools/test_bootbringup.sh` |
 | M27 | **第 18 轮：SWI 不是 no-op —— EKA1 executive call gate 与真实 frontier** | (1) **924k 运行的真正原因**：EUser.dll 的用户侧 kernel API 是一张密集的 `svc #N` stub 表（`0x50392b00..0x50392dc8`）。解释器只打印 SWI 后继续执行，于是从 stub 进入后会**穿过整张表**，落到表后的真实函数 `0x50392dcc`，并进入每轮泄漏 **`0x4b0` 栈**的循环；`0x5039b2b8` 的 `lr=0` 是栈下穿后的症状，不是“kernel stack/super-page frontier”。 (2) **executive 表可读**：kernel SVC handler 在 `0x50314f30`，其 bound literal `[0x50314f7c] = 0x444`，即 **273 项**服务表 `0x50314aec`；269 项是 kernel text 内的代码地址，4 项为零（`0x8a/0x94/0x95/0x96`）。新增 [`executive.py`](../recompiler/executive.py)：`verify` 固定 handler/table/zero slots，`list --used` 统计每个服务的调用点，`stubs` 把所有 image 的 ARM/Thumb SVC stub 映射回服务地址。EUser 的 `0x68 -> 0x5032541c`、`0x4d -> 0x503244e4` 已验证。 (3) **direct call gate**：解释器新增 `NK_SWI_DIRECT=1`，按 EKA1 约定把 `svc #N` 直接派发到 `table[N & 0x1ff]`，并保留 caller 的 LR（stub 是 call gate，不是 SWI 后的继续执行）；这不是完整异常模型，是显式 bring-up 手段。 (4) **新 frontier**：直接派发暴露了两个真实缺口：scheduler/current-thread 全局 `[0x800017d4]` 为 0（直接跑 E32 entry 跳过了 mask ROM/kernel startup 创建初始线程的步骤），以及 IAT slot `0x5037d0e8 = 0xffffffff`（flat image 没有绑定 import）。用 `NK_FAKE_THREAD` 的最小对象 + `NK_SWI_COMPLETE=0x4d` 的“请求立即完成”stand-in 后，kernel 执行 **7,540 条指令、0 undefined**，停在 **unbound IAT slot `0x5037d0e8`**（`sp=0x802fff08`、`cpsr=0x800000d3`）。`NK_IAT_FAKE=1` 的对照跑 8,425 条后因 `r4=0x00730072` 跳到 PC 0，这不是 frontier。这比 924k 早，但第一次走在真实路径上；旧的 924k 只保留为回归基线。 (5) **IAT 检测修正**：import stub 的 slot 值不再只按 `<0x1000` 判定；`0xffffffff` 或任何不在 code range 内的值都按 unbound import 处理，`NK_IAT_FAKE=1` 可显式返回 0。 (6) **第二个解码 bug**：multiply 判定只看 bits 7-4=1001，导致 `sub sp,sp,#0x258` 被执行成 MUL 并清零 SP；现在同时要求 bits 27-22=000000，`interp_selftest` 固定。`NK_BANKED=1` 的 banked/SPSR 模型也已实现（模式栈可由 harness 预置），但 kernel 自己的 mode-stack setup 依赖缺失的 boot state，所以下一缺口仍是 boot descriptor。验收：`tools/test_executive.sh` |
 | M28 | **第 19 轮：ROMFS 启动表命名修正；import/IAT 全表；真实 rtc.dll extension 路径** | (1) **`\System\Libs` 不是 Programs**：kernel 下方 586 项目录是 **Libs**，ROM header 的 `iPrimaryFile/iSecondaryFile/iVariantFile/iExtensionFile`（`0x5000009c/0xa0/0xc8/0xcc`）就是指向它的 `TRomEntry`：`ekern.exe`、`EFile.exe`、`ecust.dll`、`rtc.dll`。旧 build 把 171 项 `Plugins` 内容覆盖到 Libs 的 VA `0x50301ec0`，破坏这些 entry，kernel loader 在 `0x5031eae0` 把 UTF-16 文件名当成 `TRomImageHeader`（`[r3+4]`）。现在 packed 目录块按线性 runtime VA 放置并逐目录校验；`\System\Programs` 是真正的 **55** 项 server 列表，`\System\Libs\Plugins` 是 **171** 项。 (2) **import map**：新增 [`imports.py`](../recompiler/imports.py)。EKA1 import stub 是 `ldr ip,[pc]; ldr pc,[ip]`，slot 就是导出 image 的 `.edata` entry；flat image 的合法 export 已经是绑定地址，无需搬运。全镜像 **1,111** 个可解析 stub；kernel **257** 个（236 EUser + 21 ELocl），唯一未绑定的是 **ELocl ord 20**（export table hole `0xffffffff`），由 locale 初始化 `0x50326078` 无条件调用。 (3) **`NK_IMPORTMAP`**：flat loader 扫描 stub，校验 slot→(uid,ordinal,value)，对 hole 应用 `config/imports-6600.txt`；`zero` 生成 high-vector `mov r0,#0; bx lr` code stub 并登记 code range。 (4) **IAT 判定修正**：slot 值 `<0xffff0000` 但属于已登记 code range（如 high-vector stub）现在是合法绑定。 (5) **新 frontier**：修正 ROMFS 后，kernel 走真实 `rtc.dll` extension 路径，**8,512 条指令、0 unbound IAT、0 undefined**，停在 EUser `RHeap::Alloc`（`0x50380270`）：kernel 把 `[0x800017d4]` 写成了 `0x802ffd00`，thread/process/heap 对象不再是 harness 预置值，`[heap+0x18]` 为 0 → `bx ip` 到 0。这是 **B7e 初始 thread/process/heap** 缺口，不再是 import/layout 问题。验收：`tools/test_imports.sh`；全部 13 个测试通过 |
+
+| M29 | **第 20 轮：MUL/MLA 目标寄存器修正；B7e 重新定性为 CObjectIx / 初始 process** | (1) **解释器 MUL/MLA bug**：`nokia_interp.c` 把 `Rd` 取成 bits 15-12，而 ARM 的 `Rd` 是 **bits 19-16**（bits 15-12 只是 MLA 的累加寄存器）。结果每条普通 `mul rd,rm,rs` 都写 **r0**，真正的目标不变；对象访问器（`0x50380270`）里的 `mul r2,r3,r2` 因此清掉 r0（结果指针）。修正为写 `c->r[rn]`，MLA 从 `c->r[rd]` 累加；`interp_selftest` 新增 `mul r2,r0,r1` / `mla` / 链式 `mul` 回归，断言 r0 不再被改写。 (2) **round 19 的 “RHeap::Alloc / null heap” 定性是错的**：`0x50380270` 不是堆分配器，而是**对象数组访问器**（`[this+0x18]` = array、`[this+0x14]` = element size、`[this]` = base）；调用者 `0x50318410` 是 handle→object 路径，读取 `[thread+0x18] -> [process+0x38]`。这与 SDK EUser ordinal 109 的 **`CObjectIx::At`** 一致。真正缺的是**初始 process 及其 object index**，不是 heap。 (3) **`NK_B7E` bring-up**：harness 新增单字写 watch（`nk_dbg_watch_write`，在 `nk_w32` 快路径触发），在 kernel 发布 current-thread 时安装 thread → process → `CObjectIx` → array 图；array 的 element fetch 返回 live current thread，vtable 用 `mov r0,#0; bx lr` 占位；另有一个 guest bump allocator。kernel 先后发布 `0x802ffd00` 和 `0x80001860`，都得到该图。 (4) **结果**：`NK_B7E=1` 运行 **5,575,900 条 ARM 指令、0 undefined、0 call fixups、0 recoveries**，越过 round-19 的 8,512 条 stop；新 frontier 是第二个 thread `0x80001860` 的栈下穿（`sp=0`、`pc=0`）。 (5) **低物理别名修正**：pre-MMU 的 `0x00000000` alias 现在跟随 `NK_RAM_EXTRA` 的大小（原先固定 3 MiB，6 MiB boot profile 会读到 alias 外）。验收：`tools/test_b7e.sh`；`tools/test_imports.sh` 的 import/ROMFS 断言保持通过 |
 
 ### 可复现命令
 
@@ -196,6 +198,17 @@ NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_executive.sh
+
+# round 20: ARM MUL/MLA destination fix + initial thread/process/object index
+clang -std=c11 -O2 -Wall -Wextra -Iruntime/include \
+  runtime/test/interp_selftest.c runtime/src/nokia_rt.c \
+  runtime/src/nokia_interp.c -o out/interp_selftest && ./out/interp_selftest
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=6000000 NK_B7E=1 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_b7e.sh
 ```
 
 ---
@@ -237,8 +250,10 @@ tools/test_executive.sh
 | `0x5031eae0` | kernel 的 E32 boot-file loader：读 `[0x500000cc]`（extension TRomEntry），`r4=[entry+4]`，用 `[r4+0x10]` 作为 entry；round 19 修正 ROMFS 后第一次走到真实 `rtc.dll` 路径 |
 | `0x50326078` | kernel locale 初始化；调用 ELocl 的 20 个 export 并写入 `0x80000410..0x8000044c`；最后一个就是 ord 20 hole |
 | `0x5037d0e8` | ELocl.dll 的 export table 第 20 项：`0xffffffff`。kernel 的唯一未绑定 import slot（stub `0x50336fe4`） |
-| `0x50380270` | EUser `RHeap::Alloc`（import slot `0x503b3948` 即 EUser ord 109）；round 19 的新 frontier |
-| `0x800017d4` | kernel current-thread 全局；kernel 启动后把它写成 `0x802ffd00`（round 19 观测），harness 的 `NK_FAKE_THREAD` 值被覆盖 |
+| `0x50380270` | EUser **`CObjectIx::At`**（import slot `0x503b3948` 即 EUser ord 109）：`[this+0x18]` array、`[this+0x14]` element size、`[this]` base。round 19 误标为 `RHeap::Alloc`；round 20 定性为 handle→object 访问器 |
+| `0x800017d4` | kernel current-thread 全局；kernel 启动后把它写成 `0x802ffd00`（round 19 观测），`NK_B7E` 的写 watch 会在这里重装 process/object index；round 20 又观测到第二个 thread `0x80001860` |
+| `0x80001860` | round 20 中 kernel 创建的第二个 thread 对象；`NK_B7E` 下它的栈从对象地址开始，最终 `sp=0`、`pc=0`（新的 B7e2 frontier） |
+| `0x50318410` | handle→object 路径：`[0x800017d4] -> [thread+0x18] -> [process+0x38]`，再调用 `0x50380270`（`CObjectIx::At`） |
 | `0x50314c0c` | 真正的 ARM IRQ-lock helper（`push {r0,r1}; mrs r1,apsr; ...`） |
 | `0x50314c16` | Thumb BL 编码目标（helper + 0xA，缺少 veneer） |
 | `0x50312186` | 指向 `0x50314c16` 的 Thumb BL |
@@ -284,7 +299,7 @@ tools/test_executive.sh
 
 ## 4. 当前阻塞（按优先级）
 
-#### B8 第 19 轮：ROMFS 启动表已修，frontier 变成初始 thread/process/heap
+#### B8 第 20 轮：ROMFS/import 已修；frontier 是初始 process/object index
 
 第 18 轮的 import 缺口已经关闭：
 
@@ -299,14 +314,24 @@ tools/test_executive.sh
    iVariantFile/iExtensionFile 所指的 `ekern.exe`/`EFile.exe`/`ecust.dll`/
    `rtc.dll` entry。修正后 packed 目录块按 runtime VA 线性放置，kernel 的
    boot loader（`0x5031eae0`）真正加载/运行 `rtc.dll` extension。
-3. **新 frontier：初始 thread/process/heap（B7e）**：kernel 把
-   `[0x800017d4]` 从 harness 预置的 `0x80003000` 改写成 `0x802ffd00`；
-   随后 `RHeap::Alloc`（`0x50380270`）拿到的 heap 对象为 0，在
-   `[heap+0x18]` 解引用后 `bx ip` 到 0。结果 **8,512 条指令、0 undefined、
-   0 unbound IAT**，停点 `pc=0`、`lr=0x503802ac`、`cpsr=0xdb`。
-   需要从 kernel data / boot descriptor 恢复真实的 `SThread`/`SProcess`/
-   `RHeap` 布局，或让 kernel 自己的 startup 创建它；`NK_ALLOC_HLE` 是当前
-   的实验性 bump-allocator，尚未作为验收路径。
+3. **新 frontier：初始 process / object index（B7e，round 20 已纠正定性）**：
+   kernel 把 `[0x800017d4]` 从 harness 预置值改写成 `0x802ffd00`。round 19
+   把 `0x50380270` 当成 `RHeap::Alloc`，但它是**对象数组访问器**：
+   `[this+0x18]` 是 array、`[this+0x14]` 是 element size、`[this]` 是 base；
+   调用者 `0x50318410` 是 handle→object 路径，读取
+   `[thread+0x18] -> [process+0x38]`。这与 SDK EUser ordinal 109 的
+   **`CObjectIx::At`** 一致。所以缺口是初始 process 及其 object index，
+   不是 heap。
+   - **MUL/MLA 修正（round 20）**：解释器原来把 `Rd` 取成 bits 15-12，
+     普通 `mul` 因此写 r0；`0x5038029c` 的 `mul r2,r3,r2` 会破坏
+     `RHeap::Alloc` 的结果指针。现在写 bits 19-16，MLA 从 bits 15-12
+     累加，`interp_selftest` 有回归。
+   - **`NK_B7E`**：安装 thread → process → `CObjectIx` → array 图，并在
+     kernel 写 `[0x800017d4]` 时重装。运行 **5,575,900 条指令、0 undefined、
+     0 call fixups、0 recoveries**；kernel 创建第二个 thread `0x80001860` 后
+     栈下穿（`sp=0`、`pc=0`）。
+   - 该图是显式 bring-up stand-in；下一步是从 boot descriptor 恢复真实
+     `SProcess`/`SThread` 的字段（尤其是第二个 thread 的 stack/object 字段）。
 4. **banked registers / SPSR / 异常模型**：`svc` 仍是直接调用而非进入
    `0x50314f30` 的 SVC vector；kernel 的 `msr cpsr_c` 模式切换、`mrs spsr`、
    `movs pc,lr`/`ldm ^` 还没有完整异常语义。`NK_BANKED=1` 已实现 banked/
@@ -315,7 +340,7 @@ tools/test_executive.sh
 5. **等待/中断完成路径**：`NK_SWI_COMPLETE=0x4d` 把 `TRequestStatus*` 直接
    写 0；真实路径需要 timer/interrupt/DMA 的完成投递。
 
-验收：`tools/test_imports.sh`、`tools/test_executive.sh`。
+验收：`tools/test_imports.sh`、`tools/test_executive.sh`、`tools/test_b7e.sh`。
 
 #### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
 
@@ -726,8 +751,11 @@ entry：
   `NK_SWI_DIRECT=1` 下 7,540 条停在 unbound IAT。
 - 第 19 轮修掉 ROMFS 启动表覆盖并加入 `NK_IMPORTMAP`：kernel 走真实的
   `rtc.dll` extension 加载，**8,512 条、0 unbound IAT、0 undefined**，
-  停在 EUser `RHeap::Alloc` 的 null heap（B7e）。
-  验收：`tools/test_imports.sh`、`tools/test_executive.sh`。
+  停在 handle→object 路径（round 20 定性为 `CObjectIx::At`，不是 heap）。
+- 第 20 轮加入 `NK_B7E`（thread → process → object index）并修正 MUL/MLA
+  目标寄存器：**5,575,900 条、0 undefined、0 recoveries**，新 frontier 是
+  第二个 thread `0x80001860` 的栈下穿（`pc=0`）。
+  验收：`tools/test_imports.sh`、`tools/test_executive.sh`、`tools/test_b7e.sh`。
 
 ### P1 — Mask ROM stand-in 与首次设备初始化
 
@@ -801,7 +829,9 @@ entry：
 - [x] **B7d1** banked registers / SPSR 模型（`NK_BANKED=1`）：MSR/MRS CPSR/SPSR、模式 bank、`movs pc,lr`/`ldm ^` 异常返回、harness 模式栈
 - [ ] **B7d2** 真实 SVC/IRQ/FIQ 异常入口：`svc` 进入 `0x50314f30`，设置 SPSR_svc 并用 SPSR 返回；kernel 的 mode-stack setup 仍依赖缺失的 boot state
 - [ ] **B7d3** boot descriptor / 初始模式栈：kernel 从 boot state 推导 `0xfffffffc/0`，需要真实 descriptor 或恢复其字段
-- [ ] **B7e** 初始 scheduler/current-thread/process/heap：kernel 在 round 19 把 `[0x800017d4]` 改写成 `0x802ffd00`，`RHeap::Alloc` 因此拿到 null heap（`0x50380270`）；需要从 kernel data/boot descriptor 恢复真实 `SThread`/`SProcess`/`RHeap` 布局，替代 `NK_FAKE_THREAD`
+- [x] **B7e1** `NK_B7E` 初始 thread → process → CObjectIx 图（round 20）：`0x50380270` 是 `CObjectIx::At` 而非 `RHeap::Alloc`；写 watch 在 kernel 发布 `[0x800017d4]` 时安装图。运行 5,575,900 条、0 undefined/recoveries，停在第二个 thread `0x80001860` 的栈下穿。验收：`tools/test_b7e.sh`
+- [ ] **B7e2** 真实 `SThread`/`SProcess` 字段与第二个 thread 的 stack/object 字段：从 boot descriptor / kernel data 恢复，替代 `NK_B7E` 的占位 vtable 和 element fetch
+- [ ] **B7e3** `CObjectIx::At` 的 handle→object 语义：`NK_B7E` 目前对 handle 0 返回 live current thread；需要真实 object index 元素（thread/process/chunk/…）
 - [x] **B7f** flat-image import binding：`recompiler/imports.py` 枚举全镜像 **1,111** 个 stub、kernel **257** 个（236 EUser + 21 ELocl），唯一 kernel hole 是 ELocl ord 20；`NK_IMPORTMAP=config/imports-6600.txt` 在 flat loader 绑定该 slot（1 patched），运行时 `unbound IAT=0`。验收：`tools/test_imports.sh`
 - [ ] **B7g** timer/interrupt/DMA 完成路径：替代 `NK_SWI_COMPLETE`，让 `TRequestStatus` 由设备模型完成
 - [x] **P0-3d** 修复 Thumb BL 返回地址 + ARM PC-relative load 并加回归测试

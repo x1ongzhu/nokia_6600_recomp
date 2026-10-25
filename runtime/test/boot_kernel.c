@@ -84,9 +84,13 @@
  *   NK_SWI_COMPLETE=0x4d    comma-separated service indices modelled as
  *                           "request already complete": write 0 to [r0]
  *   NK_SWI_LOG=n            log the first n direct SWI dispatches (default 16)
- *   NK_FAKE_THREAD=1        install a minimal current-thread object at
- *                           [0x800017d4] so EUser executive calls have a
- *                           scheduler object (bring-up stand-in)
+ *   NK_FAKE_THREAD=1        install the round-18/19 minimal current-thread
+ *                           object at [0x800017d4] (legacy stand-in; the
+ *                           process+0x38 field was misread as a heap)
+ *   NK_B7E=1                install thread -> process -> CObjectIx -> array
+ *                           when the kernel publishes [0x800017d4] (round 20;
+ *                           see tools/test_b7e.sh).  NK_B7E_HEAP/NK_B7E_SIZE
+ *                           set the guest bump allocator window.
  *   NK_BANKED=1             enable the banked r13/r14, FIQ r8-r12 and SPSR
  *                           model; the harness presets per-mode stacks
  *   NK_BANK_LOG=1           log every banked CPSR mode switch
@@ -165,6 +169,140 @@ static void load_callmap(nk_interp_t* ip, const char* path) {
     }
     fclose(f);
     printf("callmap %s: %d call-site fixups\n", path, n);
+}
+
+/* ------------------------------------------------------------------ */
+/* B7e boot-state stand-in: initial thread -> process -> object index  */
+/*                                                                     */
+/* A cold boot lets the mask ROM build the first DThread/DProcess       */
+/* before the kernel's E32 entry runs.  Booting the E32 entry directly  */
+/* skips that: [0x800017d4] starts as zero and the kernel later         */
+/* publishes a bare thread with a null process.                        */
+/*                                                                     */
+/* Round 19 called the resulting stop "RHeap::Alloc with a null heap".  */
+/* The code at 0x50380270 is not the heap allocator: it indexes an      */
+/* object array ([this+0x18] is an array, [this+0x14] the element size, */
+/* [this] the base) and the caller 0x50318410 is the handle-to-object   */
+/* path that reads [thread+0x18] -> [process+0x38].  That matches       */
+/* CObjectIx::At (SDK EUser ordinal 109), so the missing boot state is  */
+/* the process and its object index, not the heap.                      */
+/*                                                                     */
+/* NK_B7E=1 installs a coherent graph the moment the kernel writes its  */
+/* current-thread global: thread -> process, process -> CObjectIx, and  */
+/* the object index -> an array whose element fetch returns the process */
+/* object.  A separate guest bump allocator remains available for code  */
+/* that really allocates.  This is an explicit bring-up stand-in.       */
+/* ------------------------------------------------------------------ */
+
+#define B7E_ZERO_STUB  0xffff0300u   /* mov r0,#0; bx lr                  */
+#define B7E_ALLOC_STUB 0xffff0200u   /* bump allocator, see b7e_install() */
+#define B7E_ALLOC_LIT  0xffff0240u   /* -> guest bump cursor              */
+#define B7E_AT_STUB    0xffff0400u   /* CObjectIx element fetch            */
+#define B7E_THREAD     0x80003000u
+#define B7E_PROCESS     0x80003200u
+#define B7E_OBJIDX      0x80003300u  /* what the old code mislabelled heap */
+#define B7E_ALLOC       0x80003400u
+#define B7E_VT_PROCESS  0x80003500u
+#define B7E_VT_ALLOC    0x80003600u
+#define B7E_ARRAY       0x80003700u
+#define B7E_VT_ARRAY    0x80003800u
+#define B7E_CURSOR      0x80003900u
+#define B7E_CUR_OBJ     0x80003910u   /* last published current thread      */
+#define B7E_VT_ENTRIES  64
+
+static int      b7e_enabled;
+static int      b7e_installs;
+static uint32_t b7e_heap_cur, b7e_heap_end;
+
+static void b7e_fill_vtable(nk_cpu_t* c, uint32_t vt, uint32_t stub) {
+    for (int i = 0; i < B7E_VT_ENTRIES; i++)
+        nk_w32(c, vt + 4u * (uint32_t)i, stub);
+}
+
+static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
+    (void)addr;
+    if (!b7e_enabled || value < NK_RAM_BASE || value >= 0x80400000u)
+        return;
+    uint32_t t = value & ~3u;
+    /* Only the kernel's scheduler publishes current-thread pointers here.
+     * Re-install on every switch so the graph survives a hand-off. */
+    nk_w32(c, t + 0x18, B7E_PROCESS);       /* thread -> process       */
+    nk_w32(c, t + 0x64, B7E_OBJIDX);        /* 0x40000000 branch       */
+    nk_w32(c, B7E_CUR_OBJ, t);              /* handle 0 -> live thread */
+    b7e_installs++;
+    if (b7e_installs <= 4)
+        printf("B7e: current thread %#010x -> process %#010x, objidx %#010x\n",
+               t, B7E_PROCESS, B7E_OBJIDX);
+}
+
+static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
+                        uint32_t heap_base, uint32_t heap_size) {
+    if (heap_size < 0x4000u) heap_size = 0x4000u;
+    /* RHeap::Alloc treats word 0 of the heap object as a base added to the
+     * allocator's result, and its caller rejects results >= 0x50000000.
+     * The allocator therefore returns an *offset*; the bump cursor is
+     * relative to the heap base. */
+    b7e_heap_cur = 0;
+    b7e_heap_end = heap_size & ~0xfu;
+
+    /* Zero-return vtable target. */
+    nk_w32(c, B7E_ZERO_STUB, 0xe3a00000u);       /* mov r0,#0 */
+    nk_w32(c, B7E_ZERO_STUB + 4, 0xe12fff1eu);   /* bx lr     */
+    nk_code_range_add(ip, B7E_ZERO_STUB, B7E_ZERO_STUB + 8);
+    nk_code_range_add(ip, B7E_ALLOC_STUB, B7E_ALLOC_STUB + 0x20);
+    nk_code_range_add(ip, B7E_AT_STUB, B7E_AT_STUB + 0x14);
+
+    /* RAllocator-style bump allocator (r0 = TAny** aResult, r2 = aSize).
+     * The result word is an offset; the caller adds its base at [heap+0]. */
+    nk_w32(c, B7E_ALLOC_STUB + 0x00, 0xe59f3028u);  /* ldr r3,[pc,#0x28] */
+    nk_w32(c, B7E_ALLOC_STUB + 0x04, 0xe593c000u);  /* ldr r12,[r3]      */
+    nk_w32(c, B7E_ALLOC_STUB + 0x08, 0xe282200fu);  /* add r2,r2,#15     */
+    nk_w32(c, B7E_ALLOC_STUB + 0x0c, 0xe3c2200fu);  /* bic r2,r2,#15     */
+    nk_w32(c, B7E_ALLOC_STUB + 0x10, 0xe082200cu);  /* add r2,r12,r2     */
+    nk_w32(c, B7E_ALLOC_STUB + 0x14, 0xe5832000u);  /* str r2,[r3]       */
+    nk_w32(c, B7E_ALLOC_STUB + 0x18, 0xe580c000u);  /* str r12,[r0]      */
+    nk_w32(c, B7E_ALLOC_STUB + 0x1c, 0xe12fff1eu);  /* bx lr             */
+    nk_w32(c, B7E_ALLOC_LIT, B7E_CURSOR);
+    nk_w32(c, B7E_CURSOR, b7e_heap_cur);
+
+    /* CObjectIx element fetch -> the live current-thread object.  The real
+     * At() calls this through an array vtable slot with r0 = TAny** aResult. */
+    nk_w32(c, B7E_AT_STUB + 0x00, 0xe59f1008u);  /* ldr r1,[pc,#8]      */
+    nk_w32(c, B7E_AT_STUB + 0x04, 0xe5911000u);  /* ldr r1,[r1]         */
+    nk_w32(c, B7E_AT_STUB + 0x08, 0xe5801000u);  /* str r1,[r0]         */
+    nk_w32(c, B7E_AT_STUB + 0x0c, 0xe12fff1eu);  /* bx lr               */
+    nk_w32(c, B7E_AT_STUB + 0x10, B7E_CUR_OBJ);  /* literal              */
+    nk_w32(c, B7E_CUR_OBJ, B7E_THREAD);
+
+    b7e_fill_vtable(c, B7E_VT_PROCESS, B7E_ZERO_STUB);
+    b7e_fill_vtable(c, B7E_VT_ALLOC, B7E_ZERO_STUB);
+    b7e_fill_vtable(c, B7E_VT_ARRAY, B7E_ZERO_STUB);
+    nk_w32(c, B7E_VT_ALLOC + 0x14, B7E_ALLOC_STUB);
+    nk_w32(c, B7E_VT_ARRAY + 0x14, B7E_AT_STUB);
+
+    nk_w32(c, B7E_PROCESS, B7E_VT_PROCESS);
+    nk_w32(c, B7E_PROCESS + 0x38, B7E_OBJIDX);
+
+    /* CObjectIx: [0] base, [0xc] count/base, [0x14] element size,
+     * [0x18] the array object. */
+    nk_w32(c, B7E_OBJIDX + 0x00, 0);
+    nk_w32(c, B7E_OBJIDX + 0x0c, 0);
+    nk_w32(c, B7E_OBJIDX + 0x14, 4);
+    nk_w32(c, B7E_OBJIDX + 0x18, B7E_ARRAY);
+    nk_w32(c, B7E_ARRAY, B7E_VT_ARRAY);
+
+    nk_w32(c, B7E_ALLOC, B7E_VT_ALLOC);
+    nk_w32(c, B7E_ALLOC + 0x00, heap_base);   /* base added to offset  */
+    nk_w32(c, B7E_ALLOC + 0x14, 1);           /* element size          */
+
+    nk_w32(c, B7E_THREAD, 0x80003040u);       /* thread vtable         */
+    nk_w32(c, B7E_THREAD + 0x14, 1);
+    nk_w32(c, 0x80003040u + 0x20, B7E_ZERO_STUB);
+
+    printf("B7e boot state: thread %#010x, process %#010x, objidx %#010x, "
+           "bump %#010x..%#010x\n",
+           B7E_THREAD, B7E_PROCESS, B7E_OBJIDX,
+           heap_base + b7e_heap_cur, heap_base + b7e_heap_end);
 }
 
 /* ------------------------------------------------------------------ */
@@ -618,7 +756,7 @@ int main(int argc, char** argv) {
      * its early literal pools contain physical data offsets (0x0004_6564,
      * 0x0004_6fca), so the bootstrap view needs RAM at 0x00000000 too. */
     if (!getenv("NK_NO_LOW_RAM") &&
-        nk_alloc_ram(&cpu, 0x00000000u, NK_RAM_SIZE) != 0) return 1;
+        nk_alloc_ram(&cpu, 0x00000000u, ram_size) != 0) return 1;
     /* The EKA1 kernel uses memory directly below the RAM base for its
      * exception stack / super page (SP starts at 0x7ffffc58 and descends).
      * Model a 1 MiB window so the early stack does not fall through to the
@@ -790,12 +928,13 @@ int main(int argc, char** argv) {
         printf("entry override: %#010x (%s)\n", entry, thumb_entry ? "Thumb" : "ARM");
     }
 
-    /* Bring-up stand-in for the kernel scheduler's "current thread" pointer.
+    /* Legacy round-18/19 stand-in for the scheduler's current-thread pointer.
      * The E32 entry calls into EUser, whose executive-call stubs dereference
      * [0x800017d4].  On a real cold boot the mask ROM/kernel startup creates
      * the initial thread before that; jumping straight to the E32 entry skips
-     * it.  A minimal object with a vtable slot that returns 0 lets the SWI
-     * call-gate path continue and exposes the next missing state. */
+     * it.  Round 20 showed that process+0x38 is a CObjectIx, not a heap, so
+     * this is kept only for tools/test_imports.sh's pinned import frontier;
+     * NK_B7E is the corrected graph. */
     if (getenv("NK_FAKE_THREAD")) {
         uint32_t obj = 0x80003000u, vt = 0x80003040u;
         uint32_t obj2 = 0x80003100u, vt2 = 0x80003140u;
@@ -818,8 +957,22 @@ int main(int argc, char** argv) {
         nk_w32(&cpu, vt2 + 0x20, 0x50312e90u);
         nk_w32(&cpu, vt2 + 0x28, 0x50312e90u);
         printf("fake current thread: [%#010x] = %#010x, vtable %#010x, "
-               "process %#010x, heap %#010x\n",
+               "process %#010x, process+0x38 %#010x\n",
                0x800017d4u, obj, vt, proc, heap);
+    }
+
+    /* B7e: the mask-ROM/scheduler startup that creates the first process and
+     * heap is not part of the E32 entry path.  Install a coherent
+     * thread -> process -> heap graph and follow every current-thread update. */
+    if (env_ulong("NK_B7E", 0)) {
+        uint32_t base = (uint32_t)env_ulong("NK_B7E_HEAP", hle_heap);
+        uint32_t size = (uint32_t)env_ulong("NK_B7E_SIZE", 0x400000u);
+        b7e_enabled = 1;
+        b7e_install(&cpu, &ip, base, size);
+        nk_w32(&cpu, 0x800017d4u, B7E_THREAD);
+        nk_dbg_watch_write(0x800017d4u, b7e_thread_hook);
+        printf("B7e: watching [%#010x] for current-thread updates\n",
+               0x800017d4u);
     }
 
     const char* sp_env = getenv("NK_SP");

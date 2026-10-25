@@ -35,6 +35,16 @@ uint8_t* nk_page_ptr(nk_cpu_t* c, uint32_t a);
 uint32_t nk_read_slow(nk_cpu_t* c, uint32_t a, unsigned size);
 void     nk_write_slow(nk_cpu_t* c, uint32_t a, uint32_t v, unsigned size);
 
+/* Bring-up observability: a single guest word can be watched for writes.
+ * The boot harness uses this to install the initial thread/process/object-index
+ * graph the moment the kernel publishes its current thread (B7e).  The check
+ * lives
+ * in the inline fast path so it sees every store, not just MMIO. */
+typedef void (*nk_write_hook_fn)(nk_cpu_t* c, uint32_t addr, uint32_t value);
+extern uint32_t          nk_dbg_write_watch;
+extern nk_write_hook_fn  nk_dbg_write_hook;
+void nk_dbg_watch_write(uint32_t addr, nk_write_hook_fn fn);
+
 static inline uint32_t nk_r32(nk_cpu_t* c, uint32_t a) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {
         const uint8_t* p = nk_page_ptr(c, a);
@@ -56,7 +66,12 @@ static inline uint8_t nk_r8(nk_cpu_t* c, uint32_t a) {
     const uint8_t* p = nk_page_ptr(c, a);
     return p ? p[a & NK_PAGE_MASK] : (uint8_t)nk_read_slow(c, a, 1);
 }
+static inline void nk_dbg_note_write(nk_cpu_t* c, uint32_t a, uint32_t v) {
+    if (a == nk_dbg_write_watch && nk_dbg_write_hook)
+        nk_dbg_write_hook(c, a, v);
+}
 static inline void nk_w32(nk_cpu_t* c, uint32_t a, uint32_t v) {
+    nk_dbg_note_write(c, a, v);
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {
         uint8_t* p = nk_page_ptr(c, a);
         if (p) { p += a & NK_PAGE_MASK;

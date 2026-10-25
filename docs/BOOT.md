@@ -48,6 +48,14 @@ NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_imports.sh
+
+# round 20: initial thread -> process -> CObjectIx graph
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=6000000 NK_B7E=1 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_b7e.sh
 ```
 
 ### Round 19: the ROMFS boot table and image imports (2026-10-25)
@@ -81,7 +89,48 @@ With both fixes the kernel runs the real `rtc.dll` extension:
 `RHeap::Alloc` (`0x50380270`): the kernel overwrites the current-thread global
 `[0x800017d4]` with `0x802ffd00`, so `[thread+0x18] -> [process+0x38]` yields a
 null heap and `bx ip` leaves to 0 (`pc=0`, `lr=0x503802ac`, `cpsr=0xdb`).
-That is the B7e initial-thread/process/heap task, not an import or layout bug.
+That is the B7e initial-thread/process task, not an import or layout bug.
+**Round 20 correction:** `0x50380270` is `CObjectIx::At` (an object-array
+accessor), and `process+0x38` is the object index, not a heap.  The real
+frontier is the missing initial process/object index; see the round-20 section
+below.
+
+### Round 20: MUL destination, and the real B7e state (2026-10-25)
+
+Two corrections move the frontier from 8,512 to **5,575,900 instructions**.
+
+**1. ARM MUL/MLA wrote the wrong register.**  The interpreter took `Rd` from
+bits 15-12.  In ARMv4T, `Rd` is **bits 19-16**; bits 15-12 are only MLA's
+accumulator (and the low half of a long multiply).  Every plain
+`mul rd, rm, rs` therefore stored its product in **r0** and left the real
+destination unchanged.  The object-index accessor's size multiply
+(`0x5038029c mul r2, r3, r2`) hit this and destroyed its result pointer.
+`nokia_interp.c` now stores to bits 19-16 and adds the MLA accumulator from
+bits 15-12; `interp_selftest` pins `mul r2, r0, r1` with r0 unchanged.
+
+**2. `0x50380270` is not `RHeap::Alloc`.**  It indexes an object array:
+`[this+0x18]` is the array object, `[this+0x14]` the element size and
+`[this]` the base added to the element.  Its caller `0x50318410` is the
+handle-to-object path, reading `[thread+0x18] -> [process+0x38]`.  This is
+**`CObjectIx::At`** (the SDK EUser ordinal 109), so round 19's "null heap"
+was a misdiagnosis: the missing boot state is the initial **process and its
+object index**.
+
+`NK_B7E=1` installs thread -> process -> `CObjectIx` -> array, follows every
+current-thread publication with the new guest write watch, and returns the
+live current thread for handle 0.  The kernel publishes `0x802ffd00` and then
+creates a second thread `0x80001860`; both get the graph.  The run:
+
+```
+insns=5575900 (ARM 5575900 / Thumb 0), undefined=0, call fixups=0, recoveries=0
+mmio: 26 reads, 112096 writes
+--- stop: pc left the image (5) at 0000000000 ---
+```
+
+The next frontier is the second thread's stack underflow (`sp=0`, `pc=0`),
+i.e. the real `SThread`/`SProcess` fields (especially the thread's stack and
+object slots), not an import, layout or heap stop.  The pre-MMU low alias now
+also follows `NK_RAM_EXTRA`.  `tools/test_b7e.sh` is the acceptance test.
 
 ### Round 16 correction: the 0xec page headers (2026-10-25)
 

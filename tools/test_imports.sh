@@ -24,8 +24,10 @@
 #     ekern.exe, EFile.exe, ecust.dll and rtc.dll in the linear Libs table;
 #   - the flat image bridges that slot at load time (1 patched) and the run
 #     no longer stops on an unbound IAT;
-#   - the next frontier is the missing current-thread heap (RHeap::Alloc gets
-#     a null object), which is B7e, not an import/layout problem.
+#   - the next frontier is the missing initial process/object index, which is
+#     B7e, not an import/layout problem.  The accessor at 0x50380270 was
+#     misread as RHeap::Alloc in round 19; round 20 identifies it as
+#     CObjectIx::At (see tools/test_b7e.sh).
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
@@ -130,7 +132,7 @@ echo "ok: import bridge executed $insns instructions with 0 unbound IAT"
 grep -q "^--- stop: pc left the image (5) at 0000000000 ---" out/imports_boot.log
 grep -q "lr=0x503802ac" out/imports_boot.log
 grep -q "cpsr=0x000000db" out/imports_boot.log
-echo "ok: next frontier is EUser RHeap::Alloc with a null current-thread heap"
-echo "    (B7e; the locale/extension load now runs the real rtc.dll path)"
+echo "ok: next frontier is the missing initial process/object index (B7e)"
+echo "    (round 20: 0x50380270 is CObjectIx::At, not RHeap::Alloc)"
 
 echo "PASS: import table, ROMFS boot table, and the flat-image slot bridge"

@@ -964,9 +964,14 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
                 c->r[rn] = (uint32_t)(p >> 32);
                 if (s) { nk_setf(c, NK_FLAG_N, c->r[rn] >> 31); nk_setf(c, NK_FLAG_Z, p == 0); }
             } else {
+                /* MUL/MLA: bits 19-16 are Rd (bits 15-12 are the MLA
+                 * accumulator, zero for MUL).  The old code stored to
+                 * bits 15-12, so every MUL wrote r0 and r0-resident values
+                 * (including the object-index accessor's result pointer)
+                 * vanished. */
                 uint32_t p = c->r[rs] * c->r[rm];
-                if (op & (1u << 21)) p += c->r[rd]; /* MLA */
-                c->r[rd] = p;
+                if (op & (1u << 21)) p += c->r[rd]; /* MLA accumulator */
+                c->r[rn] = p;                       /* Rd */
                 if (s) set_nz(c, p);
             }
             return 0;
