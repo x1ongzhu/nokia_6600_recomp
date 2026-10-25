@@ -1,0 +1,32 @@
+# callmap-rtc-6600.txt - bring-up call-site fixes for the RTC extension
+#
+# The RTC PDD record (rtc.dll, the nested image with uid2 0x100058d8) is
+# linked against an EUser .def revision whose ordinal order differs from the
+# EUser.dll in this ROM.  Two call sites expose that mismatch:
+#
+#   0x5033efa8  `mov r0,#0x38; bl <EUser slot 0x503b4f14>`
+#   0x5033eff0  `mov r0,#8;    bl <EUser slot 0x503b4f14>`
+#
+#   EUser's export table index 1504 resolves to RTest::operator() in this
+#   ROM (it references ": FAIL : ..." and "Checkpoint-fail"), not to
+#   operator new.  The driver treats the result as a pointer and stores it at
+#   [this+0x118]/[this+4].  HLE alloc serves r0=size from the harness bump
+#   heap (0xfffffffb).
+#
+#   0x5033f040  the driver asks the kernel's system-time helper for a
+#               64-bit time value.  That helper formats the value through
+#               EUser slot 0x503b4d1c, which config/imports-b7e-6600.txt
+#               rebinds to the 2-arg TPtr16 constructor for the kernel panic
+#               printer.  The two call sites need different ABIs; the driver
+#               only consumes the two output words, so HLE zero2 writes a
+#               zero TTime and returns (0xfffffff9).
+#
+# These are explicit bring-up fixups, not recovered ROM state.  The real fix
+# is an EUser export-name map for this ROM revision, so the kernel and every
+# driver resolve their imports by name instead of by a stale ordinal.
+#
+# Format: <call_pc> <target|sentinel> <A|T>
+
+0x5033efa8 0xfffffffb A
+0x5033eff0 0xfffffffb A
+0x5033f040 0xfffffff9 A

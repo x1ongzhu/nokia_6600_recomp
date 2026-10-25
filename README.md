@@ -430,7 +430,34 @@ criteria and phased roadmap live in
   at `0x50312b88` with **KERN-NO-SESSION 22** while loading **Econs.dll**
   (uid3 `0x100039e7`).  That is a file-server/session dependency, not an
   import or layout problem.  `NK_WATCH_MEM=rN:len` dumps guest memory at a
-  watch PC.  `tools/test_b7e.sh` pins the new frontier.
+  watch PC.  `tools/test_b7e.sh` pins the new frontier.  **Round 22 corrects
+  the diagnosis:** the ECons load was the RTC driver's misbound allocator
+  entering EUser's RTest console path, not a real boot service.
+- [x] **Round 22: RTC extension is a nested E32Image; boot reaches 27,470** —
+  the "RTC PDD header-less rodata block" is a **second E32Image**: uid2
+  `0x100058d8`, text `0x5033ee14..0x50341414`, data `0x50341414`,
+  `export_count` 0.  The kernel's extension loader calls its entry
+  `0x5033ee14` (the driver object constructor) and then **export ordinal 1**
+  through `[hdr+0x40]`; a zero export directory is a jump to 0, so the boot
+  harness needs an explicit extension export stub.  The RTC driver's
+  `new(0x38)`/`new(8)` import (EUser export index 1504) resolves to
+  `RTest::operator()` in this ROM (it references `": FAIL : ..."` and
+  `"Checkpoint-fail"`), not to `operator new`: the driver and EUser were
+  linked against different `.def` revisions.  The constructor therefore
+  entered the RTest console path, which loaded ECons.dll — the round-21
+  "file-server session" was a symptom of that ABI mismatch.  Round 22 adds
+  `NK_HLE_ZERO2` (zero a 64-bit `TTime` out parameter), a real HAL channel
+  **object** for the B7e HAL stand-in (the old integer 1 was later
+  dereferenced as a vtable pointer), and `NK_EXT_STUB=1` (an export stub for
+  the nested extension header).  With
+  [`config/callmap-rtc-6600.txt`](config/callmap-rtc-6600.txt) the RTC
+  extension initialises completely: **27,470 instructions, 0 undefined,
+  0 unbound IAT, 0 recoveries**.  The new frontier is the post-extension boot
+  initialisation `0x50310fa4` → `0x5031f3a8`, which builds an `"IrqTimer0"` descriptor
+  (literal `0x50337200`) and checks the kernel `.bss` timer object at
+  `0x80000b5c` (`[0x80000b5c] == 0xff`, else panic PLAT 21); the direct E32
+  entry skipped the mask-ROM/kernel startup that fills it.
+  `tools/test_rtc.sh` is the acceptance test.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -460,14 +487,15 @@ criteria and phased roadmap live in
   printer with **KERN-NO-SESSION 22** while loading Econs.dll — a
   file-server/session dependency, not a stack/exception frontier.  The
   banked-register model (`NK_BANKED=1`) and mode stacks remain available but
-  are no longer on the critical path to the next boot step.
-- [ ] **File-server / session for driver DLL loads (round 21 frontier)** — the
-  kernel loads Econs.dll (uid3 `0x100039e7`, code `0x5079d244`) after the RTC
-  driver starts.  The image is placed in the flat ROM, but the loader asks for
-  a file-server session and the kernel panics **KERN-NO-SESSION 22** when it
-  is absent.  The next step is to model the ROMFS/E32 file-service path (or an
-  explicit HLE that returns the already-placed ROM image) and then continue
-  the driver/process startup.
+  are no longer on the critical path to the next boot step.  **Round 22
+  reclassifies the ECons stop** (RTest console via the misbound RTC
+  allocator) and advances the run to 27,470 instructions.
+- [ ] **File server for UI/app loads (round 22 reclassification)** — the
+  round-21 ECons.dll / **KERN-NO-SESSION 22** stop was the RTC driver's
+  misbound `operator new` import entering EUser's `RTest` console path.  With
+  the round-22 allocator/HAL/extension fixups the RTC extension no longer
+  requests a session.  A real ROMFS/E32 file service is still required by the
+  UI/app layer (P3), but it is no longer the next boot milestone.
 - [ ] **Boot bank board/CPU detection (round 16 stream view)** — after the page
   headers are removed the boot bank is the contiguous stream slice
   `[0xb0, 0x100b0)` and all switch tables measure bias 0.  The **correct**
@@ -714,6 +742,21 @@ NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_b7e.sh
+
+# round 22: the RTC extension is a nested E32Image; allocator ABI, HAL channel
+# and the 27,470-instruction post-extension boot frontier
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-b7e-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=8000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x5031f3c0 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+# ... 27,470 instructions, 0 undefined/unbound/recoveries, stop panic PLAT 21
+#     at 0x5031f3a8 (boot descriptor [0x80000b5c] == 0xff is missing)
+tools/test_rtc.sh
 
 # round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
 # code+text_size; the default runtime image now includes it

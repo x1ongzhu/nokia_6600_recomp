@@ -25,6 +25,11 @@
 # KERN-NO-SESSION 22.  That is the ROMFS/file-server task (PN-3), not an
 # import or layout problem.
 #
+# Round 22 update: this file is kept as the round-21 baseline.  The ECons
+# request turned out to be the RTC driver's misbound operator new entering
+# EUser's RTest console path; tools/test_rtc.sh pins the round-22 run
+# (27,470 instructions, post-extension timer/DFC frontier).
+#
 # Acceptance:
 #   - the flat image contains the RTC driver vtable at 0x503413e8;
 #   - the kernel rebinds the four EUser slots and runs the whole init table;
@@ -119,5 +124,6 @@ grep -q "\[watch\] pc=0x50321c40 .*r1=0x16" out/b7e_panic.log
 grep -q "\[watch\] mem r0 @0x50338230: 0000000f 0045004b 004e0052 004e002d" \
     out/b7e_panic.log
 echo "ok: panic is category KERN-NO-SESSION, code 22 (Econs.dll load)"
-echo "    next frontier: ROMFS/file-server session for driver DLL loads"
-echo "PASS: driver rodata + imports + heap; round-20 stack frontier retired"
+echo "    round-21 baseline: the RTest/ECons request is a misbound RTC allocator"
+echo "PASS: driver rodata + imports + heap; round-21 frontier preserved"
+echo "      (round 22 advances to 27,470 instructions; see tools/test_rtc.sh)"

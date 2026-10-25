@@ -151,8 +151,14 @@ export directories.  `recompiler/romimage.py build` now reconstructs the
 runtime ROM layout (all 725 packed images at their header addresses plus the
 ROMFS tree); 1,847 sections are placed without overlaps in
 `out/6600_runtime.bin`.  `--place-rodata` additionally places the header-less
-driver blocks that are real runtime data (the RTC PDD's vtable lives there),
-giving 726 images / 2,335 sections; `tools/build_rom_image.sh` uses it.
+driver blocks that are real runtime data.  Round 22 showed that the RTC block
+is not just rodata: at `0x5033edb0` it contains a **second E32Image**
+(uid2 `0x100058d8`, text `0x5033ee14..0x50341414`, data `0x50341414`, no
+exports) whose code the extension loader executes.  This gives 726 images /
+2,335 sections; `tools/build_rom_image.sh` uses it.  The nested header has no
+export table, so the kernel's post-entry export-1 call needs the explicit
+`NK_EXT_STUB` bring-up; `tools/test_rtc.sh` pins the resulting 27,470
+instruction run and its boot-descriptor frontier at `0x80000b5c`.
 
 What remains is the ROM build's **interworking veneer insertion**: Thumb→ARM
 calls and export targets are biased into the callee.  A census of the kernel's

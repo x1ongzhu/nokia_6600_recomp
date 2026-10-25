@@ -206,8 +206,11 @@ The output is `out/6600_runtime.bin` (exactly `0x1600000` bytes); 1,847 placed
 sections do not overlap (`romimage.py build --only-reachable` keeps the old
 3-image behaviour).  `--place-rodata` adds physical-device-driver records whose
 header-less block exceeds the 0x2000 plausibility window and places that block
-at `code+text_size` when it fits (the RTC PDD uid3 `0x100000d8` has a 0x279c
-block with its vtable at `0x503413e8`), giving 726 images / 2,335 sections.
+at `code+text_size` when it fits.  The RTC PDD record (`uid3 0x100000d8`,
+block `0x279c`) is a special case: the block is a **second E32Image** at
+`0x5033edb0` (uid2 `0x100058d8`, text `0x5033ee14..0x50341414`, data
+`0x50341414`, no exports), not just rodata.  The extension loader executes its
+code and its vtable is at `0x503413e8`; this gives 726 images / 2,335 sections.
 `romimage.py build` now copies the packed directory block
 at its runtime VAs (Libs 586 / Programs 55 / Plugins 171) instead of overlaying
 directories.  The 0x34f5c bytes at the end of the original file are a

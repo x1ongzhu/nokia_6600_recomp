@@ -704,7 +704,7 @@ static int infer_call(nk_interp_t* ip, nk_cpu_t* c, int caller_thumb,
         uint32_t mapped = ip->callmap[i].target;
         if (mapped == NK_HLE_DIV || mapped == NK_HLE_MOD ||
             mapped == NK_HLE_MEMZERO || mapped == NK_HLE_ALLOC ||
-            mapped == NK_HLE_MEMCPY) {
+            mapped == NK_HLE_MEMCPY || mapped == NK_HLE_ZERO2) {
             uint32_t a = c->r[0], b = c->r[1];
             if (mapped == NK_HLE_ALLOC) {
                 uint32_t size = (a + 7u) & ~7u;
@@ -716,6 +716,11 @@ static int infer_call(nk_interp_t* ip, nk_cpu_t* c, int caller_thumb,
                 }
             } else if (mapped == NK_HLE_MEMZERO) {
                 for (uint32_t i = 0; i < b; i++) nk_w8(c, a + i, 0);
+                c->r[0] = a;
+            } else if (mapped == NK_HLE_ZERO2) {
+                /* A 64-bit time/value output at [r0]: zero both words. */
+                nk_w32(c, a, 0);
+                nk_w32(c, a + 4, 0);
                 c->r[0] = a;
             } else if (mapped == NK_HLE_MEMCPY) {
                 uint32_t src = c->r[1], len = c->r[2];
@@ -739,6 +744,9 @@ static int infer_call(nk_interp_t* ip, nk_cpu_t* c, int caller_thumb,
                 else if (mapped == NK_HLE_ALLOC)
                     fprintf(stderr, "[interp] call: HLE alloc %#010x (%#x bytes -> %#010x)\n",
                             call_pc, a, c->r[0]);
+                else if (mapped == NK_HLE_ZERO2)
+                    fprintf(stderr, "[interp] call: HLE zero2 %#010x (-> %#010x)\n",
+                            call_pc, a);
                 else
                     fprintf(stderr, "[interp] call: HLE %s %#010x (%u / %u -> %u)\n",
                             mapped == NK_HLE_DIV ? "div" : "mod", call_pc, a, b, c->r[0]);

@@ -91,6 +91,9 @@
  *                           when the kernel publishes [0x800017d4] (round 20;
  *                           see tools/test_b7e.sh).  NK_B7E_HEAP/NK_B7E_SIZE
  *                           set the guest bump allocator window.
+ *   NK_EXT_STUB=1           give an extension image with no export table a
+ *                           synthetic export 1 (HAL-like object); needed by
+ *                           the nested rtc.dll image (round 22)
  *   NK_BANKED=1             enable the banked r13/r14, FIQ r8-r12 and SPSR
  *                           model; the harness presets per-mode stacks
  *   NK_BANK_LOG=1           log every banked CPSR mode switch
@@ -114,6 +117,10 @@
  *                           uses NK_RAM_EXTRA=0x300000 for a 6 MiB bank)
  *   NK_DUMP=a:l[,a:l...]    append guest memory ranges to NK_DUMP_FILE at the
  *                           end of the run (default out/memdump.bin)
+ *   NK_POKE=a:v[,a:v...]    write 32-bit values to guest addresses before the
+ *                           run (bring-up experiments; logged)
+ *   NK_PATCH=a:w[,a:w...]   patch 32-bit guest code words before the run
+ *                           (bring-up experiments; logged)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -171,6 +178,44 @@ static void load_callmap(nk_interp_t* ip, const char* path) {
     printf("callmap %s: %d call-site fixups\n", path, n);
 }
 
+/* Some ROM extension records (rtc.dll is the first one) carry a nested
+ * E32 image whose header has no export table.  The EKA1 extension loader
+ * calls export ordinal 1 unconditionally after the image entry
+ * (0x5031ebbc: ldr r3,[hdr+0x40]; ldr pc,[r3]), so a zero export_dir jumps
+ * to 0.  NK_EXT_STUB=1 binds that slot to a stub in a high vector that
+ * returns a HAL-like object, so the kernel installs it at [0x800003ac].
+ * It is an explicit bring-up stand-in for the ROM-build export fixup, not
+ * recovered firmware state. */
+#define EXT_STUB_TABLE 0xffff0900u
+#define EXT_STUB_CODE  0xffff0910u
+static void install_extension_stub(nk_cpu_t* c, nk_interp_t* ip) {
+    if (!env_ulong("NK_EXT_STUB", 0)) return;
+    uint32_t entry = nk_r32(c, 0x500000cc);
+    if (!entry) {
+        printf("extension stub: TRomHeader.iExtensionFile is null\n");
+        return;
+    }
+    uint32_t hdr = nk_r32(c, entry + 4);
+    if (hdr < 0x50000000u || hdr >= 0x51600000u) {
+        printf("extension stub: bad extension image header %#010x\n", hdr);
+        return;
+    }
+    uint32_t count = nk_r32(c, hdr + 0x3c);
+    uint32_t dir = nk_r32(c, hdr + 0x40);
+    printf("extension stub: image header %#010x exports=%u dir=%#010x\n",
+           hdr, count, dir);
+    if (count && dir) return;
+    nk_w32(c, EXT_STUB_TABLE, EXT_STUB_CODE);
+    nk_w32(c, EXT_STUB_CODE + 0x00, 0xe59f0008u); /* ldr r0,[pc,#8] */
+    nk_w32(c, EXT_STUB_CODE + 0x04, 0xe12fff1eu); /* bx lr          */
+    nk_w32(c, EXT_STUB_CODE + 0x10, 0x80003a40u);/* HAL-like object */
+    nk_w32(c, hdr + 0x3c, 1);
+    nk_w32(c, hdr + 0x40, EXT_STUB_TABLE);
+    nk_code_range_add(ip, EXT_STUB_CODE, EXT_STUB_CODE + 0x14);
+    printf("extension stub: export 1 -> %#010x (HAL object %#010x)\n",
+           EXT_STUB_CODE, 0x80003a40u);
+}
+
 /* ------------------------------------------------------------------ */
 /* B7e boot-state stand-in: initial thread -> process -> object index  */
 /*                                                                     */
@@ -195,7 +240,7 @@ static void load_callmap(nk_interp_t* ip, const char* path) {
 /* ------------------------------------------------------------------ */
 
 #define B7E_ZERO_STUB  0xffff0300u   /* mov r0,#0; bx lr                  */
-#define B7E_HAL_STUB   0xffff0600u   /* HAL map: r1==0 -> 1, else 0       */
+#define B7E_HAL_STUB   0xffff0600u   /* HAL map/channel, see b7e_install() */
 #define B7E_ALLOC_STUB 0xffff0200u   /* bump allocator, see b7e_install() */
 #define B7E_ALLOC_LIT  0xffff0240u   /* -> guest bump cursor              */
 #define B7E_AT_STUB    0xffff0400u   /* CObjectIx element fetch            */
@@ -210,6 +255,7 @@ static void load_callmap(nk_interp_t* ip, const char* path) {
 #define B7E_CURSOR      0x80003900u
 #define B7E_CUR_OBJ     0x80003910u   /* last published current thread      */
 #define B7E_HAL         0x80003a00u   /* stand-in kernel HAL object         */
+#define B7E_HAL_CHAN    0x80003a40u   /* object returned by HAL map/channel */
 #define B7E_VT_HAL      0x80003c00u   /* its vtable (>= 0x108 bytes)        */
 #define B7E_VT_ENTRIES  64
 
@@ -253,12 +299,21 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     /* Zero-return vtable target. */
     nk_w32(c, B7E_ZERO_STUB, 0xe3a00000u);       /* mov r0,#0 */
     nk_w32(c, B7E_ZERO_STUB + 4, 0xe12fff1eu);   /* bx lr     */
+    /* HAL map/channel stand-in.  The extension loader invokes an in-kernel
+     * extension constructor before it registers the real HAL object; the
+     * constructor calls [0x800003ac]->vtable[0x108] twice:
+     *   r1=1 -> 0 is success (the map/create call)
+     *   r1=0 -> a live channel object (DObject*) the driver dereferences
+     * A bare integer handle is not enough for the second call: the RTC
+     * driver stores it and later reads its vtable.  Return a real guest
+     * object whose vtable is the HAL stub table. */
     nk_w32(c, B7E_HAL_STUB + 0x00, 0xe3510000u); /* cmp r1,#0 */
-    nk_w32(c, B7E_HAL_STUB + 0x04, 0x03a00001u); /* moveq r0,#1 */
+    nk_w32(c, B7E_HAL_STUB + 0x04, 0x059f0008u); /* ldreq r0,[pc,#8] */
     nk_w32(c, B7E_HAL_STUB + 0x08, 0x13a00000u); /* movne r0,#0 */
     nk_w32(c, B7E_HAL_STUB + 0x0c, 0xe12fff1eu); /* bx lr */
+    nk_w32(c, B7E_HAL_STUB + 0x14, B7E_HAL_CHAN);
     nk_code_range_add(ip, B7E_ZERO_STUB, B7E_ZERO_STUB + 8);
-    nk_code_range_add(ip, B7E_HAL_STUB, B7E_HAL_STUB + 0x10);
+    nk_code_range_add(ip, B7E_HAL_STUB, B7E_HAL_STUB + 0x18);
     nk_code_range_add(ip, B7E_ALLOC_STUB, B7E_ALLOC_STUB + 0x20);
     nk_code_range_add(ip, B7E_AT_STUB, B7E_AT_STUB + 0x20);
 
@@ -328,6 +383,8 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
         nk_w32(c, B7E_VT_HAL + 4u * i, B7E_ZERO_STUB);
     nk_w32(c, B7E_VT_HAL + 0x108u, B7E_HAL_STUB);  /* HAL map/channel */
     nk_w32(c, B7E_HAL, B7E_VT_HAL);
+    /* The channel handle call (r1=0) must return a dereferenceable object. */
+    nk_w32(c, B7E_HAL_CHAN, B7E_VT_HAL);
     nk_w32(c, 0x800003acu, B7E_HAL);          /* Kern::TheKernel/HAL global */
 
     printf("B7e boot state: thread %#010x, process %#010x, objidx %#010x, "
@@ -1011,6 +1068,44 @@ int main(int argc, char** argv) {
         nk_dbg_watch_write(0x800017d4u, b7e_thread_hook);
         printf("B7e: watching [%#010x] for current-thread updates\n",
                0x800017d4u);
+    }
+
+    /* Some extension records carry a nested image with no export table; the
+     * EKA1 extension loader still calls export 1 after the image entry. */
+    install_extension_stub(&cpu, &ip);
+
+    /* NK_POKE=addr:value[,addr:value...]: explicit bring-up writes.  Used to
+     * probe missing boot descriptors without rebuilding a harness per try. */
+    const char* poke = getenv("NK_POKE");
+    if (poke) {
+        const char* p = poke;
+        while (*p) {
+            char* end = NULL;
+            uint32_t addr = (uint32_t)strtoul(p, &end, 0);
+            if (!end || *end != ':') break;
+            uint32_t value = (uint32_t)strtoul(end + 1, &end, 0);
+            nk_w32(&cpu, addr, value);
+            printf("poke %#010x = %#010x\n", addr, value);
+            if (!end || *end != ',') break;
+            p = end + 1;
+        }
+    }
+
+    /* NK_PATCH=addr:word[,addr:word...]: code patches that survive the
+     * kernel's own .bss/memory initialisation (NK_POKE cannot touch .bss). */
+    const char* patch = getenv("NK_PATCH");
+    if (patch) {
+        const char* p = patch;
+        while (*p) {
+            char* end = NULL;
+            uint32_t addr = (uint32_t)strtoul(p, &end, 0);
+            if (!end || *end != ':') break;
+            uint32_t value = (uint32_t)strtoul(end + 1, &end, 0);
+            nk_w32(&cpu, addr, value);
+            printf("patch %#010x = %#010x\n", addr, value);
+            if (!end || *end != ',') break;
+            p = end + 1;
+        }
     }
 
     const char* sp_env = getenv("NK_SP");

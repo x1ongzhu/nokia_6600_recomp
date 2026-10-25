@@ -15,7 +15,7 @@
 | Kernel | 链接地址 `0x50310000`，入口 `0x50310054`（**ARM**，`push {r4,r5,r6,lr}` / `0xe92d4070`）；page-header-free stream 中 header `0x31004c`、text `0x3100b0`、text_size `0x28ac0` |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像默认 **725 个 image / 1,847 个 section**（无重叠），`--place-rodata` 为 **726 / 2,335**（含 RTC PDD 的 header-less block）；放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole，并可对已绑定 slot 做 ABI rebind（round 21，`config/imports-b7e-6600.txt`）；`NK_B7E` 安装初始 thread→process→CObjectIx 图并 watch `[0x800017d4]`（round 20/21）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 在真实 `RHeap::Alloc` 入口提供 bump heap；`NK_WATCH_MEM=rN:len` 在 watch 命中时 dump guest 内存 |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像默认 **725 个 image / 1,847 个 section**（无重叠），`--place-rodata` 为 **726 / 2,335**（含 RTC PDD 的 header-less block）；放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole，并可对已绑定 slot 做 ABI rebind（round 21，`config/imports-b7e-6600.txt`）；`NK_B7E` 安装初始 thread→process→CObjectIx 图并 watch `[0x800017d4]`（round 20/21）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 在真实 `RHeap::Alloc` 入口提供 bump heap；`NK_WATCH_MEM=rN:len` 在 watch 命中时 dump guest 内存；`NK_EXT_STUB=1` 给无 export 的嵌套 extension 安装 export 1；`NK_HLE_ZERO2` 清零 64-bit time 输出；`NK_POKE`/`NK_PATCH` 做 bring-up 探测 |
 | 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP`/PeaK 容器（record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`）已由 `kaep.py unpack` 导出；`install` 在 linked `0x80` 写可执行 handoff，loader 可进入 kernel `0x50310054`；mask ROM 的 record codec 仍未解出（B6a2d2b） |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）、**EKA1 executive call gate**（`NK_SWI_DIRECT`，round 18）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
@@ -79,6 +79,7 @@
 
 | M29 | **第 20 轮：MUL/MLA 目标寄存器修正；B7e 重新定性为 CObjectIx / 初始 process** | (1) **解释器 MUL/MLA bug**：`nokia_interp.c` 把 `Rd` 取成 bits 15-12，而 ARM 的 `Rd` 是 **bits 19-16**（bits 15-12 只是 MLA 的累加寄存器）。结果每条普通 `mul rd,rm,rs` 都写 **r0**，真正的目标不变；对象访问器（`0x50380270`）里的 `mul r2,r3,r2` 因此清掉 r0（结果指针）。修正为写 `c->r[rn]`，MLA 从 `c->r[rd]` 累加；`interp_selftest` 新增 `mul r2,r0,r1` / `mla` / 链式 `mul` 回归，断言 r0 不再被改写。 (2) **round 19 的 “RHeap::Alloc / null heap” 定性是错的**：`0x50380270` 不是堆分配器，而是**对象数组访问器**（`[this+0x18]` = array、`[this+0x14]` = element size、`[this]` = base）；调用者 `0x50318410` 是 handle→object 路径，读取 `[thread+0x18] -> [process+0x38]`。这与 SDK EUser ordinal 109 的 **`CObjectIx::At`** 一致。真正缺的是**初始 process 及其 object index**，不是 heap。 (3) **`NK_B7E` bring-up**：harness 新增单字写 watch（`nk_dbg_watch_write`，在 `nk_w32` 快路径触发），在 kernel 发布 current-thread 时安装 thread → process → `CObjectIx` → array 图；array 的 element fetch 返回 live current thread，vtable 用 `mov r0,#0; bx lr` 占位；另有一个 guest bump allocator。kernel 先后发布 `0x802ffd00` 和 `0x80001860`，都得到该图。 (4) **结果**：`NK_B7E=1` 运行 **5,575,900 条 ARM 指令、0 undefined、0 call fixups、0 recoveries**，越过 round-19 的 8,512 条 stop；新 frontier 是第二个 thread `0x80001860` 的栈下穿（`sp=0`、`pc=0`）。 (5) **低物理别名修正**：pre-MMU 的 `0x00000000` alias 现在跟随 `NK_RAM_EXTRA` 的大小（原先固定 3 MiB，6 MiB boot profile 会读到 alias 外）。验收：`tools/test_b7e.sh`；`tools/test_imports.sh` 的 import/ROMFS 断言保持通过 |
 | M30 | **第 21 轮：EUser import ABI 修正；RTC 驱动 rodata；KERN-NO-SESSION 22** | (1) **四个 kernel EUser import slot 的 ABI 不匹配**：kernel 链接时使用的 EUser `.def` 与本 ROM 的 EUser DLL 顺序不同，导致 panic printer 的 `0x503b391c`（ord 98）拿到 array accessor 而不是 `TDesC16::AtC`；panic init 的 `0x503b4d1c`（ord 1378）拿到 3-arg `TPtr16` ctor 而不是 2-arg；object-container init 的 `0x503b4b9c`（ord 1282）拿到字符串 copy 而不是 `TBuf16(int)`；locale init 的 `0x503b3b70`（ord 247）拿到 descriptor copy 而不是 `TDes16::Copy(buf,len)`。flat loader 现在对**已绑定** slot 也应用 `NK_IMPORTMAP` override，[`config/imports-b7e-6600.txt`](../config/imports-b7e-6600.txt) 显式 rebind 这 4 个 slot；确认用 map 仍是 `config/imports-6600.txt`（1 个 hole）。 (2) **B7E element fetch 修正**：`CObjectIx` 的 array vtable 必须填一个 **`TDesC8` descriptor**（随后调用 `TDesC8::Ptr` `0x5038891c`），不能只写裸指针；handle 路径还要返回带 vtable 的 harness CObject（`B7E_THREAD`），不能返回 live scheduler stack block。 (3) **RTC PDD rodata**：RTC 物理驱动 uid3 `0x100000d8`（header `0x33e340`，code `0x5033e2f4`，rodata `0x279c` @ stream `0x33ee40`）的 vtable/字符串在 `.text` 后的 header-less block。`romimage.py --place-rodata` 把 driver image 的 block 放到 `code+text_size`（仅在不越过下一个 packed header 时），RTC vtable `0x503413e8` 的 `+0x18` 现在是 `0x5033ef98`。默认 build 仍 725 image / 1,847 section；`--place-rodata` 为 726 / 2,335。 (4) **分配器/HAL stand-in**：RTC 构造函数用 `User::AllocZ -> RHeap::Alloc`（真实入口 `0x5038e2ec`）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 从 harness bump heap 返回清零块。HAL 全局 `[0x800003ac]` 由 `0x80003c00` 的 vtable 占位，`+0x108` 按 `r1` 返回 0/1。 (5) **新 frontier**：RTC 构造完成，kernel 在加载 **Econs.dll**（uid3 `0x100039e7`，code `0x5079d244`）时要求 file-server session，panic **KERN-NO-SESSION 22** 并在 `0x50312b88` halt。运行 **8,655 条、0 undefined、0 call fixups、0 unbound IAT、0 recoveries**。这是 ROMFS/file-server 任务，不是 import/layout/stack 问题；round 20 的 5,575,900 条实际是 panic printer 在坏 import/descriptor 上循环。新增 `NK_WATCH_MEM=rN:len`。验收：`tools/test_b7e.sh` |
+| M31 | **第 22 轮：RTC 扩展是嵌套 E32Image；分配器 ABI、HAL channel 与 27,470 条 boot** | (1) **“RTC rodata block” 是第二个 E32Image**：uid2 `0x100058d8`、text `0x5033ee14..0x50341414`（`0x2600`）、data `0x50341414`、export_count **0**。kernel 的 extension loader 先调用 image entry `0x5033ee14`（driver object 构造），随后通过 `[hdr+0x40]` 调 **export ordinal 1**；export_dir 为 0 时直接跳到 0。`NK_EXT_STUB=1` 在 high vector 安装一个单入口 export stub，并返回 HAL-like object 供 kernel 写入 `[0x800003ac]`。 (2) **RTC 驱动 `new` 的 ABI 不匹配**：`0x5033efa8`/`0x5033eff0` 以 `r0=0x38`/`8` 调用 EUser export index **1504**；该 ROM 的 export table 在该 index 是 **`RTest::operator()`**（引用 `": FAIL : ..."`/`"Checkpoint-fail"`），不是 `operator new`。driver 和 EUser 是用不同 `.def` revision 链接的。RTest 路径调用 `Console::NewL` → `RLibrary::Load("econs")` → `svc 0x76`，在没有 session 时 panic KERN-NO-SESSION。round 21 的 “file-server session” 因此是 ABI mismatch 的**症状**。`config/callmap-rtc-6600.txt` 用 `NK_HLE_ALLOC` 服务这两个 `new`。 (3) **HAL channel 必须是对象**：B7e HAL stub 旧版对 `r1=0` 返回整数 1；RTC driver 把它存到 `[this+8]`，随后 `ldr r3,[r0]; ldr pc,[r3,#0x18]` 解引用，跳到 0。现在返回 `0x80003a40`（vtable `0x80003c00`）。 (4) **系统时间/格式化路径**：`0x5033f040` 调 kernel 的 64-bit time helper，后者经 EUser slot `0x503b4d1c` 格式化；该 slot 在 round 21 被 rebind 成 2-arg `TPtr16` ctor 以修 panic printer，两个调用点需要不同 ABI。`NK_HLE_ZERO2=0xfffffff9` 直接把 64-bit 输出清零。 (5) **结果**：RTC 扩展完整初始化，kernel 进入 extension 之后的 boot init `0x50310fa4`；运行 **27,470 条、0 undefined、0 unbound IAT、0 recoveries**。新 frontier 是 `0x5031f3a8` 检查 kernel `.bss` 的 boot/timer descriptor `[0x80000b5c] == 0xff`（否则 panic PLAT 21）；调用点先构造 `"IrqTimer0"` descriptor（字面量 `0x50337200`），所以这是 kernel 的 timer/DFC 初始化，不是通用 HAL 表。直接跑 E32 entry 跳过了 mask ROM/kernel startup 对该结构的初始化。验收：`tools/test_rtc.sh` |
 
 ### 可复现命令
 
@@ -223,7 +224,23 @@ NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_b7e.sh
-tools/test_b7e.sh
+
+# round 22: RTC extension nested image, allocator ABI, HAL channel, 27,470 insns
+#   The RTC driver's operator new (EUser export index 1504) is RTest::operator()
+#   in this ROM; the callmap serves the two allocations.  The nested extension
+#   image has no export table, so NK_EXT_STUB installs export 1.  The run then
+#   reaches the post-extension boot descriptor at 0x80000b5c (panic PLAT 21).
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-b7e-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=8000000 \
+  NK_MMIO_N=0 NK_SWI_LOG=0 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x5031f3c0 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_rtc.sh
 ```
 
 ---
@@ -402,6 +419,58 @@ tools/test_b7e.sh
 
 验收：`tools/test_b7e.sh`（同时固定 RTC vtable、四个 rebind、8,655 条和
 KERN-NO-SESSION 22）。
+
+#### B10 第 22 轮：RTC 扩展是嵌套 E32Image；boot 推进到 27,470 条
+
+第 21 轮把 8,655 条的 KERN-NO-SESSION 定性为 file-server 依赖；第 22 轮
+证明它是 **RTC 驱动 allocator import 的 ABI mismatch**，并把 kernel 推进到
+extension 之后的 boot init。
+
+1. **“RTC rodata block” 是第二个 E32Image**：RTC 记录里第一个 image
+   （uid3 `0x100000d8`，code `0x5033e2f4`）之后，stream `0x33ee60` 是
+   **uid2 `0x100058d8`、uid3 0** 的 DLL header：entry/code
+   `0x5033ee14`、text `0x2600`、data `0x50341414`、`export_count=0`。
+   这段代码不是 rodata，而是真正被执行的 extension driver。kernel 的
+   extension loader `0x5031eae0` 先调用 entry `0x5033ee14`（driver object
+   构造 + Install），随后在 `0x5031ebbc` 用 `[hdr+0x40]` 调 **export
+   ordinal 1**；该 image 没有 export，于是跳到 0。`NK_EXT_STUB=1` 在
+   `0xffff0900` 安装单入口表、在 `0xffff0910` 安装
+   `ldr r0,[pc,#8]; bx lr; .word 0x80003a40`，并把 header 的
+   `export_count/export_dir` 改成 1/`0xffff0900`；kernel 把这个 HAL-like
+   object 写入 `[0x800003ac]`。
+2. **RTC `new` 的 import 落在 `RTest::operator()`**：
+   `0x5033efa8`（`r0=0x38`）和 `0x5033eff0`（`r0=8`）调用 EUser export
+   index 1504；该 ROM 的 export 表在该 index 是 `RTest::operator()`（代码
+   引用 `": FAIL : %S failed check %d\n"` 和 `"Checkpoint-fail\n"`）。
+   RTC 驱动期望 `operator new(size)`，于是把 `0x38` 当作 RTest 对象，
+   进入 console 路径，最终 `Console::NewL` → `RLibrary::Load("econs")`
+   → `svc 0x76`，在没有 session 时走 panic printer 的 KERN-NO-SESSION。
+   这说明 driver 与 EUser 的 `.def` revision 不同；`config/callmap-rtc-6600.txt`
+   用 `NK_HLE_ALLOC` 为这两个站点返回 bump-heap 指针。
+3. **HAL channel 必须是可解引用的对象**：B7e HAL stub 旧版对 `r1=0`
+   返回整数 1。RTC driver 把它存到 `[this+8]`，随后
+   `ldr r3,[r0]; ldr pc,[r3,#0x18]`，于是跳到 0。现在返回 guest object
+   `0x80003a40`（`[0] = 0x80003c00`，vtable 全是 zero stub）。
+4. **系统时间格式化共用 slot 的冲突**：`0x5033f040` 调 kernel 的 64-bit
+   time helper，helper 再经 EUser slot `0x503b4d1c` 格式化；该 slot 在
+   round 21 被 rebind 成 2-arg `TPtr16` ctor 以修 panic printer。两个调用
+   点需要不同 ABI，因此 `NK_HLE_ZERO2`（`0xfffffff9`）直接把 64-bit 输出
+   清零，driver 只消费两个 time word。
+5. **新 frontier：post-extension boot descriptor**。RTC 扩展完成后，
+   kernel 进入 `0x50310fa4`（初始化 `[0x80001774]=0x80000b80`、
+   `[0x80001778]=0xba`、清零 0x2e8 字节）并调用 `0x5031f3a8`；后者检查
+   kernel `.bss` 的 `[0x80000b5c] == 0xff`，否则 **panic PLAT 21** 并在
+   `0x50312b88` halt。调用点先构造 `"IrqTimer0"` descriptor（字面量
+   `0x50337200`），所以这是 kernel 的 timer/DFC 初始化。直接跑 E32 entry
+   跳过了 mask ROM/kernel startup 对该结构的填充。实验性 `NK_PATCH=0x5031f3b8:0xe3530000`（把 `cmp
+   r3,#0xff` 改成 `cmp r3,#0`）可让 boot 再前进 179 条到下一次
+   KERN-NO-SESSION，说明该检查是当前直接门槛；但正确做法是恢复
+   `0x80000b5c` 的 boot descriptor / HAL entry 表，而不是长期 patch。
+6. 运行数据：**27,470 条、0 undefined、0 unbound IAT、0 recoveries**，
+   `call fixups=15`（3 个 RTC callmap + 12 个 inferred ARM 修正），
+   `mmio 42 reads / 22 writes`。验收：`tools/test_rtc.sh`；旧的
+   `tools/test_b7e.sh`（8,655 / KERN-NO-SESSION 22）保持通过，作为
+   历史基线。
 
 #### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
 
@@ -893,7 +962,9 @@ entry：
 - [x] **B7e1** `NK_B7E` 初始 thread → process → CObjectIx 图（round 20/21）：`0x50380270` 是 `CObjectIx::At` 而非 `RHeap::Alloc`；写 watch 在 kernel 发布 `[0x800017d4]` 时安装图。round 21 修正 element fetch 为 `TDesC8` descriptor 并返回带 vtable 的 CObject；运行 8,655 条、0 undefined/recoveries，停在 KERN-NO-SESSION 22。验收：`tools/test_b7e.sh`
 - [ ] **B7e2** 真实 `SThread`/`SProcess` 字段：从 boot descriptor / kernel data 恢复，替代 `NK_B7E` 的占位 vtable 和 element fetch（round 20 的 5,575,900 条栈下穿已被 round 21 重新定性为 panic printer 循环，不再是直接 frontier）
 - [x] **B7e3** `CObjectIx` element fetch 的 descriptor 语义（round 21）：array vtable 必须返回 `TPtrC8{length, object_ptr}`，随后 `TDesC8::Ptr` 才能解析；handle 路径返回带 vtable 的 harness CObject
-- [ ] **B7h** ROMFS/E32 file-server session：kernel 加载 Econs.dll（uid3 `0x100039e7`）时 panic KERN-NO-SESSION 22；实现 ROMFS 文件服务或显式 HLE 返回已放置的 ROM image（round 21 新 frontier）
+- [x] **B7h** ~~ROMFS/E32 file-server session~~：round 21 的 KERN-NO-SESSION 22 在 round 22 被重新定性为 RTC 驱动 allocator import 的 ABI mismatch（EUser export 1504 = `RTest::operator()`，driver 期望 `operator new`），不是真实的 file-server 依赖。`config/callmap-rtc-6600.txt` 用 HLE alloc 修掉两个 `new` 站点；RTC 扩展完整初始化后 boot 到 27,470 条。真正的 ROMFS/E32 文件服务留到 P3（UI/app 加载）。
+- [x] **B7h2** RTC 扩展的嵌套 E32Image：`rtc.dll` 记录里第二个 image（uid2 `0x100058d8`，text `0x5033ee14..0x50341414`，export_count 0）；kernel extension loader 调 entry 后还会调 export 1。`NK_EXT_STUB=1` 安装单入口 stub；HAL channel 返回真实对象；`NK_HLE_ZERO2` 处理 64-bit time 输出。验收：`tools/test_rtc.sh`（27,470 条、0 undefined/recoveries）。
+- [ ] **B7h3** post-extension boot descriptor：`0x5031f3a8` 检查 `[0x80000b5c] == 0xff`，否则 PLAT 21；调用点先构造 `"IrqTimer0"` descriptor（`0x50337200`），所以这是 kernel timer/DFC 对象；下一步是恢复其初始 queue/state（与 B7d3 同源），而不是用 `NK_PATCH` 跳过。
 - [ ] **B7e3** `CObjectIx::At` 的 handle→object 语义：`NK_B7E` 目前对 handle 0 返回 live current thread；需要真实 object index 元素（thread/process/chunk/…）
 - [x] **B7f** flat-image import binding：`recompiler/imports.py` 枚举全镜像 **1,111** 个 stub、kernel **257** 个（236 EUser + 21 ELocl），唯一 kernel hole 是 ELocl ord 20；`NK_IMPORTMAP=config/imports-6600.txt` 在 flat loader 绑定该 slot（1 patched），运行时 `unbound IAT=0`。验收：`tools/test_imports.sh`
 - [ ] **B7g** timer/interrupt/DMA 完成路径：替代 `NK_SWI_COMPLETE`，让 `TRequestStatus` 由设备模型完成
@@ -977,6 +1048,33 @@ entry：
 ---
 
 ## 9. 变更记录
+
+- 2026-10-25（本轮 22）：**RTC 扩展是嵌套 E32Image；分配器 ABI、HAL channel
+  与 post-extension boot descriptor**。
+  (1) **“RTC rodata block” 是第二个 E32Image**：rtc.dll 记录内 stream
+  `0x33ee60` 是 uid2 `0x100058d8`、uid3 0 的 DLL header，entry/code
+  `0x5033ee14`、text `0x2600`、data `0x50341414`、export_count 0。它不是
+  rodata，而是真正执行的 extension driver。kernel 的 extension loader 先
+  调 entry，随后用 `[hdr+0x40]` 调 export 1；没有 export 时跳到 0。
+  `NK_EXT_STUB=1` 安装单入口 export stub，并返回 HAL-like object。
+  (2) **RTC `new` import 落在 `RTest::operator()`**：EUser export index
+  1504 在本 ROM 是 RTest（引用 `": FAIL : ..."`/`"Checkpoint-fail"`），
+  不是 `operator new`；driver 与 EUser 的 `.def` revision 不同。RTest
+  路径调用 `Console::NewL` → `RLibrary::Load("econs")` → `svc 0x76`，
+  没有 session 时 panic KERN-NO-SESSION。round 21 的 “file-server session”
+  因此是 ABI mismatch 的症状。`config/callmap-rtc-6600.txt` 用
+  `NK_HLE_ALLOC` 修掉两个 `new` 站点。
+  (3) **HAL channel**：旧 stub 对 `r1=0` 返回整数 1，driver 把它存到
+  `[this+8]` 并解引用；现在返回 `0x80003a40`（vtable `0x80003c00`）。
+  `NK_HLE_ZERO2` 处理 driver 的 64-bit system-time 输出，避免与 round 21
+  的 `TPtr16` rebind 冲突。
+  (4) **结果**：RTC 扩展完整初始化，kernel 进入 post-extension boot init
+  `0x50310fa4`；运行 **27,470 条、0 undefined、0 unbound IAT、0
+  recoveries**，`call fixups=15`。新 frontier 是 `0x5031f3a8` 检查
+  `[0x80000b5c] == 0xff`，否则 panic PLAT 21；该结构由 mask ROM/kernel
+  startup 填充，直接 E32 entry 跳过了它。新增 `NK_POKE`/`NK_PATCH` 诊断
+  开关（实验用）。验收：`tools/test_rtc.sh`；旧 `tools/test_b7e.sh`
+  （8,655 / KERN-NO-SESSION 22）继续作为历史基线通过。
 
 - 2026-10-25（本轮 19）：**ROMFS 启动表命名修正 + import/IAT 全表；真实 rtc.dll
   extension 路径**。

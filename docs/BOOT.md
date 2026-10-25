@@ -132,6 +132,92 @@ i.e. the real `SThread`/`SProcess` fields (especially the thread's stack and
 object slots), not an import, layout or heap stop.  The pre-MMU low alias now
 also follows `NK_RAM_EXTRA`.  `tools/test_b7e.sh` is the acceptance test.
 
+### Round 22: the RTC extension is a nested E32 image (2026-10-25)
+
+**1. The header-less block after the RTC PDD is a second image, not rodata.**
+The `rtc.dll` record contains two E32 images.  The first is the PDD factory
+(uid3 `0x100000d8`, code `0x5033e2f4`, text `0xa9c`, export 1 hole at
+`0x5033ed90`).  At stream `0x33ee60` (VA `0x5033edb0`) there is a second
+`TRomImageHeader`:
+
+```
+uid1 0x10000079  uid2 0x100058d8  uid3 0
+entry/code 0x5033ee14   text 0x2600   data 0x50341414
+export_count 0           export_dir 0
+```
+
+Its text is the code at `0x5033ee14..0x50341414`, the RTC vtable is at
+`0x503413e8`, and the driver object constructor is `0x5033ee18`.  The
+`--place-rodata` block places the right bytes, but the label "rodata" was
+wrong: this code executes.
+
+The kernel's extension loader (`0x5031eae0`) calls the image entry
+`0x5033ee14` and then, at `0x5031ebbc`, calls export ordinal 1 through
+`[hdr+0x40]`.  With a zero export directory that is a jump to 0.
+`NK_EXT_STUB=1` installs a one-entry export table at `0xffff0900` and a
+stub at `0xffff0910` (`ldr r0,[pc,#8]; bx lr; .word 0x80003a40`), and points
+the header at it.  The kernel installs the returned HAL-like object at
+`[0x800003ac]`.
+
+**2. The RTC driver's `operator new` import is RTest in this ROM.**  The
+constructor calls the same EUser import slot (`0x503b4f14`, export index
+1504) with `r0=0x38` and `r0=8` and treats the result as a pointer.  In this
+ROM that slot holds `RTest::operator()`: its code references
+`": FAIL : %S failed check %d\n"` and `"Checkpoint-fail\n"`.  The driver and
+EUser were linked against different `.def` revisions.  RTest then enters
+`Console::NewL` → `RLibrary::Load("econs")` → `svc 0x76`, and the kernel
+panics **KERN-NO-SESSION** because the current thread has no session object.
+The round-21 "file-server session" was therefore a symptom of a driver
+ABI mismatch, not a boot service dependency.
+[`config/callmap-rtc-6600.txt`](../config/callmap-rtc-6600.txt) serves the
+two `new` sites from the harness bump heap (`NK_HLE_ALLOC`).
+
+**3. The HAL channel must be a dereferenceable object.**  The B7e HAL stub
+used to return the integer 1 for `r1=0`.  The RTC driver stores it at
+`[this+8]` and later executes `ldr r3,[r0]; ldr pc,[r3,#0x18]`, so it jumped
+to 0.  The stub now returns `0x80003a40`, a guest object whose vtable is
+`0x80003c00`.  The driver's 64-bit system-time request (`0x5033f040`) is
+served by the new `NK_HLE_ZERO2` sentinel (`0xfffffff9`): the kernel's time
+formatter uses the same EUser slot `0x503b4d1c` that round 21 rebound to the
+2-arg `TPtr16` constructor for the panic printer, and the two call sites need
+different ABIs.
+
+**4. Result and the new frontier.**  The extension initialises completely
+and the kernel advances to the post-extension boot initialisation
+`0x50310fa4`:
+
+```
+insns=27470 (ARM 27469 / Thumb 0), undefined=0, call fixups=15,
+unbound IAT=0, recoveries=0
+mmio: 42 reads, 22 writes
+stop: self-branch (panic halt) at 0x50312b88
+```
+
+`0x5031f3a8` checks `[0x80000b5c] == 0xff` before using the kernel timer
+object and panics PLAT 21 otherwise; the caller builds the `"IrqTimer0"`
+descriptor (literal `0x50337200`), so this is the kernel timer/DFC init.  `0x80000b5c` is in kernel `.bss`; the direct
+E32 entry skipped the mask-ROM/kernel startup that fills it.  `NK_POKE` and
+`NK_PATCH` were added to probe this structure: an experimental patch of the
+`cmp r3,#0xff` to `cmp r3,#0` advances another 179 instructions to the next
+KERN-NO-SESSION, confirming that this check is the immediate gate.  The
+correct next step is to model the boot descriptor/HAL entry table, not to
+patch the kernel.  `tools/test_rtc.sh` is the acceptance test.
+
+```
+tools/test_rtc.sh
+
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-b7e-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=8000000 \
+  NK_MMIO_N=0 NK_SWI_LOG=0 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x5031f3c0 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+```
+
 ### Round 16 correction: the 0xec page headers (2026-10-25)
 
 The flash image is a sequence of `0x20ec`-byte records, each a **`0xec`-byte
@@ -1485,6 +1571,12 @@ The phased plan, task board and acceptance criteria are in
 
 ## Round 21 (2026-10-25): EUser import ABI, RTC driver rodata, and KERN-NO-SESSION
 
+> **Round 22 supersedes sections 3–5 below.**  The "RTC rodata block" is a
+> nested second E32Image, and the ECons/KERN-NO-SESSION stop was the RTC
+> driver's misbound `operator new` entering EUser's RTest console path.  With
+> the round-22 fixups the run reaches 27,470 instructions; see the Round 22
+> section above.
+
 Round 20 installed the thread → process → `CObjectIx` graph and reported a
 5,575,900-instruction run ending at `pc=0` with `sp=0`.  Round 21 shows that
 run was **not** a second-thread stack frontier: it was the panic printer
@@ -1550,8 +1642,9 @@ NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000
 
 The constructor also calls `[0x800003ac]->vtable[0x108]` before the loader
 registers the real HAL object.  A stand-in HAL object at `0x80003a00` with a
-vtable at `0x80003c00` returns 0 for `r1=1` (success) and 1 for `r1=0`
-(channel handle).
+vtable at `0x80003c00` returns 0 for `r1=1` (success) and, from round 22, a
+dereferenceable channel object for `r1=0` (the old integer 1 crashed when the
+RTC driver read its vtable).
 
 ### 5. The new frontier
 
@@ -1564,6 +1657,12 @@ fixups, 0 unbound IAT, 0 recoveries**.
 
 The next task is the ROMFS/E32 file-service path (or an explicit HLE that
 returns the already-placed ROM image), not a stack/exception model.
+
+> **Round 22:** the ECons load was the misbound RTC allocator/`RTest` path, so
+> no file server was actually needed here.  With the round-22 fixups the
+> extension completes and the run stops at the kernel timer/DFC init
+> (`0x5031f3a8`, `"IrqTimer0"`, `[0x80000b5c] == 0xff`, PLAT 21) after 27,470
+> instructions.
 
 ### Reproduce
 

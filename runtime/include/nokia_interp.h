@@ -97,6 +97,7 @@ typedef struct nk_code_range {
 #define NK_HLE_MEMZERO 0xFFFFFFFCu
 #define NK_HLE_ALLOC 0xFFFFFFFBu
 #define NK_HLE_MEMCPY 0xFFFFFFFAu
+#define NK_HLE_ZERO2  0xFFFFFFF9u   /* zero two words at [r0] (TTime/64-bit out) */
 
 /* A call-site fixup: the packed image's BL target is stale, but we know the
  * real callee.  Keyed by the call-site PC (not the target) so the same stale
@@ -111,7 +112,7 @@ typedef struct nk_callmap_entry {
  * The shadow call stack only shows calls that are still on the stack; when a
  * trace runs into a broken loop deep in a library the ring still shows how it
  * got there.  Used by NK_WATCH (see boot_kernel.c). */
-#define NK_CALL_RING 64
+#define NK_CALL_RING 1024
 typedef struct nk_call_rec {
     uint32_t call_pc;
     uint32_t raw_target;   /* target encoded in the instruction */
