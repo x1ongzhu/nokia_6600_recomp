@@ -387,6 +387,11 @@ tools/test_b7e.sh
    0 unbound IAT、0 recoveries**。这是 ROMFS/file-server 任务，不是
    import/layout/stack 问题。下一步：建模 ROMFS/E32 文件服务（或显式 HLE
    返回已放置的 ROM image），再继续驱动/进程启动。
+   诊断线索：panic 前最后的关键 SVC 是 `SWI 0x52`（`0x50392b1c` →
+   service `0x503245bc`，参数 `r0=0x64 r1=0x14/0x64 r2=0x503b2f24`），
+   随后 `SWI 0x72`（trap push）和 `SWI 0x76`（`Kernel::Panic` 22）。
+   service `0x503245bc` 取一个全局 session/server 对象并调用
+   `0x50336abc`；该对象为空就是 KERN-NO-SESSION 的直接来源。
 6. **banked registers / SPSR / 异常模型（仍待）**：`svc` 仍是直接调用而非
    进入 `0x50314f30` 的 SVC vector；kernel 的 `msr cpsr_c` 模式切换、
    `mrs spsr`、`movs pc,lr`/`ldm ^` 还没有完整异常语义。`NK_BANKED=1`

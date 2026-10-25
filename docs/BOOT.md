@@ -1582,3 +1582,23 @@ tools/test_b7e.sh
 `NK_WATCH_MEM=r7:0x40` (with `NK_WATCH=pc`) dumps guest memory at a register
 when the watch fires; it was added to identify the zero RTC vtable and the
 panic category descriptor.
+
+### Diagnostic: the last SVCs before KERN-NO-SESSION
+
+With `NK_SWI_LOG=64` the tail before the panic is:
+
+```
+SWI 0x52 at 0x50392b1c -> service 0x503245bc
+  (r0=0x64 r1=0x14  r2=0x14     r3=0x503a9fcc)
+SWI 0x52 at 0x50392b1c -> service 0x503245bc
+  (r0=0x64 r1=0x64  r2=0x503b2f24 r3=0x64)
+SWI 0x72 at 0x50392b9c -> trap push (0x503187c8)
+SWI 0x6c at 0x50392b88 -> current thread heap (0x503187b8)
+SWI 0xc00076 at 0x50392bb0 -> Kernel::Panic (0x5032557c)
+  (r0=0x16 ...)
+```
+
+`0x503245bc` loads a global session/server object and calls `0x50336abc`
+with it; a null object here is the direct source of the "KERN-NO-SESSION"
+panic.  The next round should model that service (and the file open/read path)
+rather than treating the panic as an import or stack problem.
