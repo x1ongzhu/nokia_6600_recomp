@@ -219,6 +219,8 @@ typedef struct nk_interp {
     uint32_t    watch_pc;        /* dump state the first time PC hits this */
     int         watch_hits;      /* how many times to report (-1 = every) */
     int         watch_log;       /* calls to print when the watch fires */
+    int         watch_mem_reg;   /* register whose memory is dumped (-1 = off) */
+    uint32_t    watch_mem_len;   /* bytes to dump around that register */
 
     /* Bring-up watchdog: a tight loop that keeps executing the same few
      * addresses (typically a descriptor scan with a bogus argument) is treated

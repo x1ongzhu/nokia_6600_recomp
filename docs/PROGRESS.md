@@ -15,7 +15,7 @@
 | Kernel | 链接地址 `0x50310000`，入口 `0x50310054`（**ARM**，`push {r4,r5,r6,lr}` / `0xe92d4070`）；page-header-free stream 中 header `0x31004c`、text `0x3100b0`、text_size `0x28ac0` |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像放置 **725 个 image / 1,847 个 section**（无重叠），并放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole（round 19）；`NK_B7E` 安装初始 thread→process→CObjectIx 图并 watch `[0x800017d4]`（round 20） |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像默认 **725 个 image / 1,847 个 section**（无重叠），`--place-rodata` 为 **726 / 2,335**（含 RTC PDD 的 header-less block）；放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole，并可对已绑定 slot 做 ABI rebind（round 21，`config/imports-b7e-6600.txt`）；`NK_B7E` 安装初始 thread→process→CObjectIx 图并 watch `[0x800017d4]`（round 20/21）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 在真实 `RHeap::Alloc` 入口提供 bump heap；`NK_WATCH_MEM=rN:len` 在 watch 命中时 dump guest 内存 |
 | 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP`/PeaK 容器（record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`）已由 `kaep.py unpack` 导出；`install` 在 linked `0x80` 写可执行 handoff，loader 可进入 kernel `0x50310054`；mask ROM 的 record codec 仍未解出（B6a2d2b） |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）、**EKA1 executive call gate**（`NK_SWI_DIRECT`，round 18）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
@@ -78,6 +78,7 @@
 | M28 | **第 19 轮：ROMFS 启动表命名修正；import/IAT 全表；真实 rtc.dll extension 路径** | (1) **`\System\Libs` 不是 Programs**：kernel 下方 586 项目录是 **Libs**，ROM header 的 `iPrimaryFile/iSecondaryFile/iVariantFile/iExtensionFile`（`0x5000009c/0xa0/0xc8/0xcc`）就是指向它的 `TRomEntry`：`ekern.exe`、`EFile.exe`、`ecust.dll`、`rtc.dll`。旧 build 把 171 项 `Plugins` 内容覆盖到 Libs 的 VA `0x50301ec0`，破坏这些 entry，kernel loader 在 `0x5031eae0` 把 UTF-16 文件名当成 `TRomImageHeader`（`[r3+4]`）。现在 packed 目录块按线性 runtime VA 放置并逐目录校验；`\System\Programs` 是真正的 **55** 项 server 列表，`\System\Libs\Plugins` 是 **171** 项。 (2) **import map**：新增 [`imports.py`](../recompiler/imports.py)。EKA1 import stub 是 `ldr ip,[pc]; ldr pc,[ip]`，slot 就是导出 image 的 `.edata` entry；flat image 的合法 export 已经是绑定地址，无需搬运。全镜像 **1,111** 个可解析 stub；kernel **257** 个（236 EUser + 21 ELocl），唯一未绑定的是 **ELocl ord 20**（export table hole `0xffffffff`），由 locale 初始化 `0x50326078` 无条件调用。 (3) **`NK_IMPORTMAP`**：flat loader 扫描 stub，校验 slot→(uid,ordinal,value)，对 hole 应用 `config/imports-6600.txt`；`zero` 生成 high-vector `mov r0,#0; bx lr` code stub 并登记 code range。 (4) **IAT 判定修正**：slot 值 `<0xffff0000` 但属于已登记 code range（如 high-vector stub）现在是合法绑定。 (5) **新 frontier**：修正 ROMFS 后，kernel 走真实 `rtc.dll` extension 路径，**8,512 条指令、0 unbound IAT、0 undefined**，停在 EUser `RHeap::Alloc`（`0x50380270`）：kernel 把 `[0x800017d4]` 写成了 `0x802ffd00`，thread/process/heap 对象不再是 harness 预置值，`[heap+0x18]` 为 0 → `bx ip` 到 0。这是 **B7e 初始 thread/process/heap** 缺口，不再是 import/layout 问题。验收：`tools/test_imports.sh`；全部 13 个测试通过 |
 
 | M29 | **第 20 轮：MUL/MLA 目标寄存器修正；B7e 重新定性为 CObjectIx / 初始 process** | (1) **解释器 MUL/MLA bug**：`nokia_interp.c` 把 `Rd` 取成 bits 15-12，而 ARM 的 `Rd` 是 **bits 19-16**（bits 15-12 只是 MLA 的累加寄存器）。结果每条普通 `mul rd,rm,rs` 都写 **r0**，真正的目标不变；对象访问器（`0x50380270`）里的 `mul r2,r3,r2` 因此清掉 r0（结果指针）。修正为写 `c->r[rn]`，MLA 从 `c->r[rd]` 累加；`interp_selftest` 新增 `mul r2,r0,r1` / `mla` / 链式 `mul` 回归，断言 r0 不再被改写。 (2) **round 19 的 “RHeap::Alloc / null heap” 定性是错的**：`0x50380270` 不是堆分配器，而是**对象数组访问器**（`[this+0x18]` = array、`[this+0x14]` = element size、`[this]` = base）；调用者 `0x50318410` 是 handle→object 路径，读取 `[thread+0x18] -> [process+0x38]`。这与 SDK EUser ordinal 109 的 **`CObjectIx::At`** 一致。真正缺的是**初始 process 及其 object index**，不是 heap。 (3) **`NK_B7E` bring-up**：harness 新增单字写 watch（`nk_dbg_watch_write`，在 `nk_w32` 快路径触发），在 kernel 发布 current-thread 时安装 thread → process → `CObjectIx` → array 图；array 的 element fetch 返回 live current thread，vtable 用 `mov r0,#0; bx lr` 占位；另有一个 guest bump allocator。kernel 先后发布 `0x802ffd00` 和 `0x80001860`，都得到该图。 (4) **结果**：`NK_B7E=1` 运行 **5,575,900 条 ARM 指令、0 undefined、0 call fixups、0 recoveries**，越过 round-19 的 8,512 条 stop；新 frontier 是第二个 thread `0x80001860` 的栈下穿（`sp=0`、`pc=0`）。 (5) **低物理别名修正**：pre-MMU 的 `0x00000000` alias 现在跟随 `NK_RAM_EXTRA` 的大小（原先固定 3 MiB，6 MiB boot profile 会读到 alias 外）。验收：`tools/test_b7e.sh`；`tools/test_imports.sh` 的 import/ROMFS 断言保持通过 |
+| M30 | **第 21 轮：EUser import ABI 修正；RTC 驱动 rodata；KERN-NO-SESSION 22** | (1) **四个 kernel EUser import slot 的 ABI 不匹配**：kernel 链接时使用的 EUser `.def` 与本 ROM 的 EUser DLL 顺序不同，导致 panic printer 的 `0x503b391c`（ord 98）拿到 array accessor 而不是 `TDesC16::AtC`；panic init 的 `0x503b4d1c`（ord 1378）拿到 3-arg `TPtr16` ctor 而不是 2-arg；object-container init 的 `0x503b4b9c`（ord 1282）拿到字符串 copy 而不是 `TBuf16(int)`；locale init 的 `0x503b3b70`（ord 247）拿到 descriptor copy 而不是 `TDes16::Copy(buf,len)`。flat loader 现在对**已绑定** slot 也应用 `NK_IMPORTMAP` override，[`config/imports-b7e-6600.txt`](../config/imports-b7e-6600.txt) 显式 rebind 这 4 个 slot；确认用 map 仍是 `config/imports-6600.txt`（1 个 hole）。 (2) **B7E element fetch 修正**：`CObjectIx` 的 array vtable 必须填一个 **`TDesC8` descriptor**（随后调用 `TDesC8::Ptr` `0x5038891c`），不能只写裸指针；handle 路径还要返回带 vtable 的 harness CObject（`B7E_THREAD`），不能返回 live scheduler stack block。 (3) **RTC PDD rodata**：RTC 物理驱动 uid3 `0x100000d8`（header `0x33e340`，code `0x5033e2f4`，rodata `0x279c` @ stream `0x33ee40`）的 vtable/字符串在 `.text` 后的 header-less block。`romimage.py --place-rodata` 把 driver image 的 block 放到 `code+text_size`（仅在不越过下一个 packed header 时），RTC vtable `0x503413e8` 的 `+0x18` 现在是 `0x5033ef98`。默认 build 仍 725 image / 1,847 section；`--place-rodata` 为 726 / 2,335。 (4) **分配器/HAL stand-in**：RTC 构造函数用 `User::AllocZ -> RHeap::Alloc`（真实入口 `0x5038e2ec`）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 从 harness bump heap 返回清零块。HAL 全局 `[0x800003ac]` 由 `0x80003c00` 的 vtable 占位，`+0x108` 按 `r1` 返回 0/1。 (5) **新 frontier**：RTC 构造完成，kernel 在加载 **Econs.dll**（uid3 `0x100039e7`，code `0x5079d244`）时要求 file-server session，panic **KERN-NO-SESSION 22** 并在 `0x50312b88` halt。运行 **8,655 条、0 undefined、0 call fixups、0 unbound IAT、0 recoveries**。这是 ROMFS/file-server 任务，不是 import/layout/stack 问题；round 20 的 5,575,900 条实际是 panic printer 在坏 import/descriptor 上循环。新增 `NK_WATCH_MEM=rN:len`。验收：`tools/test_b7e.sh` |
 
 ### 可复现命令
 
@@ -208,6 +209,20 @@ NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=6000000 NK_B7E=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
+
+# round 21: ABI rebinds + RTC PDD rodata + allocator/HAL stand-ins
+#   8,655 instructions, 0 undefined/fixups/unbound/recoveries,
+#   halt in the panic printer at 0x50312b88 with KERN-NO-SESSION 22
+.venv/bin/python recompiler/romimage.py build 6600_mcu.bin \
+  out/6600_runtime.bin --place-rodata
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-b7e-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=8000000 NK_B7E=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_b7e.sh
 tools/test_b7e.sh
 ```
 
@@ -327,20 +342,61 @@ tools/test_b7e.sh
      `RHeap::Alloc` 的结果指针。现在写 bits 19-16，MLA 从 bits 15-12
      累加，`interp_selftest` 有回归。
    - **`NK_B7E`**：安装 thread → process → `CObjectIx` → array 图，并在
-     kernel 写 `[0x800017d4]` 时重装。运行 **5,575,900 条指令、0 undefined、
-     0 call fixups、0 recoveries**；kernel 创建第二个 thread `0x80001860` 后
-     栈下穿（`sp=0`、`pc=0`）。
+     kernel 写 `[0x800017d4]` 时重装。round 20 记录 **5,575,900 条指令、
+     0 undefined、0 call fixups、0 recoveries**；**round 21 重新定性**：这
+     5.575M 条是 panic printer 在四个 ABI 错误的 EUser import 和一个裸指针
+     object-index element 上循环，不是第二个 thread 的真实栈下穿。修正后
+     同一路径在 **8,655 条** 就以 KERN-NO-SESSION 22 停下，见 B9。
    - 该图是显式 bring-up stand-in；下一步是从 boot descriptor 恢复真实
      `SProcess`/`SThread` 的字段（尤其是第二个 thread 的 stack/object 字段）。
-4. **banked registers / SPSR / 异常模型**：`svc` 仍是直接调用而非进入
-   `0x50314f30` 的 SVC vector；kernel 的 `msr cpsr_c` 模式切换、`mrs spsr`、
-   `movs pc,lr`/`ldm ^` 还没有完整异常语义。`NK_BANKED=1` 已实现 banked/
-   SPSR 模型和 harness 模式栈；kernel 自己的 mode-stack setup 仍依赖
-   缺失的 boot state。
-5. **等待/中断完成路径**：`NK_SWI_COMPLETE=0x4d` 把 `TRequestStatus*` 直接
-   写 0；真实路径需要 timer/interrupt/DMA 的完成投递。
 
 验收：`tools/test_imports.sh`、`tools/test_executive.sh`、`tools/test_b7e.sh`。
+
+#### B9 第 21 轮：EUser import ABI / RTC rodata / file-server session frontier
+
+1. **四个 kernel EUser import slot 的 ABI 不匹配（已用显式 rebind 隔离）**：
+   kernel 和 ROM 里的 EUser DLL 来自不同的 `.def` revision。`0x503b391c`
+   （ord 98）应为 `TDesC16::AtC` 却指向 array accessor；`0x503b4d1c`
+   （ord 1378）应为 2-arg `TPtr16` ctor 却指向 3-arg；`0x503b4b9c`
+   （ord 1282）应为 `TBuf16(int)` 却指向字符串 copy；`0x503b3b70`
+   （ord 247）应为 `TDes16::Copy(buf,len)` 却指向 descriptor copy。flat
+   loader 现在对已绑定 slot 也应用 override；`config/imports-b7e-6600.txt`
+   把这四个 slot 固定到实际调用点需要的实现。确认-only 的
+   `config/imports-6600.txt` 保持 1 个 ELocl hole。
+2. **B7E element fetch 必须是 descriptor**：`0x503802b0` 随后调用
+   `TDesC8::Ptr`（`0x5038891c`），所以 array vtable 要在 `r0` 处写
+   `{0x10000004, object_ptr}`，而不是只写裸指针；handle 路径还要返回带
+   vtable 的 harness CObject（`B7E_THREAD`），不能返回 live scheduler block。
+3. **RTC PDD 的 header-less block**：RTC 物理驱动 uid3 `0x100000d8`
+   （header `0x33e340`，code `0x5033e2f4`，text `0xa9c`）在 `.text` 后有
+   `0x279c` 字节 rodata（stream `0x33ee40`），其中 `0x503413e8` 是 vtable；
+   `+0x18` = `0x5033ef98`。`romimage.py --place-rodata` 把 driver image
+   的 block 放到 `code+text_size`（只在不超过下一个 packed header 时），
+   默认 build 仍 725 image / 1,847 section，`--place-rodata` 为
+   **726 / 2,335**。这是 B3c 的第一个**真正需要运行时放置**的 gap；RTC
+   驱动因此不再读零 vtable。
+4. **分配器 / HAL stand-in**：RTC 构造调用 `User::AllocZ -> RHeap::Alloc`
+   （真实入口 `0x5038e2ec`）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec`
+   从 harness bump heap 返回清零块。HAL 全局 `[0x800003ac]` 用
+   `0x80003c00` 的 vtable 占位，`+0x108` 按 `r1` 返回 0/1（r1=1 时 0 表示
+   success；r1=0 时非 0 是 channel handle）。
+5. **新 frontier：KERN-NO-SESSION 22（Econs.dll）**：RTC 驱动构造完成后，
+   kernel 在加载 **Econs.dll**（uid3 `0x100039e7`，code `0x5079d244`）时
+   要求 file-server session；session 不存在，panic **KERN-NO-SESSION 22**
+   并在 `0x50312b88` halt。运行 **8,655 条、0 undefined、0 call fixups、
+   0 unbound IAT、0 recoveries**。这是 ROMFS/file-server 任务，不是
+   import/layout/stack 问题。下一步：建模 ROMFS/E32 文件服务（或显式 HLE
+   返回已放置的 ROM image），再继续驱动/进程启动。
+6. **banked registers / SPSR / 异常模型（仍待）**：`svc` 仍是直接调用而非
+   进入 `0x50314f30` 的 SVC vector；kernel 的 `msr cpsr_c` 模式切换、
+   `mrs spsr`、`movs pc,lr`/`ldm ^` 还没有完整异常语义。`NK_BANKED=1`
+   已实现 banked/SPSR 模型和 harness 模式栈；kernel 自己的 mode-stack
+   setup 仍依赖缺失的 boot state。
+7. **等待/中断完成路径（仍待）**：`NK_SWI_COMPLETE=0x4d` 把
+   `TRequestStatus*` 直接写 0；真实路径需要 timer/interrupt/DMA 的完成投递。
+
+验收：`tools/test_b7e.sh`（同时固定 RTC vtable、四个 rebind、8,655 条和
+KERN-NO-SESSION 22）。
 
 #### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
 
@@ -829,8 +885,10 @@ entry：
 - [x] **B7d1** banked registers / SPSR 模型（`NK_BANKED=1`）：MSR/MRS CPSR/SPSR、模式 bank、`movs pc,lr`/`ldm ^` 异常返回、harness 模式栈
 - [ ] **B7d2** 真实 SVC/IRQ/FIQ 异常入口：`svc` 进入 `0x50314f30`，设置 SPSR_svc 并用 SPSR 返回；kernel 的 mode-stack setup 仍依赖缺失的 boot state
 - [ ] **B7d3** boot descriptor / 初始模式栈：kernel 从 boot state 推导 `0xfffffffc/0`，需要真实 descriptor 或恢复其字段
-- [x] **B7e1** `NK_B7E` 初始 thread → process → CObjectIx 图（round 20）：`0x50380270` 是 `CObjectIx::At` 而非 `RHeap::Alloc`；写 watch 在 kernel 发布 `[0x800017d4]` 时安装图。运行 5,575,900 条、0 undefined/recoveries，停在第二个 thread `0x80001860` 的栈下穿。验收：`tools/test_b7e.sh`
-- [ ] **B7e2** 真实 `SThread`/`SProcess` 字段与第二个 thread 的 stack/object 字段：从 boot descriptor / kernel data 恢复，替代 `NK_B7E` 的占位 vtable 和 element fetch
+- [x] **B7e1** `NK_B7E` 初始 thread → process → CObjectIx 图（round 20/21）：`0x50380270` 是 `CObjectIx::At` 而非 `RHeap::Alloc`；写 watch 在 kernel 发布 `[0x800017d4]` 时安装图。round 21 修正 element fetch 为 `TDesC8` descriptor 并返回带 vtable 的 CObject；运行 8,655 条、0 undefined/recoveries，停在 KERN-NO-SESSION 22。验收：`tools/test_b7e.sh`
+- [ ] **B7e2** 真实 `SThread`/`SProcess` 字段：从 boot descriptor / kernel data 恢复，替代 `NK_B7E` 的占位 vtable 和 element fetch（round 20 的 5,575,900 条栈下穿已被 round 21 重新定性为 panic printer 循环，不再是直接 frontier）
+- [x] **B7e3** `CObjectIx` element fetch 的 descriptor 语义（round 21）：array vtable 必须返回 `TPtrC8{length, object_ptr}`，随后 `TDesC8::Ptr` 才能解析；handle 路径返回带 vtable 的 harness CObject
+- [ ] **B7h** ROMFS/E32 file-server session：kernel 加载 Econs.dll（uid3 `0x100039e7`）时 panic KERN-NO-SESSION 22；实现 ROMFS 文件服务或显式 HLE 返回已放置的 ROM image（round 21 新 frontier）
 - [ ] **B7e3** `CObjectIx::At` 的 handle→object 语义：`NK_B7E` 目前对 handle 0 返回 live current thread；需要真实 object index 元素（thread/process/chunk/…）
 - [x] **B7f** flat-image import binding：`recompiler/imports.py` 枚举全镜像 **1,111** 个 stub、kernel **257** 个（236 EUser + 21 ELocl），唯一 kernel hole 是 ELocl ord 20；`NK_IMPORTMAP=config/imports-6600.txt` 在 flat loader 绑定该 slot（1 patched），运行时 `unbound IAT=0`。验收：`tools/test_imports.sh`
 - [ ] **B7g** timer/interrupt/DMA 完成路径：替代 `NK_SWI_COMPLETE`，让 `TRequestStatus` 由设备模型完成
@@ -877,7 +935,8 @@ entry：
 - [ ] **B6b** 解析 WD2 “ALGORITHM” header/bytecode，检查它是否描述 final layout / veneer / patch（容器 header 里尚未找到已知地址/大小值，需按格式解码）
 - [ ] **B6c** 为 `0x5030fbc6` / `0x5030807a` 找到真实 callee（+0x10000 落点都是函数中部）
 - [ ] **B1c** 从 callmap 的已验证站点反推 function map，减少 HLE/手工修复
-- [ ] **B3c** header 未描述的 rodata/debug 块（kernel 0x135c / DLL2 0x19dc）归属
+- [ ] **B3c** header 未描述的 rodata/debug 块（kernel 0x135c / DLL2 0x19dc）归属；round 21 已用 `romimage.py --place-rodata` 放置 **RTC PDD uid3 0x100000d8** 的 0x279c block（vtable `0x503413e8`），其余 gap 仍待分类
+- [x] **B7i** kernel EUser import ABI rebind（round 21）：4 个 slot（0x503b391c/0x503b4d1c/0x503b4b9c/0x503b3b70）指向错误 ABI；loader 支持对已绑定 slot 的 override，`config/imports-b7e-6600.txt` 固定到 AtC16 / 2-arg TPtr16 / TBuf16(int) / TDes16::Copy(buf,len)。验收：`tools/test_b7e.sh`
 - [ ] **P1-1** CP15 / MMU flat mapping + high vectors
 - [ ] **P1-2** MMIO 设备注册表 + 首批 UPP 寄存器
 - [ ] **P2-1** LCD framebuffer → host window

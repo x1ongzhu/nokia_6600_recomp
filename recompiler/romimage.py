@@ -312,6 +312,9 @@ def record_is_plausible(im: Image) -> bool:
                 (im.data_size if im.data_addr else 0) +
                 im.export_count * 4 + im.dllref_size)
     actual = im.next_hdr_off - im.hdr_off
+    # 0x2000: normal records.  Driver DLLs can carry a larger header-less
+    # block (the RTC PDD has 0x279c); cmd_build adds those explicitly when
+    # --place-rodata is requested, so the baseline image count stays 725.
     return 0 <= actual - declared <= 0x2000
 
 
@@ -883,6 +886,7 @@ def snap_exports(rom: bytes, im: Image, edata: bytes) -> tuple[bytes, int]:
 
 def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
                 include_rodata: bool = False,
+                place_rodata: bool = False,
                 do_snap: bool = True,
                 romfs_linear: bool = False) -> tuple[bytes, list[str], list[Section]]:
     """Assemble a flat ROM at runtime addresses.  Returns (buf, warnings, placed).
@@ -920,10 +924,32 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
     #    addresses.  The plain image placement is disjoint for this ROM (the
     #    text ranges, data, export dirs and DLL-ref tables do not overlap), so
     #    a clash here means a bogus header; report it instead of hiding it.
+    ordered = sorted(images, key=lambda im: im.hdr_off)
+    next_code = {}
+    for i, im in enumerate(ordered):
+        next_code[im.hdr_off] = (ordered[i + 1].code if i + 1 < len(ordered)
+                                 else ROM_BASE + ROM_SIZE)
     for im in images:
         tag = f"uid3_{im.uid3:08x}"
         hdr_plus_text = rom[im.hdr_off:im.text.file_end]
         put(im.code - 0x64, hdr_plus_text, tag + "_hdr_text", im.hdr_off)
+
+        # The header-less block after .text is linked at code+text_size.
+        # It is real runtime data for some images: the RTC driver's vtable
+        # and strings sit in uid3 0x100000d8's block.  Place it first, then
+        # let the declared sections win on any overlap (the export directory
+        # starts at the same VA as the block's first word).  Only place it
+        # when the range fits before the next packed header.
+        gap_placed = False
+        if place_rodata and im.rodata and im.rodata.size:
+            gap_va = im.code + im.text_size
+            gap_end = gap_va + im.rodata.size
+            limit = next_code.get(im.hdr_off, ROM_BASE + ROM_SIZE) - 0x64
+            if gap_end <= limit:
+                put(gap_va, rom[im.rodata.file_off:im.rodata.file_end],
+                    f"{tag}_rodata", im.rodata.file_off, overlay=True)
+                gap_placed = True
+
         for s in im.sections:
             if s.name == "text":
                 continue
@@ -934,7 +960,9 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
                     warnings.append(
                         f"{tag}: snapped {fixed} export entries to their prologue "
                         f"(bring-up aid; the ROM linker's veneers are still missing)")
-            put(s.va, data, f"{tag}_{s.name}", s.file_off)
+            # edata may sit on the first word of the header-less block.
+            overlay = s.name == "edata" and gap_placed
+            put(s.va, data, f"{tag}_{s.name}", s.file_off, overlay=overlay)
         if include_rodata and im.rodata:
             # Experimental: treat the unaccounted block as text appended after
             # the declared text.  Data/edata/dllref and every later image would
@@ -1282,6 +1310,17 @@ def cmd_build(a):
     good = plausible_images(images)
     reach = reachable_images(images)
     place = reach if a.only_reachable else good
+    if not a.only_reachable and a.place_rodata:
+        # Physical-device-driver DLLs carry a larger header-less block; the
+        # 0x2000 plausibility window rejects them.  Add them explicitly when
+        # we are going to place the block (the RTC PDD's vtable lives there).
+        driver_uids = {0x100039D0, 0x100000AD, 0x100000AE, 0x100000AF}
+        have = {im.hdr_off for im in place}
+        for im in images:
+            if im.hdr_off in have or im.errors or im.uid2 not in driver_uids:
+                continue
+            if im.rodata and im.rodata.size <= 0x8000:
+                place.append(im)
     root = find_romfs_root(rom, hdr["root_dir_list"])
     romfs = parse_romfs(rom, root) if root is not None else []
     dirs = find_boot_dirs(rom, root, hdr["root_dir_list"]) if root is not None else None
@@ -1289,6 +1328,7 @@ def cmd_build(a):
     # page-header-free stream now matches the export table at ~98%, so keep
     # the raw export addresses unless --snap is requested explicitly.
     buf, warnings, placed = build_image(rom, place, romfs, a.include_rodata,
+                                        place_rodata=a.place_rodata,
                                         do_snap=a.snap,
                                         romfs_linear=a.romfs_linear)
     patches = load_patches(a.patch) if a.patch else []
@@ -1465,6 +1505,9 @@ def main():
     b.add_argument("--json")
     b.add_argument("--include-rodata", action="store_true",
                    help="report (do not place) the header-less rodata block")
+    b.add_argument("--place-rodata", action="store_true",
+                   help="place each image's header-less block at code+text_size "
+                        "when that VA range is free (the RTC driver needs it)")
     b.add_argument("--snap", action="store_true",
                    help="snap export values to the enclosing function "
                         "prologue (legacy bring-up aid; the packed stream "

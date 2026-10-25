@@ -149,8 +149,10 @@ locates the sections backwards from the next header, loads the referenced DLLs
 (UID3 `0x100065a5` and `0x100039e5`), and resolves import stubs through their
 export directories.  `recompiler/romimage.py build` now reconstructs the
 runtime ROM layout (all 725 packed images at their header addresses plus the
-ROMFS tree); 1,580 sections are placed without overlaps in
-`out/6600_runtime.bin`.
+ROMFS tree); 1,847 sections are placed without overlaps in
+`out/6600_runtime.bin`.  `--place-rodata` additionally places the header-less
+driver blocks that are real runtime data (the RTC PDD's vtable lives there),
+giving 726 images / 2,335 sections; `tools/build_rom_image.sh` uses it.
 
 What remains is the ROM build's **interworking veneer insertion**: Thumb→ARM
 calls and export targets are biased into the callee.  A census of the kernel's

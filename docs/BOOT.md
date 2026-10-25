@@ -1480,3 +1480,105 @@ is mid-function.
 
 The phased plan, task board and acceptance criteria are in
 [`PROGRESS.md`](PROGRESS.md).
+
+---
+
+## Round 21 (2026-10-25): EUser import ABI, RTC driver rodata, and KERN-NO-SESSION
+
+Round 20 installed the thread → process → `CObjectIx` graph and reported a
+5,575,900-instruction run ending at `pc=0` with `sp=0`.  Round 21 shows that
+run was **not** a second-thread stack frontier: it was the panic printer
+looping on four EUser imports whose slots resolve to a function with the wrong
+ABI, plus an object-index element that returned a bare pointer where the
+caller expects a `TDesC8` descriptor.
+
+### 1. The four EUser import rebinds
+
+The kernel was linked against an EUser `.def` revision whose ordinal order
+differs from the EUser DLL in this ROM.  The flat-image loader already accepts
+`NK_IMPORTMAP` overrides for holes; it now also applies an override to a slot
+that already holds a code address.  `config/imports-b7e-6600.txt` pins:
+
+| slot | ordinal | stored target | call site wants | rebind |
+|---|---|---|---|---|
+| `0x503b391c` | 98 | `0x5038e594` array accessor | `TDesC16::AtC` for the panic category `TPtrC16` | `0x50388474` |
+| `0x503b4d1c` | 1378 | `0x50388104` 3-arg `TPtr16` ctor | 2-arg ctor `(buf=0, max=0)` | `0x503880ec` |
+| `0x503b4b9c` | 1282 | `0x50388a2c` string copy | `TBuf16(int)` with `r1=8` | `0x50388254` |
+| `0x503b3b70` | 247 | `0x50388408` descriptor copy | `TDes16::Copy(buf,len)`, `r2=0` | `0x503883c0` |
+
+The confirmation-only map (`config/imports-6600.txt`) stays at one entry
+(ELocl ordinal 20).  These four rebinds are explicit bring-up aids, not
+recovered ROM state.
+
+### 2. `CObjectIx` elements are descriptors
+
+`0x50380270` calls the array vtable (`[array+0x14]`) to fill a result at `sp`,
+then calls `TDesC8::Ptr` (`0x5038891c`).  The round-20 stub wrote only the
+object pointer, so `Ptr()` read the pointer as a length/type word and panicked
+USER 19.  The stub now writes `{0x10000004, object_ptr}` (a `TPtrC8`), and the
+handle path returns the harness `B7E_THREAD` object (with a vtable at
+`0x80003040`) rather than the live scheduler block at `0x802ffd00`, whose
+word 0 is not a vtable.
+
+### 3. RTC physical-device-driver rodata
+
+The RTC PDD is uid3 `0x100000d8` (header stream `0x33e340`, code
+`0x5033e2f4`, text `0xa9c`).  Its record has a **0x279c-byte header-less
+block** after `.text`.  That block is real runtime data: the driver's vtable is
+at `0x503413e8`, its `+0x18` slot is `0x5033ef98`, and the strings
+`"RTC"`, `"RTC, line number:"` and `"RTC driver not created!"` live there.
+Without the block the constructor read a zero vtable and left the image.
+
+`romimage.py --place-rodata` places a driver image's header-less block at
+`code + text_size` when it ends before the next packed header (and lets the
+declared `.edata` win on the first-word overlap).  The baseline build is still
+725 images / 1,847 sections; `--place-rodata` is 726 / 2,335 and
+`tools/build_rom_image.sh` now uses it.  This is the first header-less block
+that **must** be placed at run time; the kernel's own 0x135c block still
+overlaps its `.data` and is skipped.
+
+### 4. Allocator and HAL stand-ins
+
+The RTC constructor allocates 0x124 bytes with `User::AllocZ`, which reaches
+`RHeap::Alloc` at `0x5038e2ec` with a null current-thread heap.  The harness
+serves that entry from its bump heap:
+
+```
+NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000
+```
+
+The constructor also calls `[0x800003ac]->vtable[0x108]` before the loader
+registers the real HAL object.  A stand-in HAL object at `0x80003a00` with a
+vtable at `0x80003c00` returns 0 for `r1=1` (success) and 1 for `r1=0`
+(channel handle).
+
+### 5. The new frontier
+
+The RTC driver constructor completes.  The kernel next loads **Econs.dll**
+(uid3 `0x100039e7`, code `0x5079d244`); the loader asks for a file-server
+session and the kernel panics **KERN-NO-SESSION 22** (category
+`0x50338230`, reason `0x16`).  The run now stops in the panic printer at
+`0x50312b88` after **8,655 instructions**, with **0 undefined, 0 call
+fixups, 0 unbound IAT, 0 recoveries**.
+
+The next task is the ROMFS/E32 file-service path (or an explicit HLE that
+returns the already-placed ROM image), not a stack/exception model.
+
+### Reproduce
+
+```sh
+tools/build_rom_image.sh       # now includes --place-rodata
+NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-b7e-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=8000000 NK_B7E=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_b7e.sh
+```
+
+`NK_WATCH_MEM=r7:0x40` (with `NK_WATCH=pc`) dumps guest memory at a register
+when the watch fires; it was added to identify the zero RTC vtable and the
+panic category descriptor.

@@ -32,7 +32,7 @@ fi
 
 mkdir -p "$(dirname "$OUT")"
 "$PY" recompiler/romimage.py build "$ROM" "$OUT" \
-    --json "${OUT%.bin}_layout.json" "$@"
+    --json "${OUT%.bin}_layout.json" --place-rodata "$@"
 
 echo
 echo "hint: map the image at 0x50000000 and start at the kernel entry:"

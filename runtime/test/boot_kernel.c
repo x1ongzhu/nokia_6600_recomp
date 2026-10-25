@@ -195,6 +195,7 @@ static void load_callmap(nk_interp_t* ip, const char* path) {
 /* ------------------------------------------------------------------ */
 
 #define B7E_ZERO_STUB  0xffff0300u   /* mov r0,#0; bx lr                  */
+#define B7E_HAL_STUB   0xffff0600u   /* HAL map: r1==0 -> 1, else 0       */
 #define B7E_ALLOC_STUB 0xffff0200u   /* bump allocator, see b7e_install() */
 #define B7E_ALLOC_LIT  0xffff0240u   /* -> guest bump cursor              */
 #define B7E_AT_STUB    0xffff0400u   /* CObjectIx element fetch            */
@@ -208,6 +209,8 @@ static void load_callmap(nk_interp_t* ip, const char* path) {
 #define B7E_VT_ARRAY    0x80003800u
 #define B7E_CURSOR      0x80003900u
 #define B7E_CUR_OBJ     0x80003910u   /* last published current thread      */
+#define B7E_HAL         0x80003a00u   /* stand-in kernel HAL object         */
+#define B7E_VT_HAL      0x80003c00u   /* its vtable (>= 0x108 bytes)        */
 #define B7E_VT_ENTRIES  64
 
 static int      b7e_enabled;
@@ -228,7 +231,9 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
      * Re-install on every switch so the graph survives a hand-off. */
     nk_w32(c, t + 0x18, B7E_PROCESS);       /* thread -> process       */
     nk_w32(c, t + 0x64, B7E_OBJIDX);        /* 0x40000000 branch       */
-    nk_w32(c, B7E_CUR_OBJ, t);              /* handle 0 -> live thread */
+    /* The handle path treats the result as a CObject: it needs a vtable at
+     * [0].  Keep the harness object rather than the live scheduler block. */
+    nk_w32(c, B7E_CUR_OBJ, B7E_THREAD);
     b7e_installs++;
     if (b7e_installs <= 4)
         printf("B7e: current thread %#010x -> process %#010x, objidx %#010x\n",
@@ -248,9 +253,14 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     /* Zero-return vtable target. */
     nk_w32(c, B7E_ZERO_STUB, 0xe3a00000u);       /* mov r0,#0 */
     nk_w32(c, B7E_ZERO_STUB + 4, 0xe12fff1eu);   /* bx lr     */
+    nk_w32(c, B7E_HAL_STUB + 0x00, 0xe3510000u); /* cmp r1,#0 */
+    nk_w32(c, B7E_HAL_STUB + 0x04, 0x03a00001u); /* moveq r0,#1 */
+    nk_w32(c, B7E_HAL_STUB + 0x08, 0x13a00000u); /* movne r0,#0 */
+    nk_w32(c, B7E_HAL_STUB + 0x0c, 0xe12fff1eu); /* bx lr */
     nk_code_range_add(ip, B7E_ZERO_STUB, B7E_ZERO_STUB + 8);
+    nk_code_range_add(ip, B7E_HAL_STUB, B7E_HAL_STUB + 0x10);
     nk_code_range_add(ip, B7E_ALLOC_STUB, B7E_ALLOC_STUB + 0x20);
-    nk_code_range_add(ip, B7E_AT_STUB, B7E_AT_STUB + 0x14);
+    nk_code_range_add(ip, B7E_AT_STUB, B7E_AT_STUB + 0x20);
 
     /* RAllocator-style bump allocator (r0 = TAny** aResult, r2 = aSize).
      * The result word is an offset; the caller adds its base at [heap+0]. */
@@ -266,12 +276,21 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_w32(c, B7E_CURSOR, b7e_heap_cur);
 
     /* CObjectIx element fetch -> the live current-thread object.  The real
-     * At() calls this through an array vtable slot with r0 = TAny** aResult. */
-    nk_w32(c, B7E_AT_STUB + 0x00, 0xe59f1008u);  /* ldr r1,[pc,#8]      */
-    nk_w32(c, B7E_AT_STUB + 0x04, 0xe5911000u);  /* ldr r1,[r1]         */
-    nk_w32(c, B7E_AT_STUB + 0x08, 0xe5801000u);  /* str r1,[r0]         */
-    nk_w32(c, B7E_AT_STUB + 0x0c, 0xe12fff1eu);  /* bx lr               */
-    nk_w32(c, B7E_AT_STUB + 0x10, B7E_CUR_OBJ);  /* literal              */
+     * At() calls this through an array vtable slot with r0 = TDes8* aResult:
+     * it must receive a *descriptor*, not a bare pointer, because the caller
+     * then calls TDesC8::Ptr() (0x5038891c) on it.  A TPtrC8 header plus the
+     * object pointer makes Ptr() return the live object. */
+    nk_w32(c, B7E_AT_STUB + 0x00, 0xe59f2010u);  /* ldr r2,[pc,#0x10]   */
+    nk_w32(c, B7E_AT_STUB + 0x04, 0xe5802000u);  /* str r2,[r0]         */
+    nk_w32(c, B7E_AT_STUB + 0x08, 0xe59f100cu);  /* ldr r1,[pc,#0xc]    */
+    nk_w32(c, B7E_AT_STUB + 0x0c, 0xe5911000u);  /* ldr r1,[r1]         */
+    nk_w32(c, B7E_AT_STUB + 0x10, 0xe5801004u);  /* str r1,[r0,#4]      */
+    nk_w32(c, B7E_AT_STUB + 0x14, 0xe12fff1eu);  /* bx lr               */
+    nk_w32(c, B7E_AT_STUB + 0x18, 0x10000004u);  /* TPtrC8, length 4    */
+    nk_w32(c, B7E_AT_STUB + 0x1c, B7E_CUR_OBJ);  /* literal             */
+    /* Return the harness CObject (B7E_THREAD), not the live scheduler
+     * pointer: the caller treats the result as a CObject and reads its
+     * vtable at [0].  The live 0x802ffd00 stack block has no vtable. */
     nk_w32(c, B7E_CUR_OBJ, B7E_THREAD);
 
     b7e_fill_vtable(c, B7E_VT_PROCESS, B7E_ZERO_STUB);
@@ -297,7 +316,19 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
 
     nk_w32(c, B7E_THREAD, 0x80003040u);       /* thread vtable         */
     nk_w32(c, B7E_THREAD + 0x14, 1);
+    b7e_fill_vtable(c, 0x80003040u, B7E_ZERO_STUB);
     nk_w32(c, 0x80003040u + 0x20, B7E_ZERO_STUB);
+
+    /* Kernel HAL stand-in.  The extension loader invokes an in-kernel
+     * extension constructor before it registers the real HAL object; the
+     * constructor calls [0x800003ac]->vtable[0x108] twice:
+     *   r1=1 -> 0 is success, r1=0 -> nonzero is the channel handle.
+     * A zero vtable would leave the image and die at pc=0. */
+    for (int i = 0; i < 128; i++)
+        nk_w32(c, B7E_VT_HAL + 4u * i, B7E_ZERO_STUB);
+    nk_w32(c, B7E_VT_HAL + 0x108u, B7E_HAL_STUB);  /* HAL map/channel */
+    nk_w32(c, B7E_HAL, B7E_VT_HAL);
+    nk_w32(c, 0x800003acu, B7E_HAL);          /* Kern::TheKernel/HAL global */
 
     printf("B7e boot state: thread %#010x, process %#010x, objidx %#010x, "
            "bump %#010x..%#010x\n",
@@ -588,9 +619,13 @@ static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,
             if (!flat_slot_owner(imgs, nimg, slot, &owner, &ord)) continue;
             total++;
             uint32_t v = nk_r32(cpu, slot);
-            if (flat_in_code(imgs, nimg, v)) { bound++; continue; }
             uint32_t target;
             if (flat_has_override(ov, nov, slot, &target)) {
+                /* An explicit override wins even for a slot that already
+                 * holds a code address.  The EKA1 ROM links a few import
+                 * slots against a different EUser .def revision than the
+                 * EUser image in the same ROM; those slots need a rebind to
+                 * the function the call site actually uses. */
                 if (target == 0xffff0100u && !zero_stub) {
                     /* mov r0,#0 ; bx lr */
                     nk_w32(cpu, target, 0xe3a00000u);
@@ -600,10 +635,13 @@ static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,
                 }
                 nk_w32(cpu, slot, target);
                 patched++;
-                if (patched <= 8)
-                    printf("  import bind: %#010x (uid %#010x ord %u) "
+                if (patched <= 12)
+                    printf("  import rebind: %#010x (uid %#010x ord %u) "
                            "%#010x -> %#010x\n", slot, owner, ord, v, target);
-            } else {
+                continue;
+            }
+            if (flat_in_code(imgs, nimg, v)) { bound++; continue; }
+            {
                 unresolved++;
                 if (logged++ < 12)
                     printf("  import unresolved: slot %#010x (uid %#010x "
@@ -1033,6 +1071,22 @@ int main(int argc, char** argv) {
     ip.watch_pc = (uint32_t)env_ulong("NK_WATCH", 0);
     ip.watch_hits = (int)env_ulong("NK_WATCH_HITS", 1);
     ip.watch_log = (int)env_ulong("NK_WATCH_LOG", 16);
+    ip.watch_mem_reg = -1;
+    const char* watch_mem = getenv("NK_WATCH_MEM");
+    if (watch_mem) {
+        /* NK_WATCH_MEM=r7:0x40 — dump guest memory at a register when the
+         * watch fires.  Debug-only; the register stays in the harness. */
+        char regname[8] = {0};
+        unsigned len = 0x40;
+        if (sscanf(watch_mem, "%7[^:]:%x", regname, &len) >= 1 &&
+            regname[0] == 'r') {
+            int reg = atoi(regname + 1);
+            if (reg >= 0 && reg < 16) {
+                ip.watch_mem_reg = reg;
+                ip.watch_mem_len = len;
+            }
+        }
+    }
     ip.stop_selfb = (int)env_ulong("NK_STOP_SELFB", 1);
     ip.swi_direct = (int)env_ulong("NK_SWI_DIRECT", 0);
     ip.swi_table = (uint32_t)env_ulong("NK_SWI_TABLE", 0x50314aec);

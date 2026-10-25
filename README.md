@@ -401,7 +401,36 @@ criteria and phased roadmap live in
   0 call fixups, 0 recoveries**, including the kernel's second thread
   `0x80001860`; the next frontier is that thread's stack underflow (`pc=0`).
   The pre-MMU low alias now also tracks `NK_RAM_EXTRA`.
-  `tools/test_b7e.sh` is the acceptance test.
+  `tools/test_b7e.sh` is the acceptance test.  **Round 21 reclassifies the
+  5.575M stop:** it was the panic printer looping on a broken import/descriptor
+  path, not a second-thread stack frontier.  See the round-21 bullet.
+- [x] **Round 21: EUser import ABI, RTC driver rodata, KERN-NO-SESSION** —
+  the round-20 graph exposed four kernel EUser import slots that resolve to a
+  function with the **wrong ABI**: the kernel was linked against a different
+  EUser `.def` revision than the EUser DLL in this ROM.  The panic printer
+  (`0x503b391c`, ord 98) expected `TDesC16::AtC` but got an array accessor;
+  panic init (`0x503b4d1c`, ord 1378) expected the 2-arg `TPtr16` ctor but got
+  the 3-arg one; object-container init (`0x503b4b9c`, ord 1282) expected
+  `TBuf16(int)` but got a string copy; locale init (`0x503b3b70`, ord 247)
+  expected `TDes16::Copy(buf,len)` but got the descriptor overload.  The
+  loader now applies `NK_IMPORTMAP` overrides even to already-bound slots, and
+  [`config/imports-b7e-6600.txt`](config/imports-b7e-6600.txt) rebinds those
+  four slots explicitly (the confirmation-only map stays in
+  `config/imports-6600.txt`).  Two more real fixes: the `CObjectIx` element
+  fetch must fill a **`TDesC8` descriptor** (`TDesC8::Ptr` at `0x5038891c`
+  runs next), and the handle path must return a **CObject with a vtable**, not
+  the live scheduler stack block.  Finally, the RTC physical-device driver
+  (uid3 `0x100000d8`) keeps its vtable and strings in the **header-less block**
+  after `.text` (`--place-rodata`); without it the RTC constructor read a zero
+  vtable and died at `pc=0`.  With the vtable live, `User::AllocZ` served from
+  the harness `RHeap::Alloc` (`NK_ALLOC_PC=0x5038e2ec`) and a minimal HAL
+  stand-in (`0x800003ac` → vtable `0x80003c00`), the RTC driver constructor
+  completes.  The run now reaches **8,655 instructions, 0 undefined,
+  0 call fixups, 0 unbound IAT, 0 recoveries** and halts in the panic printer
+  at `0x50312b88` with **KERN-NO-SESSION 22** while loading **Econs.dll**
+  (uid3 `0x100039e7`).  That is a file-server/session dependency, not an
+  import or layout problem.  `NK_WATCH_MEM=rN:len` dumps guest memory at a
+  watch PC.  `tools/test_b7e.sh` pins the new frontier.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -419,22 +448,26 @@ criteria and phased roadmap live in
   **469/478 (98.1%)** and DLL `0x100039e5` **1757/1788 (98.3%)** at shift 0.
   `layout.py verify` now asserts that instead of the old null result;
   `tools/test_layout.sh` pins the new numbers.
-- [ ] **Kernel stack/exception frontier (round 18 reassessment)** — the round-16
-  924,964-instruction run is now explained: it was the SWI-table fall-through
-  loop, with a `0x4b0` stack leak per iteration.  The direct call gate stops
-  earlier (7,540 instructions) at a real missing state: `[0x800017d4]` (the
-  scheduler/current-thread pointer) is zero.  Round 19 fixed the ROMFS boot
-  table and the import hole, so the same path now runs the real `rtc.dll`
-  extension load and stops in the handle-to-object path.  Round 20 identifies
-  it as **`CObjectIx::At`**: the missing state is the initial process and its
-  object index, not a heap.  `NK_B7E` supplies that graph and the same path
-  runs **5,575,900 instructions** before the kernel's second thread
-  (`0x80001860`) underflows its stack (`pc=0`).  A banked-register model
-  (`NK_BANKED=1`) and mode stacks are implemented, but the kernel's own stack
-  setup derives its base from boot state we do not have yet.  The next tasks
-  are the initial thread's **stack/object fields** and the
-  **banked-register/SPSR exception model** (so `svc`, mode switches and
-  `movs pc,lr` are faithful) — not more stack window.
+- [x] **Kernel stack/exception frontier (round 18/21 reassessment)** — the
+  round-16 924,964-instruction run was the SWI-table fall-through loop; the
+  direct call gate then stopped at a real missing state (`[0x800017d4]` = 0).
+  Round 19 fixed the ROMFS boot table and the import hole; round 20 installed
+  the initial thread→process→CObjectIx graph; round 21 found that the
+  **5,575,900-instruction run was the panic printer looping** on four
+  wrong-ABI EUser imports and a bare-pointer object-index element.  With those
+  rebinds, a real `TDesC8` element descriptor, driver rodata and the allocator
+  stand-in, the run reaches **8,655 instructions** and halts in the panic
+  printer with **KERN-NO-SESSION 22** while loading Econs.dll — a
+  file-server/session dependency, not a stack/exception frontier.  The
+  banked-register model (`NK_BANKED=1`) and mode stacks remain available but
+  are no longer on the critical path to the next boot step.
+- [ ] **File-server / session for driver DLL loads (round 21 frontier)** — the
+  kernel loads Econs.dll (uid3 `0x100039e7`, code `0x5079d244`) after the RTC
+  driver starts.  The image is placed in the flat ROM, but the loader asks for
+  a file-server session and the kernel panics **KERN-NO-SESSION 22** when it
+  is absent.  The next step is to model the ROMFS/E32 file-service path (or an
+  explicit HLE that returns the already-placed ROM image) and then continue
+  the driver/process startup.
 - [ ] **Boot bank board/CPU detection (round 16 stream view)** — after the page
   headers are removed the boot bank is the contiguous stream slice
   `[0xb0, 0x100b0)` and all switch tables measure bias 0.  The **correct**
@@ -548,7 +581,8 @@ NK_KERNEL_VECTORS=1 ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
 .venv/bin/python recompiler/romimage.py scan 6600_mcu.bin
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin --all
-#   725 images placed; ekern.exe -> uid3 0x100058e8
+#   725 scanned images; 726 placed with --place-rodata (RTC PDD)
+#   ekern.exe -> uid3 0x100058e8
 #   Libs 586 (boot image table), Programs 55, Plugins 171
 
 # round 19: EKA1 import/IAT map and the one export-table hole
@@ -670,13 +704,22 @@ tools/test_imports.sh
 # add NK_BANKED=1 for the banked r13/r14 + SPSR model and per-mode stacks
 tools/test_executive.sh
 
-# round 20: initial thread -> process -> CObjectIx -> array; 5,575,900 insns
+# round 20/21: initial thread -> process -> CObjectIx -> array, driver rodata
+# and the real RTC frontier (8,655 insns, KERN-NO-SESSION 22 on Econs.dll)
 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
-  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-6600.txt \
-  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=6000000 NK_B7E=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-b7e-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=8000000 NK_B7E=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_b7e.sh
+
+# round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
+# code+text_size; the default runtime image now includes it
+.venv/bin/python recompiler/romimage.py build 6600_mcu.bin \
+  out/6600_runtime_rodata.bin --place-rodata
+#   2335 sections from 726 images (725 without --place-rodata)
 
 # round 15: relocate fragment C, map the kernel sections and reach the handoff
 .venv/bin/python recompiler/bootbank.py build 6600_mcu.bin \

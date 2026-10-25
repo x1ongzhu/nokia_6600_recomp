@@ -1560,6 +1560,7 @@ void nk_interp_init(nk_interp_t* ip) {
     ip->recover_log = 16;
     ip->watch_hits = 1;
     ip->watch_log = 16;
+    ip->watch_mem_reg = -1;
     ip->require_code = 0;      /* selftests execute tiny snippets in RAM */
     /* EKA1 kernel executive service table (kernel text + 0x4aec).  Only used
      * when swi_direct is enabled; the boot harness can override it. */
@@ -1602,6 +1603,14 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
             for (int wi = 0; wi < 6; wi++)
                 fprintf(stderr, " %#x", nk_r32(c, c->r[13] + 4u * (uint32_t)wi));
             fprintf(stderr, "\n");
+            if (ip->watch_mem_reg >= 0 && ip->watch_mem_reg < 16) {
+                uint32_t base = c->r[ip->watch_mem_reg] & ~3u;
+                uint32_t len = ip->watch_mem_len ? ip->watch_mem_len : 0x40u;
+                fprintf(stderr, "[watch] mem r%d @%#010x:", ip->watch_mem_reg, base);
+                for (uint32_t mi = 0; mi < len; mi += 4)
+                    fprintf(stderr, " %08x", nk_r32(c, base + mi));
+                fprintf(stderr, "\n");
+            }
             dump_call_ring(ip, ip->watch_log);
             if (ip->watch_hits > 0) ip->watch_hits--;
         }

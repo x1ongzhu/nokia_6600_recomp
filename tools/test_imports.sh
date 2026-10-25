@@ -114,7 +114,7 @@ NK_CALL_INFER=0 NK_BUDGET=200000 NK_MMIO_N=0 NK_SWI_LOG=0 \
     --rom-image out/6600_runtime.bin >out/imports_boot.log 2>&1
 
 grep -q "import map config/imports-6600.txt: 1 slot overrides" out/imports_boot.log
-grep -q "import bind: 0x5037d0e8 (uid 0x100065a5 ord 20) 0xffffffff -> 0xffff0100" \
+grep -q "import rebind: 0x5037d0e8 (uid 0x100065a5 ord 20) 0xffffffff -> 0xffff0100" \
     out/imports_boot.log
 grep -q "imports: .* 1 patched" out/imports_boot.log
 grep -q "unbound IAT=0" out/imports_boot.log
