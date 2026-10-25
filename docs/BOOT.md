@@ -1929,3 +1929,148 @@ instructions**, stopping at a zero return address in `DProcess::Loaded`
 
 The interpreter self-test gained an LDMDB/STMDB writeback regression for the
 memmove backward path.  Acceptance: `tools/test_round26.sh`.
+
+
+## Round 27 (2026-10-26): the -3 EUser relocation, the real DProcess name, and
+## the K=1361 exception / HAL timer frontier
+
+Round 26 left a confusing picture: eight CObject/DProcess slots needed
+hand-picked targets, and the next stop was still `USER 7` in
+`DProcess::Name`.  Round 27 shows that the whole kernel EUser import table is
+**one constant relocation**, not a collection of unrelated ABI mismatches.
+
+### The two export lists
+
+The kernel image and the EUser.dll in the same ROM were linked against
+different EUser export lists:
+
+```
+generic 7.0 EUser list           G
+kernel .def                       K = G - 1   (one export missing before AddL)
+ROM EUser.dll                     M = G - 4   (four exports missing before AddL)
+=> for K >= 6                     M = K - 3
+```
+
+The first entries are special: kernel `K=0` is the ROM memset, `K=1` is
+`Mem::Copy` and `K=2` is `User::Alloc`.  The ELocl export-table hole
+(ordinal 20) is independent.
+
+`recompiler/euser_reloc.py verify` pins 49 call-site anchors, including:
+
+| cluster | kernel K | ROM index | real symbol |
+|---|---|---|---|
+| CObject base | 177 / 480 / 718 / 799 / 1266 / 1396 | 174 / 477 / 715 / 796 / 1263 / 1393 | Close / FullName / Name / Open / dtor / ctor |
+| object containers | 6 / 9 / 10 / 277 / 421 / 725 | 3 / 6 / 7 / 274 / 418 / 722 | AddBefore / `CObjectCon::AddL` / `CObjectIx::AddL` / CreateL / FindByName / NewL |
+| TInt64 / TTime | 970 / 1147 / 1378 / 1455 / 1457 / 1484 / 1486 / 1562 / 1611 | 967 / 1144 / 1375 / 1452 / 1454 / 1481 / 1483 / 1559 / 1608 | SecondsFrom / `TTrap::Trap` / TInt64 / arithmetic |
+| descriptors / name | 67 / 88 / 90 / 717 / 718 / 1281 / 1282 / 1417 / 1419 / 1620 | 64 / 85 / 87 / 714 / 715 / 1278 / 1279 / 1414 / 1416 / 1617 | AppendNum / Append(TChar) / Append / `[uid]` / Name / TBuf16 / TUidType |
+| queue iterators | 362 / 1336 | 359 / 1333 | `TDblQueIterBase::DoPostInc` / ctor |
+
+The generated map is [`config/imports-r27-6600.txt`](../config/imports-r27-6600.txt)
+(236 overrides, with the one local K=1361 exception).  The smaller
+[`config/imports-r27-name-6600.txt`](../config/imports-r27-name-6600.txt)
+(47 overrides) is the diagnostic that leaves the rest of the table at its ROM
+ordinals.
+
+### DProcess::Name is a name, not a Copy chain
+
+`0x5032b5d4` is a *user-side* DProcess name override:
+
+```
+TName DProcess::Name() const
+    {
+    TName name = CObject::Name();
+    name.Append(TUidType::operator[](2));       // the [uid] formatter
+    name.AppendNumFixedWidth(iGeneration, EDecimal, 4);
+    return name;
+    }
+```
+
+| call site | kernel K | real target | meaning |
+|---|---|---|---|
+| `0x5032b5ec` | 718 | `0x50384bf8` | `CObject::Name` (hidden return `r0=TName*`) |
+| `0x5032b5f8` | 1620 | `0x5039b364` | `TUidType::operator[]` (`cmp r1,#2`, `add r0,r0,r1,lsl#2`) |
+| `0x5032b608` | 717 | `0x5039b230` | TBuf10 `[XXXXXXXX]` UID formatter |
+| `0x5032b614` | 90 | `0x503887c4` | `TDes16::Append(const TDesC16&)` |
+| `0x5032b638` | 67 | `0x50395b8c` | `TDes16::AppendNumFixedWidth` |
+| ctor `0x5032b564` | 1417 | `0x5039b2a0` | `TUidType()` |
+| ctor `0x5032b570` | 1302 | `0x503a25a4` | `TDblQueBase(int)` (not TBuf8) |
+| ctor `0x5032b578` | 1291 | `0x503a0de0`-class | queue base, not a descriptor |
+| `0x5031e62c` | 1419 | `0x5039b2f0` | `TUidType(TUid,TUid,TUid)` |
+| `0x5032b4bc` | 1281 | `0x503882c4` | `TBufBase16(const TDesC16&, int)` |
+| `0x5032b4e8` | 88 | `0x5038877c` | `TDes16::Append(TChar)` |
+
+With the 47-slot probe the initial process `0x806008b8` carries
+`iUids = {0x1000007a, 0x1000008b, 0x100000b9}` (the kernel-process UID type),
+`iGeneration = 1`, and name registration passes
+`CObjectCon::CheckUniqueFullName` **without the round-26 `NK_PATCH`
+stand-in**.  The run reaches **128,663 instructions, 0 undefined, 0 unbound
+IAT, 0 recoveries** and stops at `0x5031fe2c` dereferencing `0x30000000` as a
+code-segment queue element: the initial `DProcess` code-segment queue has
+not been populated.
+
+### The real boot path: the K=1361 exception and the HAL timer frontier
+
+The full 236-slot relocation changes the early kernel startup.  At **12,382
+instructions** the boot loader reads `[0x500000cc]` = `0x50301f3c`, the
+`rtc.dll` `TRomEntry` in `\System\Libs`, and constructs the 0x74-byte boot
+file object.  The entry is
+
+```
+0x50301f3c: size
+0x50301f40: address  (0x5033edb0, the rtc extension header)
+0x50301f44: flags/name length
+0x50301f48: UTF-16 "rtc.dll"
+```
+
+The first attempt bound K=1361 through the K-3 rule to `0x5039c148`, a
+larger class whose constructor stores at `+0x7c`: that lands at
+`0x50301f40`, exactly the next entry's address field, and writes `0x84`
+(PC `0x5039c33c`).  `0x5031eb98` then does `ldr pc,[r4,#0x10]` with
+`r4 = 0x84` and leaves the image.  The overrun is a **local export-order
+exception**: the ROM's own K=1361 target `0x503a0224` zeroes a 16-byte base
+and is the constructor the 0x74-byte object needs.  `euser_reloc.py` pins it
+as the one exception.
+
+With the exception, the flat image is a **linked image**, so direct BLs are
+exact and `NK_CALL_INFER=0` is the faithful run.  It reaches **108,231
+instructions, 0 undefined, 0 unbound IAT, 0 recoveries, 0 call fixups** and
+stops at **USER-EXEC 3** in `K::Init1`.  The root is one level earlier than
+the panic: `0x5031b80c` calls the HAL timer accessor `0x503109d0`, which
+reads `[0x800003ac]->vtable+0x5c` and stores the result at `0x800017f4`.
+The B7e HAL stand-in returns 0, so the kernel does
+
+```
+1000000 / [0x800017f4] = 1,000,000 / 0
+```
+
+`__divsi3` (`0x50389194`) takes its divide-by-zero slow path
+(`0x503891c0 -> 0x50399484`), returns KErrGeneral (`0xffff8001`), and the
+caller treats that negative value as an object handle:
+
+```
+0x50334fc4 -> 0x50318410 -> CObjectIx::At(0xffff8001) -> 0
+0x50331320 -> panic USER-EXEC 3
+```
+
+The next concrete gap is therefore the **HAL timer channel (+0x5c) / initial
+timer frequency**, not the object index.  Poking the vtable slot to a
+constant-return stub (`0x503109a0` returns 4) advances the same run to
+**117,923 instructions** and a new KERN panic in the `0x5031c9d0` path.  The
+old 126k/128k runs were wrong-import detours; this 108k/117k path is the
+first one that follows the relocated imports through `K::Init1`.
+
+With `NK_CALL_INFER=1` the interpreter snaps the valid EUser internal call
+`0x5038ad44` to `0x5038ad20` (`0x5038bb84 [fixed]`), changes the `TRealX`
+wrapper ABI and stops at **14,354 instructions** in the **MATHX panic** at
+`0x50312b88`.  That is a call-inference artifact, not a math ABI frontier;
+the test keeps it as a control.
+
+`NK_BOOTTABLE_RAM=0x80900000` is available for later: it copies the 64 KiB
+ROMFS directory block to RAM and repoints the ROM header's
+`iPrimaryFile`/`iSecondaryFile`/`iVariantFile`/`iExtensionFile` fields.  It
+does not change the 108k stop.
+
+Acceptance: `tools/test_round27.sh` runs the faithful 108,231-instruction
+path, the 14,354/MATHX control, the 117,923-instruction HAL timer probe and
+the 128,663-instruction name probe, and checks the DProcess UIDs, the 236/47
+override counts and the K=1361 exception.

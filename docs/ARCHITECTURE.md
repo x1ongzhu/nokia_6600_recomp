@@ -114,6 +114,38 @@ the temporary `TName`.  A documented stand-in that points DProcess vtable
 the **descriptor ABI in DProcess::Name** and the Loaded callback stack, not a
 missing CPU state.
 
+Round 27 replaces the per-slot ABI guesses with a **single relocation rule**.
+The kernel and the EUser.dll in the same ROM were built from different export
+lists: the kernel's `.def` is the generic 7.0 list with one export missing
+before `AddL` (kernel ordinal `K = G - 1`), while the ROM EUser is the same
+list with four missing (`ROM index M = G - 4`).  For `K >= 6` the desired
+symbol is therefore at ROM export `K - 3`; `K=0/1/2` are the low specials
+(memset, `Mem::Copy`, `User::Alloc`).  [`euser_reloc.py`](../recompiler/euser_reloc.py)
+verifies 49 call-site anchors and emits a 236-slot map.  The DProcess name
+override is decoded as `CObject::Name` + `TUidType::operator[](2)` + a
+`[uid]` formatter + `AppendNumFixedWidth(iGeneration,EDecimal,4)`, and the
+EUser `TUidType()`/`TUidType(TUid,TUid,TUid)` constructors replace the
+bitfield/POD constructors that were corrupting `iUids`.  The name probe
+registers the process without a stand-in (UIDs `1000007a/8b/b9`,
+**128,663 instructions**).  The full relocation pins one local exception,
+K=1361: the 0x74-byte boot-file base constructor.  The shifted target
+`0x5039c148` writes at `+0x7c` and overruns the object into the next
+`TRomEntry`, corrupting `0x50301f40`; the ROM's own target `0x503a0224`
+zeroes the 16-byte base.  With the flat (linked) image and call inference
+off, the faithful path reaches **108,231 instructions** and stops at
+**USER-EXEC 3** in `K::Init1`.  The root is the **HAL timer frequency**:
+`0x503109d0` reads `[0x800003ac]->vtable+0x5c` and stores it at
+`0x800017f4`; the stand-in returns 0, so the kernel does `1,000,000 / 0`, and
+the division slow path returns KErrGeneral (`0xffff8001`) which the caller
+passes to `CObjectIx::At`.  Poking vtable `+0x5c` to a constant-return stub
+(`0x503109a0` returns 4) advances to **117,923 instructions** and a new KERN
+panic.  The `NK_CALL_INFER=1` run reaches only 14,354 instructions and a
+MATHX panic because it snaps the valid EUser internal call `0x5038ad44` to
+`0x5038ad20`; it is a control, not truth.  The optional `NK_BOOTTABLE_RAM`
+model copies the 64 KiB ROMFS directory to RAM but does not change the 108k
+stop.  The old 126k/128k paths are wrong-import detours, not later boot
+progress.
+
 The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
 (first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.
 `recompiler/pagestream.py` removes the headers and makes the packed records

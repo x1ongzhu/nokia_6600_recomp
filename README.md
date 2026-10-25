@@ -554,6 +554,45 @@ criteria and phased roadmap live in
   Loaded callback stack, not the CObject base class.  The interpreter
   self-test gained an LDMDB/STMDB writeback regression for the memmove
   backward path.  `tools/test_round26.sh` is the acceptance test.
+- [x] **Round 27: the kernel/EUser import order is a constant -3; real
+  DProcess name ABI; one K=1361 exception; HAL timer frontier** — the
+  kernel was linked against an EUser `.def` one export shorter than the
+  generic 7.0 list, while the EUser.dll in the same ROM is four exports
+  shorter.  For kernel ordinal `K >= 6` the desired symbol is therefore the
+  ROM EUser export at **`K - 3`**; `K=0` (memset), `K=1` (`Mem::Copy`) and
+  `K=2` (`User::Alloc`) are the low special cases.  [`euser_reloc.py`](recompiler/euser_reloc.py)
+  verifies 49 call-site anchors across the CObject, CObjectCon/ObjectIx,
+  TInt64/TTime, descriptor/name and queue-iterator clusters and emits
+  [`config/imports-r27-6600.txt`](config/imports-r27-6600.txt) (236 slots)
+  plus a 47-slot name probe.  The DProcess name function is now decoded as
+  `CObject::Name` + `TUidType::operator[](2)` + a `[uid]` formatter +
+  `AppendNumFixedWidth(iGeneration, EDecimal, 4)`, with the real
+  `TUidType()`/`TUidType(TUid,TUid,TUid)` constructors
+  (`0x5039b2a0`/`0x5039b2f0`) and `TDblQueBase` constructors (not TBuf8/16).
+  The name-probe run constructs the process with UIDs
+  `1000007a/1000008b/100000b9`, registers its name through
+  `CheckUniqueFullName` **without the round-26 NK_PATCH stand-in**, and
+  reaches **128,663 instructions, 0 undefined, 0 unbound IAT, 0
+  recoveries**.  The full relocation pins one local exception, `K=1361`
+  (the 0x74-byte boot-file base constructor): the shifted target
+  `0x5039c148` writes at `+0x7c` and overruns the object into the next
+  `TRomEntry`, corrupting `0x50301f40`; the ROM's own `0x503a0224` zeroes the
+  16-byte base.  With the flat (linked) image and **`NK_CALL_INFER=0`** the
+  faithful path reaches **108,231 instructions, 0 undefined, 0 unbound IAT, 0
+  recoveries** and stops at **USER-EXEC 3** in `K::Init1`.  The root is the
+  **HAL timer frequency**: `0x503109d0` reads `[0x800003ac]->vtable+0x5c`
+  and stores it at `0x800017f4`; the current stand-in returns 0, so the kernel
+  does `1,000,000 / 0`, and the division slow path returns KErrGeneral
+  (`0xffff8001`) which the caller passes to `CObjectIx::At` as a handle.
+  Pointing vtable `+0x5c` at a constant-return stub (`0x503109a0` returns 4)
+  advances to **117,923 instructions** and a new KERN panic
+  (`0x5031c9d0 -> 0x503309fc`).  The
+  `NK_CALL_INFER=1` run reaches only **14,354** instructions and a MATHX
+  panic because it snaps the valid EUser internal call `0x5038ad44` to
+  `0x5038ad20`; it is kept as a control.  The old 126k/128k numbers were
+  wrong-import detours.  A `NK_BOOTTABLE_RAM` model copies the 64 KiB ROMFS
+  directory to RAM but does not change the 108k stop.
+  `tools/test_round27.sh` pins all four runs.
 - [ ] **Initial thread trap frame (remaining after round 25)** — the handler
   and cleanup stack are real now, but `SThread::iFrame` (`+0x38`) is still
   zero.  A guest `TTrap::Trap` pushes and pops frames correctly; a `Leave`
@@ -606,7 +645,14 @@ criteria and phased roadmap live in
   (`+0xc` is `Open`, not `Close`) and the real `CObjectCon::AddL`, so the
   process is opened and inserted into `K::Containers[EProcess]`; the run
   reaches **126,866 instructions** and the next stop is the descriptor ABI
-  inside `DProcess::Name` (`USER 7`).
+  inside `DProcess::Name` (`USER 7`).  **Round 27 shows the whole kernel EUser
+  import table is a constant -3 relocation**, decodes the real DProcess name
+  ABI, pins one local exception (K=1361) and reaches the **HAL timer
+  frequency frontier** at 108,231 instructions (USER-EXEC 3; the HAL
+  vtable+0x5c returns 0 and the kernel divides by it).  Poking vtable+0x5c to
+  a constant advances to **117,923**.  The name probe reaches **128,663
+  instructions** without a stand-in; the call-inference control
+  (14,354/MATHX) is an artifact, not truth.
 - [ ] **File server for UI/app loads (round 22 reclassification)** — the
   round-21 ECons.dll / **KERN-NO-SESSION 22** stop was the RTC driver's
   misbound `operator new` import entering EUser's `RTest` console path.  With
@@ -937,6 +983,39 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   NK_PATCH=0x503386a4:0x50384bf8,0x503384bc:0x50384bf8 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
+
+# round 27: kernel EUser imports are a constant -3 relocation
+.venv/bin/python recompiler/euser_reloc.py verify 6600_mcu.bin
+.venv/bin/python recompiler/euser_reloc.py analyze 6600_mcu.bin
+.venv/bin/python recompiler/euser_reloc.py build 6600_mcu.bin \
+    config/imports-r27-6600.txt
+.venv/bin/python recompiler/euser_reloc.py build 6600_mcu.bin \
+    config/imports-r27-name-6600.txt --profile name
+
+# full relocation: 236 slots (K=1361 local exception); linked image,
+#   NK_CALL_INFER=0: 108,231 insns, USER-EXEC 3 after At(handle 0xffff8001)
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r27-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0 \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 NK_HLE_HEAP=0x80700000 \
+  NK_CALLMAP=config/callmap-rtc-6600.txt \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+#   control: NK_CALL_INFER=1 snaps a valid EUser call and stops at 14,354 /
+#   MATHX; optional NK_BOOTTABLE_RAM=0x80900000 does not change the 108k stop
+
+# DProcess name probe: 47 slots, no NK_PATCH; 128,663 insns, UIDs correct
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r27-name-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0 \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 NK_HLE_HEAP=0x80700000 \
+  NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x5032b5d4 NK_WATCH_HITS=1 NK_WATCH_LOG=0 NK_WATCH_MEM=r1:0x30 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_round27.sh
 
 # round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
 # code+text_size; the default runtime image now includes it

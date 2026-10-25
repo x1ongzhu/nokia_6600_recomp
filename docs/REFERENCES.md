@@ -181,3 +181,9 @@ N-Gage 应用级兼容层不等于 6600 整机启动；其内存布局也不能�
 5. UPP_WD2 的 LCD、计时器和键盘寄存器仍需另找板级资料或实际访问轨迹，以上资料不能填补这一空白。
 6. `Series60_v20` 提供同代的头文件、符号名和文档，但不提供目标 ROM 的导出表或
    内存布局；不要用 SDK 的 `.lib` 顺序、头文件类布局或模拟器行为替代目标映像证据。
+   第 27 轮进一步确认：SDK `euser.lib` 的序号（以及
+   `references/symbian-kernelhwsrv/.../7.0-euseru.def` 的通用 7.0 顺序）
+   都**不是**目标 ROM 的导出顺序；kernel→ROM 的 `K-3` 规则来自 49 个
+   由调用点语义独立确定的锚点，`euser_reloc.py verify` 只把这些锚点和
+   `edata[K-3]` 一致性固定下来。`Series60_v20/Epoc32/release/*/euser.lib`
+   的 `d2353s_NNNNN.o` 成员名可用于核对符号名，但不要把它当作目标 DLL 的 ordinal。

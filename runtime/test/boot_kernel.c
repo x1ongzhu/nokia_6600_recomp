@@ -71,6 +71,12 @@
  *                           (base+size pairs, largest power-of-two blocks)
  *                           plus the machine-config area at +0x800.  The mask
  *                           ROM normally fills this before the E32 entry.
+ *   NK_BOOTTABLE_RAM=addr   copy the 64 KiB ROMFS directory block at
+ *                           0x50300000 to addr and repoint the ROM header's
+ *                           primary/secondary/variant/extension TRomEntry
+ *                           pointers (round 27 experiment: a writable boot
+ *                           table for the loader; not required after the
+ *                           K=1361 import exception)
  *   NK_SUPERPAGE_BASE=0x... override the super page address (default 0x40000000)
  *   NK_SUPERPAGE_TOTAL=0x... override iTotalRamSize (default: mapped RAM size)
  *   NK_ENTRY=0x...          override the entry address (e.g. 0x50000000 to
@@ -241,6 +247,35 @@ static void install_super_page(nk_cpu_t* c, uint32_t base, uint32_t total) {
     for (uint32_t i = 0; i < n; i++) {
         printf(" {%#x,%#x}", off, blocks[i]);
         off += blocks[i];
+    }
+    printf("\n");
+}
+
+/* Round 27 experiment: give the boot loader a writable copy of the ROMFS
+ * directory block.  With K=1361 misbound to the larger constructor the loader
+ * writes 0x84 into the rtc.dll TRomEntry (0x50301f40); the K=1361 exception
+ * removes that write, but the RAM table is still useful for later loader
+ * steps.  This is an explicit boot-state model, not a firmware patch.
+ */
+static void install_boot_table_ram(nk_cpu_t* c, uint32_t to) {
+    const uint32_t from = 0x50300000u;
+    const uint32_t size = 0x10000u;
+    if (nk_alloc_ram(c, to, size) != 0) {
+        fprintf(stderr, "boot table RAM: cannot map %#010x\n", to);
+        return;
+    }
+    for (uint32_t i = 0; i < size; i += 4)
+        nk_w32(c, to + i, nk_r32(c, from + i));
+    const uint32_t fields[] = {0x5000009cu, 0x500000a0u,
+                               0x500000c8u, 0x500000ccu};
+    printf("boot table RAM: %#010x..%#010x -> %#010x",
+           from, from + size, to);
+    for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        uint32_t v = nk_r32(c, fields[i]);
+        if (v >= from && v < from + size) {
+            nk_w32(c, fields[i], v + (to - from));
+            printf(" %#x->%#x", v, v + (to - from));
+        }
     }
     printf("\n");
 }
@@ -789,7 +824,9 @@ typedef struct {
     int thumb;
 } import_override_t;
 
-#define NK_MAX_IMPORT_OVERRIDES 64
+/* Round 27 relocates every kernel EUser import (236 slots) instead of a
+ * handful, so the table must hold the whole map. */
+#define NK_MAX_IMPORT_OVERRIDES 512
 
 static int load_import_overrides(const char* path, import_override_t* out,
                                  int max) {
@@ -1101,6 +1138,8 @@ int main(int argc, char** argv) {
         thumb_entry = (entry & 1u) ? 1 : 0;
         if (getenv("NK_ENTRY_ARM")) thumb_entry = 0;
         if (getenv("NK_ENTRY_THUMB")) thumb_entry = 1;
+        uint32_t btr = (uint32_t)env_ulong("NK_BOOTTABLE_RAM", 0);
+        if (btr) install_boot_table_ram(&cpu, btr);
         if (getenv("NK_KERNEL_VECTORS") && g_kernel_code) {
             const uint8_t* v = rom_copy + (g_kernel_code - NK_FLASH_BASE);
             nk_poke(&cpu, 0x00000000u, v, 0x64);
