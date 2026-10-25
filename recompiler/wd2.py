@@ -248,15 +248,22 @@ def read_rom_dir(rom, packed_off, limit=1024):
 def normalise_kernel(rom, kern, name):
     """Materialise the kernel *text* at its link address.
 
-    The code is stored immediately after the E32Image header.  On EKA1 the
-    serialized TRomImageHeader is 0x64 bytes for every image (including the
-    kernel; the two words at +0x64 are the first 8 bytes of text, not header
-    fields).  `iTextSize` is the executable text; `iCodeSize` also includes
-    constant data.  Carve the text only.
+    The code follows the E32Image header at +0x64 in the **page-header-free
+    packed stream**.  The raw flash inserts a 0xec-byte page header at that
+    point, so slicing `rom[code_offset:]` used to carve the page header as
+    the first bytes of the kernel (the round-16 correction).  Keep the raw
+    path as a fallback for images that are not paged.
+    `iTextSize` is the executable text; `iCodeSize` also includes constant
+    data.
     """
     size = kern.get("text_size") or kern["code_size"]
     if size <= 0 or size > kern["code_size"]:
         size = kern["code_size"]
+    import pagestream
+    stream = pagestream.build(rom)
+    sk = pagestream.find_kernel(stream)
+    if sk is not None:
+        return bytes(stream[sk["text"]:sk["text"] + size])
     return bytes(rom[kern["code_offset"]:kern["code_offset"] + size])
 
 
@@ -302,10 +309,17 @@ def cmd_info(a):
 def cmd_kernel(a):
     rom = load_any(a.input)
     k = find_kernel(rom)
+    import pagestream
+    stream = pagestream.build(rom)
+    sk = pagestream.find_kernel(stream)
     img = normalise_kernel(rom, k, a.output)
     open(a.output, "wb").write(img)
-    print(f"kernel header @ {k['offset']:#x}, code @ {k['code_offset']:#x}, "
-          f"link {k['code']:#x}, entry {k['entry']:#x}, {len(img):#x} bytes")
+    where = (f"stream header @ {sk['header']:#x}, text @ {sk['text']:#x}"
+             if sk else f"header @ {k['offset']:#x}, code @ {k['code_offset']:#x}")
+    print(f"kernel {where}, link {k['code']:#x}, entry {k['entry']:#x}, "
+          f"{len(img):#x} bytes")
+    if sk:
+        print(f"  raw page header @ {k['code_offset']:#x} skipped")
     print(f"-> {a.output}")
 
 

@@ -51,10 +51,11 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   address order and inserts two bytes before any entity whose final address
   would be 2 mod 4.  `analyze` reports the shift function and the pool
   alignment, `build`/`verify` write and check a relaid kernel text, and
-  `image` produces the experimental flat runtime image used by
-  `tools/test_relayout.sh`.  The packed bytes are unchanged; only gaps are
-  inserted.  It currently handles the kernel text; moving the following
-  images and the out-of-range call targets is still open.
+  `image` produces an experimental flat runtime image.  **Round 16:** on the
+  page-header-free stream the text is already linked; the residual plan is
+  only 26 inserts / `0x34` bytes (detector noise) and must not be applied.
+  `tools/test_relayout.sh` treats it as a diagnostic.  The packed bytes are
+  unchanged; only gaps are inserted.
 - **`layout.py`** — audit the packed image layout with the export directory as
   ground truth.  `census` reports, per image, how many `iExportDir` entries
   are in the text/code, 4-byte aligned, Thumb-tagged and actually land on a
@@ -82,7 +83,11 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   `build` writes the 64 KiB image with **A/B/C** moved to their linked
   addresses; `verify` pins the measurements and the C CPU/board table (linked
   `0x74b8` <- file `0x782c`, including CPU value `0x3b`).  The boot harness
-  maps the result at 0 with `NK_LOW_ROM_IMAGE` and starts at linked `0x30c`
+  maps the result at 0 with `NK_LOW_ROM_IMAGE` and starts at linked `0x30c`.
+  Round 16 adds `--stream`: the page-header-free boot bank is simply stream
+  `[0xb0, 0x100b0)`, every switch table measures bias 0, and the **correct**
+  linked loader stops in a board/CPU detection panic at `0x624c`.  The old raw
+  A/B/C 600k run used the B2 page header as code and is a legacy regression
   (`../tools/test_bootbank.sh`).
 - **`bootregions.py`** — derive and inspect the mask-ROM boot-region (bank)
   table the secondary loader receives in `r0/fp`.  Entries are 0x10 bytes
@@ -102,18 +107,22 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   `NK_RAM_EXTRA=0x300000` for the 6 MiB bank
   (`../tools/test_bootregions.sh`, `../tools/test_kaep.sh`,
   `../tools/test_bootbringup.sh`).
+- **`pagestream.py`** — remove the flash's `0x20ec`-byte page records.  Each
+  record is a **`0xec`-byte header** (first six bytes `20 00 00 00 dc 23`)
+  followed by a **`0x2000`-byte payload**.  The payloads are the packed image
+  records; the headers are not.  `build` writes the page-header-free stream,
+  `analyze` reports the grid and kernel record, `verify` pins the 852 headers
+  and the kernel header/text/entry (`+0x64`, ARM `push`, vector table).
+  Without this step the kernel's 478 exports only score 17.2% on function
+  starts; with it they score **469/478 (98.1%)**, and `\System\Programs` has
+  all **586** entries.  `../tools/test_pagestream.sh` is the acceptance test.
 - **`kaep.py`** — measure the KaeP block (`0x124`: magic, size 0x20, value
-  `0x1423dc`) and the paged boot image.  The first 7 MiB carry a six-byte page
-  tag (`20 00 00 00 dc 23`) every `0x20ec` bytes: first at `0x20b0`, last at
-  `0x6d9134`, **852 tags**.  (`0x128` reads the same six bytes but is the
-  KaeP size/value prefix, not a tag.)  The kernel text starts on a tag
-  (`0x326924` = `0x50310000`), so its entry `+0x54` is valid while the
-  post-tag code is shifted by six bytes per page.  `analyze` reports the grid,
-  `despan` writes the experimental tag-free view, `synth` writes an explicit
-  bring-up descriptor/list node into a linked boot bank, and `verify` pins the
-  structure (`../tools/test_kaep.sh`).  The tag semantics (and the real KaeP
-  unpack) are still unknown; the despanned view does **not** fix the export
-  layout by itself.
+  `0x1423dc`) and the page grid.  `analyze` reports the 852 headers,
+  `despan` writes the old (six-byte-only) experimental view, `synth` writes an
+  explicit bring-up descriptor/list node into a linked boot bank, and `verify`
+  pins the structure (`../tools/test_kaep.sh`).  The real KaeP unpack is still
+  unknown.  **Note:** `despan` is superseded by `pagestream.py`; removing only
+  the six tag bytes still leaves the other `0xe6` header bytes inline.
 - **`bootbringup.py`** — the explicit round-15 mask-ROM stand-in.  It takes
   the linked boot bank, writes a KaeP descriptor at `0x80`, a
   `head -> node -> terminator` list at `0xfd00 -> 0xfd10` (node type
@@ -129,7 +138,8 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
 - **`lift.py`** — ARMv4T/Thumb → C against `nk_cpu_t` (see `../runtime/include/`).
 - **`gen_register.py`** — emit `nk_register()` for every lifted function.
 - **`trace_boot.py`** — Unicorn-based research tracer.  `--kernel` loads the
-  carved kernel at 0x50310000 and starts at the Thumb entry 0x50310054.
+  carved kernel at 0x50310000 and starts at the **ARM** entry 0x50310054
+  (the page-header-free stream; the old Thumb assumption was a page header).
   It is a bring-up tool, not the runtime.
 
 `../tools/build_kernel_smoke.sh` runs the whole kernel path and executes a real

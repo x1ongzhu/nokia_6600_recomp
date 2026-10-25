@@ -54,6 +54,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+import pagestream
+
 BANK = 0x10000                  # mask-ROM boot bank view
 BASE_PROBE = 0x3B0              # `sub r1, pc, #imm; add r0, r0, r1; mov pc, lr`
 LOADER_ENTRY = 0x3BC            # `mov r0, fp; sub r1, pc, #imm; ...; b loader`
@@ -99,13 +101,18 @@ def image_base(bank: bytes) -> int | None:
     return (BASE_PROBE + 8 - _rot_imm(w & 0xFFF)) & 0xFFFFFFFF
 
 
-def loader_entry(bank: bytes) -> dict:
-    """Decode the hand-off at 0x3bc: `sub r1, pc, #imm` -> descriptor."""
-    w = u32(bank, LOADER_ENTRY + 4)
+def loader_entry(bank: bytes, entry: int = LOADER_ENTRY) -> dict:
+    """Decode the hand-off: `sub r1, pc, #imm` -> descriptor.
+
+    In the raw pack the entry is stored at 0x3bc and the descriptor at 0x130;
+    in the page-header-free linked view the entry is 0x30c and the descriptor
+    is linked 0x80.
+    """
+    w = u32(bank, entry + 4)
     target = None
     if (w & 0x0FFF0000) == 0x024F0000 and (w & 0xF000) == 0x1000:
-        target = (LOADER_ENTRY + 8 + 4 - _rot_imm(w & 0xFFF)) & 0xFFFFFFFF
-    return {"entry": LOADER_ENTRY, "sub": w, "descriptor": target}
+        target = (entry + 8 + 4 - _rot_imm(w & 0xFFF)) & 0xFFFFFFFF
+    return {"entry": entry, "sub": w, "descriptor": target}
 
 
 def switch_tables(bank: bytes) -> list[dict]:
@@ -156,16 +163,26 @@ def module_for_stored(off: int) -> tuple[int, int, str] | None:
     return None
 
 
-def analyze(rom: bytes) -> dict:
-    bank = rom[:BANK]
-    base = image_base(bank)
-    entry = loader_entry(bank)
+def analyze(rom: bytes, stream: bool = False) -> dict:
+    if stream:
+        bank = build_stream(rom)
+        base = None
+        entry = loader_entry(bank, LINKED_ENTRY)
+    else:
+        bank = rom[:BANK]
+        base = image_base(bank)
+        entry = loader_entry(bank)
     tables = switch_tables(bank)
-    # Assign each table to the fragment whose stored range contains it.
-    for row in tables:
-        m = module_for_stored(row["address"])
-        row["module"] = m[2] if m else None
-        row["expect"] = m[0] if m else None
+    if stream:
+        for row in tables:
+            row["module"] = "-"
+            row["expect"] = 0
+    else:
+        # Assign each table to the fragment whose stored range contains it.
+        for row in tables:
+            m = module_for_stored(row["address"])
+            row["module"] = m[2] if m else None
+            row["expect"] = m[0] if m else None
     by_module: dict[str, list[dict]] = {}
     for row in tables:
         by_module.setdefault(row["module"] or "-", []).append(row)
@@ -173,10 +190,12 @@ def analyze(rom: bytes) -> dict:
     for name, rows in by_module.items():
         summary[name] = max(r["bias_max"] for r in rows)
     return {
+        "stream": stream,
         "reloc_addend": base,
         "loader": entry,
         "tables": tables,
-        "modules": [(ls, le, ss, nm) for ls, le, ss, nm in MODULES],
+        "modules": ([] if stream else
+                    [(ls, le, ss, nm) for ls, le, ss, nm in MODULES]),
         "measured": summary,
     }
 
@@ -196,11 +215,34 @@ def build(rom: bytes) -> bytes:
     return bytes(out)
 
 
+LINKED_ENTRY = 0x30C
+STREAM_BASE = 0xB0              # linked 0 is at stream offset 0xb0
+
+
+def build_stream(rom: bytes) -> bytes:
+    """Return the linked boot bank from the page-header-free stream.
+
+    The 0x20ec page headers are exactly what made the raw bank look
+    fragmented.  After removing them the boot bank is the contiguous stream
+    slice ``[0xb0, 0x100b0)``: linked 0 is stream 0xb0 and every switch table
+    measures bias 0.  This supersedes the A/B/C relocation heuristics.
+    """
+    stream = pagestream.build(rom)
+    if len(stream) < STREAM_BASE + BANK:
+        raise SystemExit("packed stream is too short for a 64 KiB boot bank")
+    return stream[STREAM_BASE:STREAM_BASE + BANK]
+
+
 def cmd_analyze(a):
     rom = open(a.rom, "rb").read()
-    info = analyze(rom)
-    print(f"# boot bank: first {BANK:#x} bytes of {a.rom}")
-    print(f"reloc addend (0x3b0): {info['reloc_addend']:#x}")
+    info = analyze(rom, a.stream)
+    if a.stream:
+        print(f"# boot bank: linked stream view of {a.rom}")
+    else:
+        print(f"# boot bank: first {BANK:#x} bytes of {a.rom}")
+    addend = info["reloc_addend"]
+    print(f"reloc addend (0x3b0): "
+          f"{('0x%x' % addend) if addend is not None else 'n/a (linked)'}")
     le = info["loader"]
     desc = le["descriptor"]
     print(f"loader entry      : {le['entry']:#x} (linked {LINKED_ENTRY:#x}), "
@@ -213,35 +255,48 @@ def cmd_analyze(a):
         print(f"{r['address']:#8x} {r['table']:#8x} {r['entries']:2d} "
               f"{r['end']:#8x} {r['bias_max']:#7x} {r['module'] or '-':>4} {exp:>7}")
     print()
-    print("measured fragments (max table bias is a lower bound, ±0x20):")
-    for ls, le, ss, name in info["modules"]:
-        print(f"  {name}: linked {ls:#06x}-{le:#06x} <- stored {ss:#06x} "
-              f"(bias {ss - ls:#x})")
-    m = info["measured"]
-    a_bias = m.get("A")
-    b_bias = m.get("B")
-    print(f"  A bias: {('0x%x' % a_bias) if a_bias is not None else '?'}  "
-          f"(anchor: 0x3b0 helper)")
-    print(f"  B bias: {('0x%x' % b_bias) if b_bias is not None else '?'}")
-    c_bias = m.get("C")
-    print(f"  C bias: {('0x%x' % c_bias) if c_bias is not None else '?'}  "
-          f"(anchor: CPU table 0x74b8 -> file 0x782c)")
+    if a.stream:
+        biases = sorted({r["bias_max"] for r in info["tables"]})
+        print(f"linked stream view: {len(info['tables'])} switch tables, "
+              f"bias {[hex(x) for x in biases]}")
+        print("page headers removed -> linked 0 is stream 0xb0; no fragment "
+              "relocation is needed")
+    else:
+        print("measured fragments (max table bias is a lower bound, ±0x20):")
+        for ls, le, ss, name in info["modules"]:
+            print(f"  {name}: linked {ls:#06x}-{le:#06x} <- stored {ss:#06x} "
+                  f"(bias {ss - ls:#x})")
+        m = info["measured"]
+        a_bias = m.get("A")
+        b_bias = m.get("B")
+        print(f"  A bias: {('0x%x' % a_bias) if a_bias is not None else '?'}  "
+              f"(anchor: 0x3b0 helper)")
+        print(f"  B bias: {('0x%x' % b_bias) if b_bias is not None else '?'}")
+        c_bias = m.get("C")
+        print(f"  C bias: {('0x%x' % c_bias) if c_bias is not None else '?'}  "
+              f"(anchor: CPU table 0x74b8 -> file 0x782c)")
     return 0
 
 
 def cmd_build(a):
     rom = open(a.rom, "rb").read()
-    buf = build(rom)
+    buf = build_stream(rom) if a.stream else build(rom)
     if len(buf) != BANK:
         print(f"internal error: built {len(buf)} bytes", file=sys.stderr)
         return 1
     with open(a.out, "wb") as f:
         f.write(buf)
-    print(f"wrote {a.out}: {BANK:#x}-byte linked boot bank")
-    for ls, le, ss, name in MODULES:
-        print(f"  {name}: linked {ls:#06x}-{le:#06x} <- stored {ss:#06x}")
-    print(f"map it at address 0 and start at linked {LINKED_ENTRY:#x}:")
-    print(f"  NK_LOW_ROM=1 NK_LOW_ROM_IMAGE={a.out} NK_ENTRY={LINKED_ENTRY:#x} \\")
+    print(f"wrote {a.out}: {BANK:#x}-byte linked boot bank"
+          f"{' (page-header-free stream)' if a.stream else ''}")
+    if a.stream:
+        print(f"  linked 0 is packed-stream 0x{STREAM_BASE:x}; switch table "
+              f"bias is 0")
+    else:
+        for ls, le, ss, name in MODULES:
+            print(f"  {name}: linked {ls:#06x}-{le:#06x} <- stored {ss:#06x}")
+    entry = LINKED_ENTRY
+    print(f"map it at address 0 and start at linked {entry:#x}:")
+    print(f"  NK_LOW_ROM=1 NK_LOW_ROM_IMAGE={a.out} NK_ENTRY={entry:#x} \\")
     print("    NK_R11=0x80000000 NK_R10=0x80000000 NK_RECOVER=1 NK_CODE_ONLY=1 \\")
     print("    ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin --rom-image out/6600_runtime.bin")
     return 0
@@ -249,13 +304,32 @@ def cmd_build(a):
 
 def cmd_verify(a):
     rom = open(a.rom, "rb").read()
-    info = analyze(rom)
+    info = analyze(rom, a.stream)
     ok = True
 
     def check(cond, msg):
         nonlocal ok
         print(("ok: " if cond else "FAIL: ") + msg)
         ok = ok and cond
+
+    if a.stream:
+        built = build_stream(rom)
+        check(len(built) == BANK, "stream boot bank is 64 KiB")
+        desc = info["loader"]["descriptor"]
+        check(desc == 0x80,
+              f"linked loader hands off descriptor 0x80 (got {desc:#x})")
+        biases = {r["bias_max"] for r in info["tables"]}
+        check(biases == {0},
+              f"all linked switch tables measure bias 0 (got {sorted(biases)})")
+        check(built[0x74B8:0x74BA] == b"\x00\x00" and
+              built[0x74D8:0x74DA] == b"\x3b\x00",
+              "linked CPU/board table at 0x74b8 has the CPU value 0x3b")
+        check(built[0x80:0xA0] ==
+              b"\x00\xea\xf9\xdf" * 4 +
+              b"\x00\xea\x00\x00\xa0\xe1\xf9\xdf\x00\xea\xf9\xdf\x00\xea"
+              b"\x18\xf0",
+              "linked 0x80 still holds the packed KaeP payload")
+        return 0 if ok else 1
 
     check(info["reloc_addend"] == 0xB0,
           f"image base is 0xb0 (got {info['reloc_addend']})")
@@ -297,13 +371,19 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     an = sub.add_parser("analyze", help="measure the boot-bank fragments")
     an.add_argument("rom", nargs="?", default="6600_mcu.bin")
+    an.add_argument("--stream", action="store_true",
+                    help="analyze the page-header-free linked stream view")
     an.set_defaults(func=cmd_analyze)
     bd = sub.add_parser("build", help="write the linked 64 KiB boot-bank view")
     bd.add_argument("rom", nargs="?", default="6600_mcu.bin")
     bd.add_argument("out", nargs="?", default="out/6600_bootbank_linked.bin")
+    bd.add_argument("--stream", action="store_true",
+                    help="build from the page-header-free packed stream")
     bd.set_defaults(func=cmd_build)
     vf = sub.add_parser("verify", help="assert the measured invariants")
     vf.add_argument("rom", nargs="?", default="6600_mcu.bin")
+    vf.add_argument("--stream", action="store_true",
+                    help="verify the page-header-free linked stream view")
     vf.set_defaults(func=cmd_verify)
     a = ap.parse_args()
     return a.func(a)

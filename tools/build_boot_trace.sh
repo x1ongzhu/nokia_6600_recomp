@@ -8,6 +8,8 @@
 # Executes the kernel entry in the runtime's own interpreter (not Unicorn) and
 # prints the frontier: the first undefined instruction, the first MMIO events,
 # register state and the last PCs.  Generated binaries go to out/ (gitignored).
+# Round 16: wd2.py kernel now carves the page-header-free text, and the entry
+# 0x50310054 is ARM (`push {r4,r5,r6,lr}`).
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
@@ -47,7 +49,11 @@ else
 fi
 
 echo
-echo "hint: NK_TRACE=1 NK_TRACE_N=120 shows the instruction stream;"
+echo "hint: the blob path above is a minimal entry trace; the real kernel run is"
+echo "      tools/build_rom_image.sh +"
+echo "      NK_KERNEL_VECTORS=1 ./out/boot_kernel ROM fw/6600_kernel.bin \\"
+echo "        --rom-image out/6600_runtime.bin   (see tools/test_pagestream.sh)"
+echo "      NK_TRACE=1 NK_TRACE_N=120 shows the instruction stream;"
 echo "      NK_INFER=0 disables Thumb<->ARM inference;"
 echo "      NK_CALL_INFER=1 repairs interworking call sites;"
 echo "      NK_E32=0x3268c0 NK_E32_SECTIONS=1 loads the packed EKA1"

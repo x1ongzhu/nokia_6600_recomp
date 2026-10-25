@@ -44,8 +44,13 @@
  *                           allocated RAM window, at least 0x80400000)
  *   NK_IAT_FAKE=1           unresolved imports return 0 instead of stopping
  *   NK_IAT_LOG=n            log the first n unbound imports (default 16)
- *   NK_ENTRY_ARM=1          start in ARM state instead of Thumb
- *   NK_ENTRY_THUMB=1        force Thumb state (the kernel text is Thumb)
+ *   NK_ENTRY_ARM=1          force ARM state (the flat image now takes the mode
+ *                           from the E32 entry bit; the real kernel is ARM)
+ *   NK_ENTRY_THUMB=1        force Thumb state
+ *   NK_KERNEL_VECTORS=1     copy the kernel text's first 0x64 bytes (its ARM
+ *                           exception vector table) to 0x0 and 0xffff0000
+ *   NK_NO_SUPER_PAGE=1      do not map the 0x7ff00000..0x80000000 kernel
+ *                           super-page window (control run)
  *   NK_ENTRY=0x...          override the entry address (e.g. 0x50000000 to
  *                           run the ROM's exception-vector code)
  *   NK_WATCH=0x...          dump registers + the call ring when PC hits this
@@ -311,11 +316,14 @@ typedef struct {
     uint32_t uid3, entry, code, text, data, dsize, bss, ram, hdr_va;
 } rom_image_t;
 
+static uint32_t g_kernel_code;
+
 static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
                                   const uint8_t* img, long len, int verbose) {
     static rom_image_t images[NK_MAX_IMAGES];
     int nimg = 0;
     uint32_t kernel_entry = 0, kernel_hdr = 0;
+    g_kernel_code = 0;
 
     /* Packed records are only 2-byte aligned (the ROM build removed the
      * linker's 4-byte padding), so headers can sit at 2 mod 4.  Scanning by 4
@@ -354,7 +362,9 @@ static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
                     nk_w8(cpu, ram + dsize + i, 0);
             }
         }
-        if (uid3 == 0x100058e8u) { kernel_entry = entry; kernel_hdr = h; }
+        if (uid3 == 0x100058e8u) {
+            kernel_entry = entry; kernel_hdr = h; g_kernel_code = code;
+        }
     }
 
     /* Executable ranges: boot block + kernel + the kernel's direct DLL refs. */
@@ -438,6 +448,12 @@ int main(int argc, char** argv) {
      * 0x0004_6fca), so the bootstrap view needs RAM at 0x00000000 too. */
     if (!getenv("NK_NO_LOW_RAM") &&
         nk_alloc_ram(&cpu, 0x00000000u, NK_RAM_SIZE) != 0) return 1;
+    /* The EKA1 kernel uses memory directly below the RAM base for its
+     * exception stack / super page (SP starts at 0x7ffffc58 and descends).
+     * Model a 1 MiB window so the early stack does not fall through to the
+     * MMIO log; the real page-table/super-page setup is still a frontier. */
+    if (!getenv("NK_NO_SUPER_PAGE") &&
+        nk_alloc_ram(&cpu, 0x7ff00000u, 0x100000) != 0) return 1;
     if (nk_alloc_ram(&cpu, NK_HIGH_VECTORS, 0x10000) != 0) return 1;
     /* Bring-up heap for the callmap's NK_HLE_ALLOC entries.  Keep it above
      * the RAM window when NK_RAM_EXTRA extends RAM past 0x80400000. */
@@ -465,8 +481,20 @@ int main(int argc, char** argv) {
         free(img);
         entry = rom_image_prepare(&cpu, &ip, rom_copy, rom_len, 1);
         if (!entry) { fprintf(stderr, "no kernel in %s\n", rom_image); return 1; }
-        thumb_entry = getenv("NK_ENTRY_ARM") ? 0 : 1;
+        /* The E32Image entry carries the interworking bit: odd = Thumb.
+         * The old bring-up forced Thumb because it was executing the 6-byte
+         * page tag at the start of the packed record; the real kernel entry
+         * (+0x54) is ARM code (`push {r4,r5,r6,lr}`). */
+        thumb_entry = (entry & 1u) ? 1 : 0;
+        if (getenv("NK_ENTRY_ARM")) thumb_entry = 0;
         if (getenv("NK_ENTRY_THUMB")) thumb_entry = 1;
+        if (getenv("NK_KERNEL_VECTORS") && g_kernel_code) {
+            const uint8_t* v = rom_copy + (g_kernel_code - NK_FLASH_BASE);
+            nk_poke(&cpu, 0x00000000u, v, 0x64);
+            nk_poke(&cpu, NK_HIGH_VECTORS, v, 0x64);
+            printf("kernel vectors: 0x64 bytes from %#010x -> 0x0 / %#010x\n",
+                   g_kernel_code, NK_HIGH_VECTORS);
+        }
         printf("runtime image %s: entry %#010x (%s)\n",
                rom_image, entry, thumb_entry ? "Thumb" : "ARM");
     } else if (e32 >= 0) {
@@ -511,7 +539,9 @@ int main(int argc, char** argv) {
         if (!code_img) return 1;
         code_base = (uint32_t)env_ulong("NK_KERNEL_CODE", 0x50310000);
         entry = (uint32_t)env_ulong("NK_KERNEL_ENTRY", 0x50310054);
-        thumb_entry = getenv("NK_ENTRY_ARM") ? 0 : 1;
+        thumb_entry = (entry & 1u) ? 1 : 0;   /* page-header-free kernel is ARM */
+        if (getenv("NK_ENTRY_ARM")) thumb_entry = 0;
+        if (getenv("NK_ENTRY_THUMB")) thumb_entry = 1;
         nk_code_range_add(&ip, code_base, code_base + (uint32_t)code_len);
         printf("kernel blob %s: %ld bytes -> %#010x, entry %#010x (%s)\n",
                kern_path, code_len, code_base, entry, thumb_entry ? "Thumb" : "ARM");

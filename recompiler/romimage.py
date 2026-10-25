@@ -12,7 +12,10 @@ dump.  Each ROM image is stored as one packed record:
     TDllRefTable     (if iDllRefTable)  -> iDllRefTable
 
 and the ROM file system stores its data at yet another set of offsets.  The
-runtime layout, however, is simple:
+flash itself is paged as `0x20ec`-byte records (`0xec` header + `0x2000`
+payload); `pagestream.py` removes the headers and all offsets in this module
+are **packed-stream** offsets unless explicitly called "raw".  The runtime
+layout is simple:
 
     0x50000000  ROM boot code / vectors
     0x5030_0000 ROMFS root list + directories
@@ -44,6 +47,8 @@ import struct
 import sys
 from dataclasses import dataclass, field, asdict
 
+import pagestream
+
 ROM_BASE = 0x50000000
 ROM_SIZE = 0x01600000
 
@@ -62,6 +67,16 @@ def u16(b, o):
 
 def u32(b, o):
     return struct.unpack_from("<I", b, o)[0]
+
+
+def load_packed(path: str) -> bytes:
+    """Read a flash image and return its page-header-free packed stream."""
+    return pagestream.build(open(path, "rb").read())
+
+
+def packed(rom: bytes) -> bytes:
+    """Return `rom` as a page-header-free packed stream (idempotent)."""
+    return pagestream.build(rom)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +365,28 @@ def find_romfs_root(rom: bytes, root_dir_list: int) -> int | None:
                 break
         if ok:
             return off
+
+    # Packed-stream fallback.  In the deinterleaved view the directory block
+    # no longer sits at the raw `+0x162b0` bias.  Locate the first (large)
+    # \System\Libs directory by its first entry name; the root, \System and
+    # \System\Programs directories are then found by content from there.
+    needle = "AcmClassController.dll".encode("utf-16le")
+    pos = rom.find(needle)
+    while pos >= 0:
+        off = pos - 14                    # TRomDir + entry header
+        if off >= 0:
+            d = read_rom_dir_full(rom, off)
+            if len(d.entries) >= 100:
+                # A TRomRootDirectoryList (12 bytes: count + one address)
+                # normally precedes the TRomDir.  The runtime root pointer
+                # refers to this list, and build_image copies the whole
+                # block from it.
+                root = off - 12
+                if (root >= 0 and 1 <= u32(rom, root) <= 8 and
+                        ROM_BASE <= u32(rom, root + 8) < ROM_BASE + ROM_SIZE):
+                    return root
+                return off
+        pos = rom.find(needle, pos + 1)
     return None
 
 
@@ -948,6 +985,15 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
     if not romfs_linear and root_off is not None:
         e32 = scan_e32_files(rom)
         image_hdrs = {im.code - 0x64 for im in images}
+
+        def overlap(va: int, size: int) -> str | None:
+            for p in placed:
+                if p.overlay:
+                    continue
+                if p.va < va + size and va < p.va + p.size:
+                    return p.name
+            return None
+
         for e, is_app in collect_romfs_files(rom, root_off):
             if not is_app and e.addr in image_hdrs:
                 continue
@@ -958,6 +1004,13 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
                 warnings.append(f"romfs: {e.name} E32 file at {foff:#x} "
                                 f"runs past the flash")
                 continue
+            if not is_app:
+                clash = overlap(e.addr, e.size)
+                if clash:
+                    warnings.append(
+                        f"romfs: {e.name} E32 file at {e.addr:#x} overlaps "
+                        f"{clash}; skipped (loaded later by the file server)")
+                    continue
             put(e.addr, rom[foff:foff + e.size], f"romfs_e32_{e.name}", foff,
                 overlay=is_app)
 
@@ -1101,13 +1154,14 @@ def call_report(rom: bytes, im: Image, limit: int = 24) -> dict:
 # ---------------------------------------------------------------------------
 
 def cmd_scan(a):
-    rom = open(a.rom, "rb").read()
+    rom = load_packed(a.rom)
     hdr = find_rom_header(rom)
     images = scan_images(rom)
     good = plausible_images(images)
     reach = reachable_images(images)
-    print(f"ROM {len(rom):#x} bytes, header @ {hdr['header_offset']:#x}, "
-          f"base {hdr['rom_base']:#x}, size {hdr['rom_size']:#x}")
+    print(f"packed stream {len(rom):#x} bytes (page headers removed), "
+          f"header @ {hdr['header_offset']:#x}, base {hdr['rom_base']:#x}, "
+          f"rom_size {hdr['rom_size']:#x}")
     print(f"images: {len(images)} header candidates ({len(good)} plausible, "
           f"{len(images) - len(good)} rejected), {len(reach)} reachable from "
           f"the kernel")
@@ -1116,13 +1170,13 @@ def cmd_scan(a):
     print(f"  code map: {len(good)} images at {span_lo:#010x}..{span_hi:#010x} "
           f"({sum(im.text_size for im in good):#x} bytes of text)")
     for im in reach:
-        print(f"\nuid3 {im.uid3:#010x}  file {im.hdr_off:#08x}  "
+        print(f"\nuid3 {im.uid3:#010x}  stream {im.hdr_off:#08x}  "
               f"code {im.code:#010x}  entry {im.entry:#010x}")
         for s in im.sections:
-            print(f"  {s.name:7} file {s.file_off:#08x}  size {s.size:#08x}  "
+            print(f"  {s.name:7} stream {s.file_off:#08x}  size {s.size:#08x}  "
                   f"va {s.va:#010x}")
         if im.rodata:
-            print(f"  rodata  file {im.rodata.file_off:#08x}  "
+            print(f"  rodata  stream {im.rodata.file_off:#08x}  "
                   f"size {im.rodata.size:#08x}  (not described by the header)")
         print(f"  bss {im.bss_size:#x} @ RAM {im.databss:#010x}  "
               f"flags {im.flags:#x}  dllrefs {[hex(x) for x in im.dllrefs]}")
@@ -1179,7 +1233,7 @@ def cmd_scan(a):
 
 
 def cmd_build(a):
-    rom = open(a.rom, "rb").read()
+    rom = load_packed(a.rom)
     hdr = find_rom_header(rom)
     images = scan_images(rom)
     good = plausible_images(images)
@@ -1187,8 +1241,11 @@ def cmd_build(a):
     place = reach if a.only_reachable else good
     root = find_romfs_root(rom, hdr["root_dir_list"])
     romfs = parse_romfs(rom, root) if root is not None else []
+    # Snapping was a bring-up aid for the misaligned packed text.  The
+    # page-header-free stream now matches the export table at ~98%, so keep
+    # the raw export addresses unless --snap is requested explicitly.
     buf, warnings, placed = build_image(rom, place, romfs, a.include_rodata,
-                                        do_snap=not a.no_snap,
+                                        do_snap=a.snap,
                                         romfs_linear=a.romfs_linear)
     patches = load_patches(a.patch) if a.patch else []
     if patches:
@@ -1213,6 +1270,7 @@ def cmd_build(a):
     print(f"  kernel entry {kernel.entry:#010x}")
     if a.json:
         payload = {
+            "source": "page-header-free packed stream",
             "rom_header": hdr,
             "images": [asdict(im) for im in place],
             "placed": [asdict(s) for s in placed],
@@ -1227,7 +1285,7 @@ def cmd_build(a):
 
 def cmd_names(a):
     """Map ROMFS image names to packed records (the boot-file table)."""
-    rom = open(a.rom, "rb").read()
+    rom = load_packed(a.rom)
     hdr = find_rom_header(rom)
     good = plausible_images(scan_images(rom))
     by_hdr = {im.code - 0x64: im for im in good}
@@ -1282,7 +1340,7 @@ def cmd_names(a):
 
 def cmd_tree(a):
     r"""Recover the S60 app tree (\System\Apps\<App>\*) by content."""
-    rom = open(a.rom, "rb").read()
+    rom = load_packed(a.rom)
     hdr = find_rom_header(rom)
     root = find_romfs_root(rom, hdr["root_dir_list"])
     if root is None:
@@ -1323,7 +1381,7 @@ def cmd_tree(a):
 
 
 def cmd_calls(a):
-    rom = open(a.rom, "rb").read()
+    rom = load_packed(a.rom)
     images = scan_images(rom)
     reach = reachable_images(images)
     for im in reach:
@@ -1356,9 +1414,13 @@ def main():
     b.add_argument("--json")
     b.add_argument("--include-rodata", action="store_true",
                    help="report (do not place) the header-less rodata block")
+    b.add_argument("--snap", action="store_true",
+                   help="snap export values to the enclosing function "
+                        "prologue (legacy bring-up aid; the packed stream "
+                        "matches the export table without it)")
     b.add_argument("--no-snap", action="store_true",
-                   help="keep raw export values instead of snapping them to "
-                        "the enclosing function prologue (bring-up aid)")
+                   help="accepted for compatibility; snapping is off by "
+                        "default")
     b.add_argument("--patch",
                    help="apply bring-up text patches from this file "
                         "('<va> <hex bytes>' per line)")

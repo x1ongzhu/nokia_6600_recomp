@@ -9,7 +9,7 @@ what is executed, and the exact frontier.
 |---|---|---|---|
 | UPP mask ROM | `0x00e0ca39` | Thumb | **no** — internal boot ROM |
 | EKA1 ROM reset vector | `0x50000000` | ARM | yes (the image's exception table) |
-| Kernel E32Image | `0x50310054` | Thumb | yes, at ROM `0x326924` (link `0x50310000`) |
+| Kernel E32Image | `0x50310054` | **ARM** | yes, in the page-header-free stream at `0x31004c`/`0x3100b0` (link `0x50310000`); the raw `0x326924` is a page header |
 | Boot-image handoff | `0x00000080` | ARM | target of the secondary loader; in the round-15 stand-in it still holds the synthetic KaeP descriptor |
 
 The ROM header's `entry` field is the **mask-ROM** entry.  The kernel is
@@ -30,10 +30,40 @@ tools/build_boot_trace.sh
 NK_E32_SECTIONS=1 NK_CALL_INFER=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin --e32 0x3268c0
 
-# bring-up: patched flat image + call-site map + crash recovery
+# bring-up: patched flat image + call-site map + crash recovery (historical)
 tools/build_bringup_image.sh
 tools/test_boot_recover.sh
+
+# round 16: real kernel entry (ARM) with its vector table installed
+tools/build_rom_image.sh
+NK_KERNEL_VECTORS=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=1000000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_pagestream.sh
 ```
+
+### Round 16 correction: the 0xec page headers (2026-10-25)
+
+The flash image is a sequence of `0x20ec`-byte records, each a **`0xec`-byte
+page header** followed by a **`0x2000`-byte payload**.  Round 7-15 kept the
+whole header inline and only called its first six bytes a "tag", which
+inserted `0xec` bytes every `0x2000` bytes of every packed record.  Everything
+below that depended on the kernel text starting at raw `0x326924` (a page
+header) is therefore historical: the "197-instruction entry", the missing
+Thumb `pop`, the callmap, the 17.2%/21.8% export rates, the drift null and the
+truncated `\System\Programs` directory were all page-header artifacts.
+
+`recompiler/pagestream.py` removes the headers.  The kernel header is at
+stream `0x31004c`, its text at `+0x64` (`0x3100b0`), and entry `0x50310054` is
+**ARM** (`push {r4,r5,r6,lr}` / `0xe92d4070`).  The 478 exports land on
+function starts **469 times (98.1%)**; DLL `0x100039e5` is **1757/1788
+(98.3%)** at shift 0.  `\System\Programs` has **586** entries, not 9.
+
+The flat image built from the stream boots the real entry for **924,964
+instructions** (0 undefined, 0 call fixups, 0 recoveries, 2 MMIO reads /
+18 writes) and stops at `0x5039b2b8`: the SVC stack has descended through the
+`0x7ff00000` super page into `.data`, the saved `lr` is zero, and `bx lr`
+returns to 0.  That is the new kernel frontier, not another veneer.
 
 ### Round 5 correction (2026-10-24)
 
@@ -166,6 +196,7 @@ Two things were wrong with the flat image, and both were silent:
    Scanning every 4th byte missed 40+ images.  A 2-byte scan plus a
    record-plausibility filter (declared sections must fit before the next
    header; the unexplained rodata gap must be small) recovers **722 images**
+   in the raw view (**725** on the page-header-free stream, round 16)
    from 781 candidates.  Their text ranges are disjoint and span
    `0x5030ff9c..0x515978dc`.  `romimage.py build` now places **all** of them
    (1,580 sections, no overlaps), not just the kernel and its two direct DLL
@@ -182,7 +213,7 @@ Two things were wrong with the flat image, and both were silent:
    | root | `0x32639c` | `0x5030fa78` | 2 (`\System`, `\Nokia`) |
    | `\System` | `0x325aa4` | `0x5030f180` | 23 |
    | `\System\Libs` | `0x3162bc` | `0x50301ec0` | 171 |
-   | `\System\Programs` | `0x318170` | `0x50307964` | 9 valid (declared `0x5608`; tail overwritten) |
+   | `\System\Programs` | `0x318170` | `0x50307964` | 9 raw-view entries; **586** on the stream (round 16) |
 
    `\System\Programs` is the boot module table: `ekern.exe` (the kernel,
    uid3 `0x100058e8`, code `0x50310000`), `ecust.dll`, `ecomm.ldd`,
@@ -778,6 +809,77 @@ NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
 tools/test_bootbringup.sh
 ```
 
+### Round 16: page headers removed; the real kernel entry (2026-10-25)
+
+**1. The page record is `0xec` header + `0x2000` payload, not a 6-byte tag.**
+`pagestream.py build` keeps the first `0x20b0` bytes and everything from the
+last page header (`0x6d9134`) on, and concatenates only the `0x2000`-byte
+payloads in between.  The result is `0x1605ed8` bytes.  The kernel record
+moves from raw `0x3268c0`/`0x326924` (header / page header) to stream
+`0x31004c`/`0x3100b0` (header / text): the text now starts exactly at
+`header + 0x64`, as the E32Image format requires.
+
+**2. The export table becomes the layout oracle again.**  On the stream:
+
+| image | exports | on a start | rate | best shift |
+|---|---|---|---|---|
+| kernel `0x100058e8` | 478 | 469 | **98.1%** | 0 |
+| DLL `0x100039e5` | 1788 | 1757 | **98.3%** | 0 |
+| DLL `0x100065a5` | 21 | 20 | 95.2% | 0 |
+| reference Thumb DLL `0x101f6e00` | 5 | 5 | 100% | 0 |
+
+`layout.py verify` now asserts the kernel ≥95%; the old drift test is a
+control and reports `469/478` vs. a null of ~218 (2.15x) at every budget.
+The residual `relayout.py` plan is 26 inserts / `0x34` bytes and is diagnostic
+only — applying it would corrupt real instructions.
+
+**3. The full ROMFS tree is intact.**  `\System\Programs` parses **586**
+entries (the old parser saw 9 because the page header cut the directory).
+`romimage.py build` places 1,833 sections / 725 images at their runtime
+addresses, including 156 E32Image files and 85 AIF/MBM companions.  The
+`.r01`/`.wav` data area is still packed in FS order and remains B3g work.
+
+**4. The real kernel boots.**  `boot_kernel.c` now takes the flat-image entry
+mode from the E32 entry bit (`0x50310054` → ARM), and `NK_KERNEL_VECTORS=1`
+copies the kernel's first `0x64` bytes (the ARM vector table) to `0x0` and
+`0xffff0000`.  The harness also maps `0x7ff00000..0x80000000` as the kernel
+super page.  The run:
+
+```
+insns=924964 (ARM 924964 / Thumb 0), undefined=0, call fixups=0,
+unbound IAT=0, recoveries=0
+mmio: 2 reads, 18 writes
+stop: pc left the image (5) at 0000000000
+last pcs: ... 5038cee8 5038ceec 5039b2b0 5039b2b4 5039b2b8
+```
+
+The last call is `0x5039b2a0` → `0x5038ceb4` (a `memzero`), then
+`pop {r4,lr}` / `bx lr` at `0x5039b2b8` with `lr=0`.  The SVC stack has
+descended through the 1 MiB super-page window into the kernel `.data` region
+(`sp ≈ 0x7fefffe4`), so the saved `lr` was overwritten.  This is the new
+frontier: initialize the kernel stack/super-page/exception state, not the old
+callmap.
+
+**5. The linked boot bank is now trivial.**  `bootbank.py --stream` takes
+stream `[0xb0, 0x100b0)` as linked 0..0x10000; all 15 switch tables measure
+bias 0 and the loader descriptor is linked `0x80`.  The correct loader follows
+a different call path from the old raw A/B/C view and stops at linked `0x624c`
+in a board/CPU detection panic (`r5=0x0c0047fd`, `r0=0x10`) after 2,111
+instructions.  The old 600k raw run used the B2 page header as code and is
+kept only as a legacy regression.
+
+```
+.venv/bin/python recompiler/pagestream.py verify 6600_mcu.bin
+.venv/bin/python recompiler/layout.py census 6600_mcu.bin
+.venv/bin/python recompiler/bootbank.py verify 6600_mcu.bin --stream
+tools/test_pagestream.sh
+
+# real kernel entry (ARM, vector table installed)
+NK_KERNEL_VECTORS=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=1000000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime_paged.bin
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):
@@ -847,6 +949,16 @@ Measured with `tools/test_boot_recover.sh` **after the Thumb fix**:
 The faithful-image row is deliberately kept as a warning: a long run is not
 progress.  With the spin watchdog it becomes a sequence of recoveries and a
 budget stop, not a new frontier.
+
+**Round 16 replaces this whole table.**  The raw rows above execute page-header
+bytes.  The page-header-free stream gives:
+
+| mode | instructions | skips/recoveries | stop |
+|---|---|---|---|
+| real kernel entry, `NK_KERNEL_VECTORS=1` | **924,964** | 0 / 0 | `0x5039b2b8` `bx lr` with `lr=0` → PC 0 (stack underrun) |
+| real kernel entry, recovery on | 999,998 (budget) | 2 | SVC trace loop at `0x50392c50` |
+| stream boot bank (`--stream`) | 2,111 | 2 | board/CPU detection panic `0x624c` |
+| raw A/B/C boot bank (legacy) | 600,000 (budget) | 0 | descriptor lookup loop `0x1a1c` (page-header path) |
 
 (`recoveries` in the stats line counts both a real stack rollback and an
 out-of-code call skipped by the code-range guard.)

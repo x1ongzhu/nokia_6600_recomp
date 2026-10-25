@@ -12,21 +12,32 @@
 |---|---|
 | 原始固件 | `fw/NHL105530.C1`（WD2 BT2 / WD2 ALGORITHM 容器，23.3 MB / 0x1635067） |
 | 原始 ROM | `6600_mcu.bin`（23,285,596 字节 / 0x1634f5c flash 镜像；header `rom_size` = `0x1600000`） |
-| Kernel | `fw/6600_kernel.bin`（166,592 / `0x28ac0` 字节 text，链接地址 `0x50310000`，入口 `0x50310054`） |
+| Kernel | 链接地址 `0x50310000`，入口 `0x50310054`（**ARM**，`push {r4,r5,r6,lr}` / `0xe92d4070`）；page-header-free stream 中 header `0x31004c`、text `0x3100b0`、text_size `0x28ac0` |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`（round 6）、high vectors `0xffff0000`、MMIO bus；扁平镜像现在放置 **722 个 image**（1,580 个 section，无重叠）；`NK_LOW_ROM_IMAGE` 可把 `bootbank.py` 重建的 **linked 64 KiB boot bank** 映射到 0；`NK_REGIONS` 可安装 `bootregions.py` 生成的 mask-ROM bank 表（legacy / linear / staging 三个 profile）；`bootbringup.py` 把段 C、显式 KaeP descriptor/node 和 staging 表组合成 boot-image handoff bring-up |
-| 启动镜像格式（round 14） | flash `0x20b0..0x6d9134` 是 **分页区**：每 `0x20ec` 字节插入 6 字节 page tag `20 00 00 00 dc 23`，共 **852** 个；`0x124` 是 `KaeP` 头（size `0x20`、value `0x1423dc`；`0x128` 的 size/value 前缀恰好也拼成 tag 的 6 字节，但不是 tag）。kernel text 恰好从 tag `0x326924` 开始（runtime `0x50310000`） |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像现在放置 **725 个 image / 1,833 个 section**（无重叠），并放入 156 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表 |
+| 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP` 头（size `0x20`、value `0x1423dc`）仍在 linked boot bank 0x74 |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
 
 > 旧的 103 MB `6600_mcu.bin` 没有 WD2 头、EKA1 向量表或 E32Image UID，
 > 不是 6600 ROM，已被真正的 23.3 MB EKA1 flash 镜像覆盖。
 >
-> **第 5 轮重要修正**：解释器的 Thumb `add/sub rd, rs, #imm3` 解码把
-> bit 10（立即数/寄存器选择）用反了。此前所有 Thumb 运算类指令都在用错误
-> 的操作数执行，**旧的 2,000,000 / 20,000,000 条指令 frontier 不再有效**。
-> 修正后 kernel entry 正常执行 197 条指令并返回，详见 §2 M14。
+> **第 5 轮修正**：解释器的 Thumb `add/sub rd, rs, #imm3` 解码把
+> bit 10（立即数/寄存器选择）用反了，旧的 2M/20M 指令 frontier 因此无效。
+>
+> **第 16 轮关键修正**：第 7–15 轮把 `0xec` 字节 page header 当成了记录
+> 数据（只把前 6 字节叫 tag）。这使得每个 packed record 每 `0x2000` 字节
+> 插入 `0xec` 字节，于是：
+> - “kernel entry 197 条 / 4 skips”执行的是 page header，不是 kernel；
+> - export 命中率 17.2%、drift null、`relayout` 0x58 字节都是 page header
+>   artifact；
+> - `\System\Programs` 的“9 项 / tail 被覆盖”也是 page header 截断目录。
+>
+> 去 header 后 kernel 入口是 **ARM**，真实运行 **924,964 条指令**；478 个
+> export 有 **469 个（98.1%）** 命中函数起点，Programs 完整 **586 项**。
+> 旧结论保留在本文件作为历史，但不要再作为当前 frontier 使用。详见 §2 M25
+> 和 [`BOOT.md`](BOOT.md) 的 Round 16。
 
 ---
 
@@ -58,6 +69,7 @@
 | M21 | **第 12 轮：boot bank 是分段链接的；linked view 零恢复启动** | (1) 新增 [`recompiler/bootbank.py`](../recompiler/bootbank.py)：boot bank（flash 前 64 KiB）不是按链接地址存放，而是多个“按不同基址链接的代码段”拼接。`0x3b0` 的 `sub r1, pc, #0x308; add r0, r0, r1` 把 **重定位加数 0xb0** 加到 r0（`physical = linked + 0xb0`）；loader entry `0x3bc` 在 linked view 中是 `0x30c`，其 descriptor 是 `0x130-0xb0 = 0x80`（KaeP payload）。两个独立锚点验证 +0xb0：loader 最后 hand-off 的字面量 `0x1244` 对应 stored `0x12f4` 的真函数入口；第一个 switch table（`0x1238`/table `0x1240`）的 `0x11a8/0x11b0/...` 加 `0xb0` 正好是 `0x1258/0x1260/...` 的 case bodies。(2) `bootbank.py analyze` 扫描 17 个 `ldrls pc,[pc,rN,lsl#2]` 表，用 `table_end - entry` 估计 drift（下界，同段内一致到 `0x20`）：段 A linked `0x0-0x2000` ← stored `0xb0-0x20b0`，bias **0xb0**（7 个表全部精确 0xb0）；段 B linked `0x2000-0x6000` ← stored `0x219c-0x619c`，bias **0x19c**（8 个表 0x18c-0x19c）；段 C stored `0x6374`，bias **0x374**（2 个表，linked base 未定）。两处间隙 `0x20b0-0x219c`（0xec）和 `0x619c-0x6374`（0x1d8）**不是 padding**，里面还有 ARM/Thumb 代码和 literal pool，链接基址不同。(3) `bootbank.py build` 把 A/B 搬到 linked 地址；boot harness 新增 `NK_LOW_ROM_IMAGE` 把该 64 KiB 视图映射到 0，并从 linked `0x30c` 启动。结果：**600,000 条指令、0 恢复、0 undefined**（round 11 为 9 次恢复后循环在 `0x125c`），第一次出现真实 UPP 写 `0x08000008 = 0x37`（linked `0x4298`，由返回 `0xb8000` 的 size probe `0x36a4` 调用），并确认 `0x1244` 线程入口真正执行。(4) 新 frontier：`0x1244` 调用 `0xc58(KaeP payload 0x80, frame 0xfffff400)`；`0xc58` 检查 `[0x80+0x20]=0xe59ff018` 后在 `0xfffff400` 的列表里查 key `[0x80+0xc]=0xdff9ea00`，但该列表为空（`[0xfffff400]=0`），`0x1a1c` 返回 `-1`，调用者未检查而读到 `0x3`/`0x5f`，进入 `0xc7c` 循环。下一步是让 mask ROM/解压步骤安装 loader 需要的 **boot-image/region 列表**。验收：`tools/test_bootbank.sh` |
 | M22 | **第 13 轮：ARM 立即数被误判为 LDRH/STRH；boot-region 表建模** | (1) 解释器的 extra load/store 判定 `(op & 0x90)==0x90 && (op & 0x60)!=0` 漏掉了 **bit 25 = 0** 这一条件。`and rd, rn, #0xff`（bit25=1 且 bit7-4=1111）因此被当成 `LDRH/STRH` 执行：`and r0,r0,#0xff` 在 boot bank 的 `0x2b40` 把 `0x504` 变成了 `0xffffd9c0`。修正后 `r0=4`，并新增 `interp_selftest` 回归（数据-processing 立即数 vs 真正的 `ldrh`）。(2) mask ROM 交给二级 loader 的 **boot-region/bank 表** 已建模：`recompiler/bootregions.py` 从 `TRomHeader` 派生 boot / ROM / RAM 三个 bank，entry 为 16 字节 `{base,size,attr,linbase}`，count 在 `+0`、entry 从 `+8` 开始；RAM bank 的 attr 带 `0x4000`，super page 取 `base+size-0x1000`。boot harness 新增 `NK_REGIONS=path[@addr]`。装入表后 linked loader 的 super page 从 `0xfffff000` 变成 **`0x802ff000`**，`0x1244` 线程栈为 `0x802ff3fc`，压缩后的 list 在 `0x802ff400` 有 3 项；仍然 0 recovery / 0 undefined，UPP 写 `0x08000008=0x37` 不变。(3) 新 frontier：线程用 KaeP descriptor 的 `[0x80+0x20]=0xf018e59f` 去查表，该地址不在任何 bank 的 linear 区间内；KaeP 头（`0x50000124`，size `0x20`，value `0x1423dc`）指向高熵区，且 `0x130` 起是重复的 `0xdff9ea00`。因此下一步是**解包/解密 KaeP payload**，而不是继续猜 bank 表。验收：`tools/test_bootregions.sh` |
 | M23 | **第 14 轮：KaeP/分页 boot image；boot-region 的类型/标志修正；越过 0xc58 frontier** | (1) 发现 flash `0x20b0..0x6d9134` 不是连续字节流，而是 **852 个 page tag** 的分页区：tag 为 6 字节 `20 00 00 00 dc 23`，首个在 `0x20b0`，步长 **`0x20ec`**，最后在 `0x6d9134`。`KaeP` 头在 `0x124`；`0x128` 的 `20 00 00 00 dc 23` 是 size `0x20` + value 低半字，**不是 tag**（巧合）。kernel text 恰好从 tag `0x326924` 开始（runtime `0x50310000`），entry `+0x54` 是 `nop; push {r4,r7,lr}`；去掉 text 起始 tag 后 entry 在 `+0x4e`，同一指令。新增 [`recompiler/kaep.py`](../recompiler/kaep.py)：`analyze` 测量网格、`despan` 生成实验性去 tag 视图、`synth` 写入 bring-up descriptor/list node、`verify` 固定结构。实验表明单纯 despan **不能**修复 export layout（kernel 从 104/478 降到 67/478），所以 tag 与“function order 不同”是两个独立问题，不能把 despan 当作 B1g2 的答案。(2) 修正 `0x1a1c`/`0x1b34` 的类型/标志模型：`0x1a1c` 第一遍只处理 **type 5..8 且 attr bit `0x04000000`** 的 bank；`0x1b34` 只处理 **type 2**。第 13 轮的 `attr=1` legacy 表对这两个 consumer **完全不可见**，因此 KaeP 的 `0xf018e59f` 必然失败。新增 `bootregions.py --profile linear`：RAM 在前（type 2 + `0x4000` + `0x04000000`，默认 6 MiB）、ROM/boot 为 type 5 + `0x04000000`；boot harness 新增 `NK_RAM_EXTRA`（默认 0）以容纳 6 MiB RAM。用 **原始** linked boot bank + linear 表，loader 不再停在 `0xc58`，600,000 条后停在 `0x2fe4` 的 page-table 填充循环（`r2≈0x65802`、0 recoveries、0 undefined）；这是新 frontier，不是完成启动。(3) `kaep.py synth` 把 descriptor 放到 linked `0x80`、boot-image node 放到 `0xfd00`，可让原始 loader 也越过 `0xc58`，进入 heap/page-table 初始化；它是显式 bring-up stand-in，不是真实 KaeP 解密。验收：`tools/test_kaep.sh`，其余 8 个测试全部通过 |
+| M25 | **第 16 轮：分页头去除；packed text 就是 linked text；真实 kernel 入口跑 92 万条** | (1) **关键修正**：flash 的 `0x20ec` 记录不是“6 字节 tag + 0x20e6 数据”，而是 **`0xec` 字节 page header + `0x2000` 字节 payload**。第 7–15 轮把整个 header 留在记录里，等于每 `0x2000` 字节插入 `0xec` 字节，这才是 kernel export 只有 17.2% 命中、`\System\Programs` 只剩 9 项的真正原因。新增 [`recompiler/pagestream.py`](../recompiler/pagestream.py)：`build` 输出去 header 的 packed stream（`0x1605ed8` 字节），`analyze`/`verify` 固定 852 个 header、kernel header `0x31004c`、text `+0x64`（`0x3100b0`）、entry `0x50310054` 为 ARM `push {r4,r5,r6,lr}`（word `0xe92d4070`）、text 首字为 ARM vector table。 (2) **B1g 关闭**：在 stream 上 kernel 478 个 export 有 **469 个（98.1%）** 落在函数起点，DLL `0x100039e5` **1757/1788（98.3%）**，best shift = 0；旧的 82/478、104/478、drift null、`relayout` 0x58 字节都是 page header artifact。`romimage.py`/`layout.py`/`relayout.py` 现在默认读 stream，`layout.py verify` 改为断言 ≥95%。 (3) **ROMFS 截断也关闭**：`\System\Programs` 现在完整解析 **586 项**（旧“9 项 / tail 被覆盖”是 page header 切断目录），`build` 放置 156 个 E32Image 文件和 85 个 AIF/MBM companion；`names` 可看到 `EStart.exe`、`BIGINT.DLL` 等完整启动表。 (4) **真实 kernel 启动**：`romimage.py build` 生成 1,833 section / 725 image 的 flat image；boot harness 修正 flat image entry mode（`entry & 1`，kernel 现在是 ARM），新增 `NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 `0x0`/`0xffff0000`，并把 `0x7ff00000..0x80000000` 映射为 kernel super page。结果 **924,964 条 ARM 指令、0 undefined、0 call fixup、0 recoveries、2 reads / 18 writes**，最后在 `0x5039b2b8` 的 `bx lr` 返回到 0（SVC stack 已下穿 super page 进入 kernel `.data`）；这是新的 stack/exception frontier。 (5) **boot bank stream view**：`bootbank.py --stream` 直接把 stream `[0xb0,0x100b0)` 作为 linked boot bank，15 个 switch table 全部 bias 0；正确的 linked loader 在 **2,111 条** 后停在 `0x624c` 的 board/CPU detection panic（`r5=0x0c0047fd`、`r0=0x10`）。旧的 raw A/B/C 600k 运行使用了 B2 的 page header，作为 legacy control 保留。验收：新增 `tools/test_pagestream.sh`；`test_layout`/`test_romimage`/`test_relayout`/`test_boot_recover`/`test_bootbank` 全部按新事实重写并通过，其余测试也通过 |
 | M24 | **第 15 轮：boot bank 段 C 重定位；CPU 表命中；loader 到达 boot-image handoff** | (1) **段 C 被重定位**：`0x3d10` 在 linked `0x74b8` 读 0x13 个 16-bit CPU/board 表项，正确值（含 CPU `0x3b`）在文件 `0x782c`，正好 `linked + 0x374`。第 12 轮只搬 A/B，CPU 查表把 `0x3b` 和指令字节比较后在 `0x3d44` 的 `b .` 挂死。`bootbank.py build` 现在搬 C（`0x6000..0x8000 <- 0x6374..0x8374`），`verify` 固定该表。 (2) **显式 KaeP/boot-image 链**：新增 [`recompiler/bootbringup.py`](../recompiler/bootbringup.py)，在 linked `0x80` 写 descriptor（key、entry、code/data、section size、list head），在 `0xfd00 → 0xfd10` 写 **list head → node → terminator**，node 的 `+0x5c=0`、`+0x60=0x05040000`；此前 synth node 的 `+0x5c` 未清零，`0xc58` 跟着垃圾 next 指针返回 0，导致 section descriptor 为空、`0xfb8` 去解析假 KaeP 数据并映射 2 GiB。 (3) **staging boot-region profile**：`bootregions.py --profile staging` 用 type-2 RAM（`linbase=0xffffffff`，`0x18b0` 的 no-expand 哨兵）、type-5 code bank（`0x5030ff9c+0x29064`，section builder 得到 `0x50310000`）、type-5 data bank（`0x50338ac0+0x3000`）和 boot bank；loader 现在把内核 code 映射到 `0x50310000`、data 映射到 `0x80000000`。 (4) **解释器/MMIO**：`b .` 现在以 `NK_STOP_SELF_BRANCH` 硬停（不再被 recovery 吞掉）；MMIO stub 让 UPP `0x58150422` bit `0x400` 和 `0x58120a08` 非零，从而通过两级握手。 (5) **结果**：`tools/test_bootbringup.sh` 跑到 **36,732 条指令、12 次 MMIO 读、46 次写、1 次 stale-call recovery、0 undefined**，停在 **boot-image handoff `0x80`**（`NK_STOP_PC=0x80`）。`0xfb8` 的 KaeP parser 用一条 `mov pc,lr` 显式跳过；真实解包仍未完成 |
 
 ### 可复现命令
@@ -67,6 +79,20 @@
 .venv/bin/python recompiler/wd2.py info 6600_mcu.bin
 .venv/bin/python recompiler/wd2.py kernel 6600_mcu.bin fw/6600_kernel.bin
 .venv/bin/python recompiler/wd2.py list 6600_mcu.bin
+
+# round 16: remove the 0xec page headers; the packed text is the linked text
+.venv/bin/python recompiler/pagestream.py analyze 6600_mcu.bin
+.venv/bin/python recompiler/pagestream.py verify 6600_mcu.bin
+.venv/bin/python recompiler/pagestream.py build 6600_mcu.bin out/6600_pagestream.bin
+.venv/bin/python recompiler/layout.py verify 6600_mcu.bin
+.venv/bin/python recompiler/bootbank.py verify 6600_mcu.bin --stream
+tools/test_pagestream.sh
+
+# real kernel entry (ARM) with the kernel vector table installed
+tools/build_rom_image.sh
+NK_KERNEL_VECTORS=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=1000000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
 
 .venv/bin/python recompiler/trace_boot.py 6600_mcu.bin --kernel fw/6600_kernel.bin
 tools/build_kernel_smoke.sh
@@ -174,9 +200,11 @@ tools/test_bootbringup.sh
 | `0x00e0ca39` | UPP mask ROM 入口（不在 flash dump 中） |
 | `0x3268c0` | kernel `TRomImageHeader` 的 packed 文件偏移 |
 | `0x5030ff9c` | kernel header 在扁平 runtime image 中的地址（`code - 0x64`） |
-| `0x326924` | kernel 代码在 packed 文件中的偏移（header + 0x64） |
+| `0x31004c` | kernel header 在 **page-header-free packed stream** 中的偏移 |
+| `0x3100b0` | kernel text 在 stream 中的偏移（header + 0x64） |
+| `0x326924` | raw flash 里的 page header（不是 kernel text 起点；旧版本误当成 text） |
 | `0x50310000` | kernel 代码链接地址 |
-| `0x50310054` | kernel 入口（Thumb；`nop; push {r4,r7,lr}`） |
+| `0x50310054` | kernel 入口（**ARM**；`push {r4,r5,r6,lr}` / `0xe92d4070`） |
 | `0x00000080` | boot bank 的 KaeP descriptor / 真实 mask ROM 解压后的 **boot-image handoff** 目标；第 15 轮 synthetic loader 停在这里 |
 | `0x00003d44` | 段 C 未重定位时的 CPU 查表 `b .` panic（第 15 轮已越过） |
 | `0x000074b8` | 段 C 的 16-bit CPU/board 表 linked 地址（CPU `0x3b` 在 `+0x20`） |
@@ -186,9 +214,9 @@ tools/test_bootbringup.sh
 | `0x32639c` | packed **root directory**（2 项：`\System`、`\Nokia`），运行时 VA `0x5030fa78` |
 | `0x325aa4` | packed **`\System` directory**（23 项），运行时 VA `0x5030f180` |
 | `0x3162bc` | packed **`\System\Libs` directory**（171 项），运行时 VA `0x50301ec0` |
-| `0x318170` | packed **`\System\Programs` directory**：声明 `0x5608` 字节，实际只有 **9 个有效条目**（`ekern.exe`、`ecust.dll`、`ecomm.ldd`、`ramdrive.pdd`、`rtc.dll`、`nosstarter.ext`、`pnmsg.dll`、`isimsg.dll`、`isaapi.dll`），其余 `0x54f4` 字节被下一个 packed record 覆盖；运行时 VA `0x50307964`；`ekern.exe` 的 ROMFS entry 指到 `0x5030ff9c` |
+| `0x318170` | raw packed **`\System\Programs` directory**；第 16 轮在 stream 中完整解析 **586 项**（旧“9 项 / tail 被覆盖”是 page header 截断）。stream 偏移 `0x301f70`；运行时 VA `0x50307964`；`ekern.exe` 的 ROMFS entry 指到 `0x5030ff9c` |
 | `0x5030ff9c` | `ekern.exe` / kernel `TRomImageHeader` 的运行时地址（code `0x50310000`，size `0x2974c`） |
-| `0x50339750` | `ecust.dll` 的 header（code `0x503397b4`）——kernel 的 dllref 表只引用 `0x5037c614` / `0x5037d154` 两个 DLL；`\System\Programs` 在本 dump 中只有 9 个有效条目（`ekern.exe`、`ecust.dll`、`ecomm.ldd`、`ramdrive.pdd`、`rtc.dll`、`nosstarter.ext`、`pnmsg.dll`、`isimsg.dll`、`isaapi.dll`），其余目录尾被下一个 packed record 覆盖 |
+| `0x50339750` | `ecust.dll` 的 header（code `0x503397b4`）——kernel 的 dllref 表只引用 `0x5037c614` / `0x5037d154` 两个 DLL；`\System\Programs` 在 stream 中完整 586 项，包含这两个 DLL 及全部 boot plugin |
 | `0x50314c0c` | 真正的 ARM IRQ-lock helper（`push {r0,r1}; mrs r1,apsr; ...`） |
 | `0x50314c16` | Thumb BL 编码目标（helper + 0xA，缺少 veneer） |
 | `0x50312186` | 指向 `0x50314c16` 的 Thumb BL |
@@ -200,6 +228,10 @@ tools/test_bootbringup.sh
 | `0x5031008e` | packed text 中 entry 的 literal pool 实际位置（应为 `0x50310090`，证明缺 2 字节对齐） |
 | `0xdead0000` | boot harness 的 mask-ROM 返回 sentinel（`NK_LR` 默认值） |
 | `0x5031308c` | smoke test / 解释器自检执行的真实 ARM helper |
+| `0x20b0` / `0x20ec` | 第一个 page header / 记录步长（`0xec` header + `0x2000` payload） |
+| `0x1605ed8` | 去除 page header 后的 packed stream 长度 |
+| `0x5039b2b8` | 真实 kernel 第一次运行的停止点：`bx lr`，`lr` 已被栈数据覆盖为 0 → PC=0 |
+| `0x0000624c` | page-header-free boot bank 的 board/CPU detection panic（`b .`） |
 
 ### 引用的 DLL（kernel `TDllRefTable`）
 
@@ -221,6 +253,26 @@ tools/test_bootbringup.sh
 ---
 
 ## 4. 当前阻塞（按优先级）
+
+#### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
+
+`recompiler/pagestream.py` 去掉每个 `0x20ec` 记录里的 `0xec` 字节 page
+header 后：
+
+- kernel 478 个 export：**469/478 = 98.1%** 落在函数起点；
+- DLL `0x100039e5`：**1757/1788 = 98.3%**；DLL `0x100065a5`：20/21；
+- best constant shift = **0**（`layout.py census`）；
+- 812 个 literal pool 中 787 个本来 4 字节对齐，残余 relayout 只有 26 处 /
+  `0x34` 字节，且不应应用（是 detector 噪声）。
+
+因此 B1g2b（符号级置换）、B1g3（重新生成 flat image）、B5 的
+“不同 function order”分支都不需要了。`layout.py verify` 现在直接断言
+kernel ≥95%。旧的 §B1 文本保留为历史。
+
+当前真正的 kernel frontier 变成：真实入口执行 924,964 条 ARM 指令后，
+SVC stack 下穿 `0x7ff00000` super page 进入 `.data`，在 `0x5039b2b8`
+的 `bx lr` 返回到 0（`lr` 已被压栈数据覆盖为 0）。下一步是 kernel 的
+stack/super-page 初始状态，而不是 callmap。
 
 ### B1 第 5 轮重写：先修解释器，再谈 veneer
 - **Thumb format-2 解码 bug 已修**：`00011` 组（`add/sub rd,rs,#imm3` 与
@@ -462,7 +514,11 @@ tools/test_bootbringup.sh
 - 还没有真正到达 UPP display/timer/keypad 的初始化；当前 MMIO bus 只打印访问。
 - 需要先从 kernel 的第一次 MMIO 访问建立设备地址表，再逐个实现。
 
-### B5. packed text / export table 不同布局（第 7 轮证据，第 9 轮定量确认）
+### B5. packed text / export table 不同布局（第 7 轮证据；第 16 轮关闭）
+
+> **第 16 轮结论：本节的 17.2%/21.8% 和 1.27x/1.04x 结果全部是在带 page
+> header 的 raw 字节上测的。去 header 后 kernel 98.1%、DLL2 98.3%，shift 0
+> 就是 linked layout。本节以下内容只作历史记录。**
 - kernel 的 export dir 有 478 个 4 字节对齐、全部落在 text 内的地址，但只有
   **17 个**落在「prologue + 前驱 terminator」检测到的函数起点上；其余地址到
   最近 prologue 的回退距离在 `0, 4, 8, ..., 44` 上近似均匀分布
@@ -596,12 +652,14 @@ entry：
   结果由 Thumb bug 制造，已作废。
 - 下一步：B1d（function map + 对齐 relayout），而不是继续放大 snap 窗口。
 
-**P0-5 Boot-image handoff（第 15 轮，完成第一层）**
-- 修正段 C 重定位，CPU/board 表 `0x3b` 命中；`bootbringup.py` + `--profile
-  staging` 让 loader 映射 kernel code/data，并到达 **boot-image handoff
-  `0x80`**（36,732 条指令、1 recovery、0 undefined）。
-- 仍缺：真实 KaeP 解包/安装可执行 boot image 到 `0x80`；`0x3ae8 -> 0x5bb4`
-  是 synthetic path 里的 stale call。验收：`tools/test_bootbringup.sh`。
+**P0-5 Boot-image handoff（第 15 轮完成 stand-in；第 16 轮修正真实 kernel 路径）**
+- 第 15 轮的 `bootbringup.py` + staging 表仍可到达 synthetic handoff（36,732
+  条），但真实 KaeP 解包未完成。
+- 第 16 轮改为直接启动真实 kernel：`romimage.py build` 从 packed stream
+  组装，boot harness 以 ARM 模式进入 `0x50310054`，`NK_KERNEL_VECTORS=1`
+  安装 kernel vector table，运行 **924,964 条、0 undefined、0 recoveries**。
+- 新 frontier：SVC stack 下穿 `0x7ff00000` super page、`0x5039b2b8` 的
+  `bx lr` 返回 0。验收：`tools/test_pagestream.sh`。
 
 ### P1 — Mask ROM stand-in 与首次设备初始化
 
@@ -660,14 +718,14 @@ entry：
 - [x] **B3d** 2 字节对齐 header 扫描 + record plausibility：722 个 image，text 区间不重叠；`build` 默认放置全部 image（1,580 section，无重叠），boot harness 注册 kernel + dllref 的 code range（`NK_RANGE_ALL=1` 接受全部）
 - [x] **B3e** ROMFS 目录树定位（root / `\System` / `\System\Libs` / `\System\Programs`）+ `romimage.py names` 启动模块表；`ekern.exe -> uid3 0x100058e8`。第 10 轮修正：`\System\Programs` 实际只有 **9 个有效条目**（其余 `0x54f4` 字节被下一个 packed record 覆盖）；旧“236 项 / 193 映射”是误报
 - [x] **B3f** 停止把 ROMFS 数据文件从 `addr - 0x50000000` 线性复制（它们按 packed FS 顺序存放）；`--romfs-linear` 仅保留作实验
-- [ ] **B3h** 恢复/取得被覆盖的 `\System\Programs` 目录尾部（`0x54f4` 字节）：本 dump 里没有；可能需要 WD2/flash tool 的最终布局、线性 ROM dump，或从 PPM/其他分区补全
-- [ ] **B3g** 重建 ROMFS 数据文件的 packed 顺序（目录 → 文件偏移），并填入扁平镜像。第 10 轮已完成 **E32Image 文件**（63 个 `.app` + 13 个 plugin/driver）和 **84 个 AIF/MBM** 伴随文件；剩余 `.r01`/`.wav` 等压缩/数据文件仍需定位
+- [x] **B3h** ~~恢复被覆盖的 `\System\Programs` 尾部~~：第 16 轮证明目录从未被覆盖；`0xec` 字节 page header 把目录切断。去 header 后完整解析 **586 项**（`EStart.exe`、`BIGINT.DLL`、所有 boot DLL/plugin），旧“9 项 / tail 覆盖”结论作废
+- [ ] **B3g** 重建 ROMFS 数据文件的 packed 顺序（目录 → 文件偏移），并填入扁平镜像。第 16 轮已放置 **156 个 E32Image 文件**（63 个 `.app` + plugin/driver）和 **85 个 AIF/MBM** 伴随文件；剩余 `.r01`/`.wav` 等数据文件仍需定位
 - [x] **B3i** `romimage.py tree`：按内容恢复 `\System\Apps` 的 63 个 app 目录（含 `snakeex`、`mixpix`）；`build` 放置 76 个 E32Image 文件和 84 个 AIF/MBM
 - [x] **B1g1** `recompiler/layout.py` + `tools/test_layout.sh`：把 export dir 当 layout oracle 做 census（stored-start rate vs random baseline、常数 shift、pool 对齐），确认 packed text 与 linked text 不是同一套 function layout
 - [x] **B1g2a** 单调 drift 模型定量否定：`layout.py drift` 允许 export 匹配任意 `c <= V` 且 drift 非递减，kernel 在 `0x60/0xc0/0x200` 下仍只有 148/182/223，而随机 null 为 140/168/216（1.05/1.08/1.03×）。padding/relayout 不可能恢复 linked layout
-- [ ] **B1g2b** layout 级恢复（非 drift）：从 WD2 容器 / ROM build 描述取得显式 function-order/relocation 表，或用 export（478 anchor）+ call graph + literal code pointer 解符号级置换；这是 kernel/DLL2 高 start-rate 的唯一剩余路径
+- [x] **B1g2b** ~~layout 级恢复（非 drift）~~：`pagestream.py` 去掉 page header 后，kernel 469/478、DLL2 1757/1788，shift 0 就是 linked layout；不需要 function-order/relocation 表
 - [x] **B1g2c** header-less block 分类：`layout.py gaps`；629 个 gap 中 15 个是第二段 Thumb/ARM code，kernel/DLL2 为 rodata。尚未发现它与 export 布局的对应关系
-- [ ] **B1g3** 用 B1g2b 的结果重新生成 flat image，验收标准：kernel 的 478 个 export 全部落在 relaid 函数起点，BL target 的 exact rate 从 27% 提升到 >90%
+- [x] **B1g3** ~~用 B1g2b 的结果重新生成 flat image~~：`romimage.py build` 现在从 page-header-free stream 组装（1,833 section / 725 image），kernel export 98.1% 命中，真实入口运行 924,964 条
 - [x] **P0-3d** 修复 Thumb BL 返回地址 + ARM PC-relative load 并加回归测试
 - [x] **P0-3e** 修复 ARM data-processing 立即数被误判为 extra load/store（必须要求 bit25=0）；`and r0,r0,#0xff` 不再变成 `LDRH`。`interp_selftest` 新增 `and/orr immediate vs extra load/store` 回归
 - [x] **M13a** 解释器崩溃恢复（caller 快照 + 回滚 + 跳过调用），`NK_RECOVER`
@@ -704,6 +762,8 @@ entry：
 - [x] **B6a2b** 段 C 重定位完成（见 B6a1b）；两处间隙 code fragment 仍未搬。验收：`bootbank.py verify` 固定 stored `0x782c` -> linked `0x74b8` 的 CPU 表
 - [x] **B6a2h** 显式 KaeP descriptor/node + staging section：`bootbringup.py` 在 `0x80` 写 descriptor、`0xfd00 → 0xfd10` 写 list head/node（`+0x5c=0`、`+0x60=0x05040000`），跳过 `0xfb8` 的假 KaeP parser；loader 映射 code/data 后到达 boot-image handoff `0x80`
 - [ ] **B6a2g** 用真实 KaeP 解包把可执行 boot image 安装到 linked `0x80`（或 `0x8000`）：当前 handoff 目标是合成 descriptor，不能执行；`0x3ae8 → 0x5bb4` 也是 stale call。验收：handoff 后能进入 boot image / kernel entry `0x50310054`
+- [ ] **B6a1d** boot bank stream view 的 board/CPU detection：正确的 linked stream bank 在 `0x624c` 进入 panic（`r5=0x0c0047fd`、`r0=0x10`）。需要提供真实的 board/CPU 返回值或该寄存器的设备模型，而不是继续用 raw A/B/C 的 600k 假路径
+- [ ] **B6a3b** kernel stack/super-page 初始状态：真实 kernel 在 924,964 条后 SVC stack 下穿 `0x7ff00000` 进入 `.data`，`0x5039b2b8` 的 `bx lr` 返回 0。需要从 kernel data/boot descriptor 恢复正确的 stack 或 super-page 内容（`NK_NO_SUPER_PAGE` 可关闭当前 1 MiB 映射做对照）
 - [ ] **B6a3** entry 第二个调用的 kernel 对象 / vtable（`[0x80000000]` 全局 + `0x503364b0` 的 `+0x14` slot）
 - [ ] **B6b** 解析 WD2 “ALGORITHM” header/bytecode，检查它是否描述 final layout / veneer / patch（容器 header 里尚未找到已知地址/大小值，需按格式解码）
 - [ ] **B6c** 为 `0x5030fbc6` / `0x5030807a` 找到真实 callee（+0x10000 落点都是函数中部）
@@ -744,6 +804,34 @@ entry：
 ---
 
 ## 9. 变更记录
+
+- 2026-10-25（本轮 16）：**page header 去除；packed text = linked text；真实 kernel 入口运行 924,964 条**。
+  发现 `0x20ec` 记录的真实结构是 **`0xec` 字节 header + `0x2000` 字节
+  payload**，不是“6 字节 tag + 0x20e6 数据”。第 7–15 轮保留整个 header，
+  等价于每 `0x2000` 字节插入 `0xec` 字节，直接导致：
+  1. kernel entry 197 条 / 4 skips 执行的是 page header；
+  2. kernel export 命中率 17.2%/21.8%、drift null、`relayout` 0x58 字节；
+  3. `\System\Programs` 只剩 9 项。
+  新增 [`recompiler/pagestream.py`](../recompiler/pagestream.py)（`analyze`/
+  `build`/`verify`）。去 header 后 kernel header `0x31004c`、text `0x3100b0`、
+  entry `0x50310054` 为 ARM `push {r4,r5,r6,lr}`；478 个 export **469 个
+  （98.1%）** 命中函数起点，DLL `0x100039e5` **1757/1788（98.3%）**，best
+  shift 0；Programs 完整 **586 项**。`romimage.py`/`layout.py`/`relayout.py`
+  默认读 stream，`romimage.py build` 生成 1,833 section / 725 image，放置
+  156 个 E32Image + 85 个 AIF/MBM。`wd2.py kernel` 改为从 stream 切 text
+  （跳过 raw page header），`build_kernel_smoke.sh` 改用真实的 MMIO helper
+  `0x50312eb4`，lift/解释器 smoke 仍通过。boot harness 修正 flat image entry mode
+  （`entry & 1`）并新增 `NK_KERNEL_VECTORS=1`（kernel text 头 0x64 字节 →
+  0/`0xffff0000`）和 `0x7ff00000..0x80000000` kernel super page 映射。结果：
+  **924,964 条 ARM、0 undefined、0 call fixup、0 recoveries、2 reads /
+  18 writes**，停在 `0x5039b2b8` 的 `bx lr` → 0（SVC stack 下穿 super page
+  进入 `.data`）。`bootbank.py --stream` 把 stream `[0xb0,0x100b0)` 作为
+  linked bank，15 个 switch table 全 bias 0；正确的 loader 在 2,111 条后停在
+  `0x624c` 的 board/CPU detection panic（raw A/B/C 的 600k 作为 legacy
+  control 保留）。验收：新增 `tools/test_pagestream.sh`；`test_layout`、
+  `test_romimage`、`test_relayout`、`test_boot_recover`、`test_bootbank` 按新
+  事实重写并通过，`test_interp`、`test_loader`、`test_bootregions`、
+  `test_kaep`、`test_bootbringup` 也全部通过。
 
 - 2026-10-25（本轮 15）：**段 C 重定位、CPU 表命中、loader 到达 boot-image handoff**。
   第 12 轮只把 A/B 搬到了 linked 地址，段 C 的 **16-bit CPU/board 表**仍在

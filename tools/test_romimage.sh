@@ -58,20 +58,19 @@ check "ekern.exe -> uid3 0x100058e8" "ekern.exe maps to the kernel record"
 check "root       file" "packed root directory located"
 check "programs   file" "\\System\\Programs directory located"
 check "kernel entry 0x50310054" "kernel entry placed"
-check "Programs directory declares" "truncated Programs directory reported"
-check "programs   file 0x318170    9 entries" \
-    "Programs directory stops at the 9 intact boot entries"
+check "programs   file 0x301f70  586 entries" \
+    "full \\System\\Programs directory recovered (586 entries)"
 if grep -q "ekern.exe" "$NAMES_LOG"; then
     echo "ok: Programs names include ekern.exe"
 else
     echo "FAIL: Programs names lost ekern.exe"
     fail=1
 fi
-if grep -q "EStart.exe" "$NAMES_LOG"; then
-    echo "FAIL: truncated Programs tail was invented as entries"
-    fail=1
+if grep -q "EStart.exe" "$NAMES_LOG" && grep -q "BIGINT.DLL" "$NAMES_LOG"; then
+    echo "ok: full Programs tail is present (EStart.exe, BIGINT.DLL)"
 else
-    echo "ok: no entries are invented from the overwritten tail"
+    echo "FAIL: Programs tail is still missing"
+    fail=1
 fi
 if grep -q "63 app directories, 63 resolved" "$TREE_LOG"; then
     echo "ok: full \\System\\Apps tree recovered (63/63)"
@@ -124,7 +123,7 @@ for name, va, size in (("romfs_e32_SnakeEx.app", 0x5147f060, 0x7ddc),
         sys.exit(1)
 print("ok: SnakeEx.app and mixpix.app placed at their runtime addresses")
 EOF
-check "ROMFS app companions: 84 AIF/MBM files placed" \
+check "ROMFS app companions: 85 AIF/MBM files placed" \
     "app AIF/MBM companions placed"
 
 # No two non-overlay placed sections may overlap.
@@ -146,7 +145,8 @@ clang -std=c11 -O2 -Wall -Wextra -Iruntime/include \
     runtime/test/boot_kernel.c runtime/src/nokia_rt.c runtime/src/nokia_interp.c \
     -o out/boot_kernel
 
-NK_BUDGET=200000 NK_MMIO_N=0 NK_CALL_INFER=1 NK_FIXUP_LOG=0 \
+NK_KERNEL_VECTORS=1 NK_BUDGET=1000000 NK_MMIO_N=0 NK_CALL_INFER=0 \
+NK_RECOVER=0 NK_FIXUP_LOG=0 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin --rom-image "$IMG" \
     >out/romimage_boot.log 2>&1 || true
 if grep -q "uid3 0x100058e8" out/romimage_boot.log; then
@@ -155,11 +155,12 @@ else
     echo "FAIL: flat image kernel not located"
     fail=1
 fi
+insns=$(sed -n 's/^insns=\([0-9][0-9]*\).*/\1/p' out/romimage_boot.log)
 if grep -q "unbound IAT=0" out/romimage_boot.log && \
-   grep -q "insns=[1-9][0-9][0-9] " out/romimage_boot.log; then
-    echo "ok: kernel executes with all imports bound"
+   [ -n "$insns" ] && [ "$insns" -ge 900000 ]; then
+    echo "ok: real kernel entry executes ($insns instructions, imports bound)"
 else
-    echo "FAIL: kernel did not reach the assisted frontier"
+    echo "FAIL: kernel did not reach the real boot frontier"
     fail=1
 fi
 

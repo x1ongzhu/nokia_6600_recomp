@@ -14,9 +14,11 @@ This tool measures that agreement instead of assuming it.  It answers:
   interworking bit (odd address);
 * how many land on a function start in the *stored* text (ARM `push`/`stmdb`
   prologue, Thumb `push {lr}`, or directly after an ARM/Thumb terminator);
-* the best single constant shift, if any.  A well-packed small image scores
-  ~100% at shift 0; the kernel and the big DLLs do not, which is the B1g
-  layout question, not a CPU/runtime bug.
+* the best single constant shift, if any.  On the page-header-free packed
+  stream the kernel scores **469/478 (98.1%)** and the big boot DLL
+  **1757/1788 (98.3%)** at shift 0.  The round-9..15 "packed text is not the
+  linked text" result was caused by the 0xec-byte page headers, which the old
+  stream kept inline every 0x2000 bytes.
 
 The `pools` command audits literal-pool alignment: the ROM linker aligns a
 pool to 4 bytes, so a packed pool at 2 mod 4 is direct evidence that the
@@ -446,7 +448,8 @@ def census_image(rom: bytes, img: romimage.Image, best_shift: bool) -> dict:
 # ---------------------------------------------------------------------------
 
 def load_images(rom_path: str):
-    rom = open(rom_path, "rb").read()
+    """Load the page-header-free packed stream and its image records."""
+    rom = romimage.load_packed(rom_path)
     return rom, romimage.plausible_images(romimage.scan_images(rom))
 
 
@@ -496,17 +499,17 @@ def cmd_census(a):
         print(f"  {r['uid3']}  {r['start']}/{r['exports']}")
     print(f"images with 30-80%: {len(partial)}")
     print("'in-code%' is the fraction of export words inside the image's own "
-          "code range; the kernel is 100%, so its low start rate is a real "
-          "layout mismatch.")
+          "code range.")
     print("'start' walks back through a literal pool to the terminator, so leaf "
           "functions after a pool count.")
     print("'base' is the chance that a random text address of the same parity "
           "looks like a start (same detector).")
-    print("The kernel and the boot DLLs sit close to their base rate, so their "
-          "export tables do")
-    print("not describe the stored text layout (B1g).  Small images can be "
-          "stored linked; the")
-    print("Thumb reference DLL 0x101f6e00 is 5/5.")
+    print("The input is the page-header-free packed stream: with the 0xec-byte "
+          "page headers")
+    print("removed the kernel scores 469/478 (98.1%) and DLL 0x100039e5 "
+          "1757/1788 (98.3%)")
+    print("at shift 0.  The round-9..15 'different function order' result was "
+          "the page headers.")
 
     if a.json:
         with open(a.json, "w") as f:
@@ -539,10 +542,12 @@ def cmd_drift(a):
               f"{100.0 * (row['chain_rate'] or 0):5.1f}% "
               f"{row['null_avg']:8.1f} {row['null_max']:8d} "
               f"{row['ratio']:6.2f}")
-    print("A real padding-only layout has a monotone drift and should score "
-          "far above the random-address null.")
-    print("The kernel scores at the null level, so the stored function order is "
-          "not the linked order; padding/relayout cannot recover it.")
+    print("This is now a control: the packed stream already matches the export "
+          "table at drift 0,")
+    print("so every budget should report the same near-complete chain.  The "
+          "round-11 null result")
+    print("was produced by the 0xec-byte page headers, not by a different "
+          "function order.")
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"uid3": f"{img.uid3:#010x}", "results": rows}, f,
@@ -551,7 +556,7 @@ def cmd_drift(a):
 
 
 def cmd_pools(a):
-    rom = open(a.rom, "rb").read()
+    rom = romimage.load_packed(a.rom)
     im, text, funcs, groups, pools, plan, _, _ = relayout.build_plan(
         rom, a.uid3)
     aligned = sum(1 for p in pools if p % 4 == 0)
@@ -566,8 +571,10 @@ def cmd_pools(a):
         print(f"  {p1:#x} / {p2:#x}")
     print(f"alignment plan      : {len(plan.inserts)} inserts, "
           f"{plan.shift:#x} bytes")
-    print("The packed text keeps 1420/1430 ARM prologues 4-aligned, so padding "
-          "alone can account for at most ~0x58 bytes of address drift.")
+    print("After removing the page headers the text is already linked: most "
+          "pools are aligned")
+    print("and the remaining inserts are leaf/data-table detector noise, not "
+          "the round-6 0x58-byte shift.")
 
 
 def cmd_verify(a):
@@ -595,13 +602,15 @@ def cmd_verify(a):
               "kernel exports outside the kernel text")
         check(all(v % 4 == 0 for v in entries),
               "kernel exports not all 4-byte aligned")
-        # B1g2: a padding-only relayout is a non-decreasing drift.  It must not
-        # beat the random-address null, otherwise the B1g conclusion is stale.
-        row = drift_image(rom, k, 0x200, 8)
-        check(row["ratio"] is not None and row["ratio"] < 1.2,
-              f"kernel drift chain {row['chain']} vs null "
-              f"{row['null_avg']:.1f} (ratio {row['ratio']:.2f}); "
-              "a padding-only model is now plausible, revisit B1g")
+        # After removing the 0xec-byte page headers the packed text *is* the
+        # linked text: every export must land on a detected function start
+        # (the nine misses are leaf/shared-block entries the detector cannot
+        # classify).  This replaces the round-9..15 "different layout" model.
+        kinds = [start_kind(tv, v, pool_aware=True) for v in entries]
+        starts = sum(1 for k in kinds if k)
+        check(starts >= 0.95 * len(entries),
+              f"kernel exports on starts {starts}/{len(entries)} "
+              f"({100.0 * starts / len(entries):.1f}%), expected >=95%")
 
     # 2. a small Thumb DLL is the positive control: every export is a start
     small = by_uid.get(SMALL_REF_UID3)

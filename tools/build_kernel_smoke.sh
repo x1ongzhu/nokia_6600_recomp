@@ -24,9 +24,13 @@ fi
 
 mkdir -p out
 "$PY" recompiler/wd2.py kernel 6600_mcu.bin fw/6600_kernel.bin
+# The kernel entry is ARM in the page-header-free text.  Seed it plus the
+# real MMIO write helper at 0x50312eb4 and a few neighbours; the lifter only
+# needs a handful of functions for this smoke test.
 "$PY" recompiler/recursive.py fw/6600_kernel.bin out/kernel_mixed.json \
-    --base 0x50310000 --entry 0x50310054 --thumb --max-bytes 1024 \
-    --extra-entry 0x5031140C --extra-entry 0x5031308c --extra-entry 0x503133d0
+    --base 0x50310000 --entry 0x50310054 --max-bytes 2048 \
+    --extra-entry 0x50312eb4 --extra-entry 0x5031308c \
+    --extra-entry 0x503133d0 --extra-entry 0x50313518
 "$PY" recompiler/lift.py out/kernel_mixed.json --all --out out/kernel_mixed.c
 "$PY" recompiler/gen_register.py out/kernel_mixed.json out/kernel_register.c
 

@@ -109,6 +109,8 @@ N-Gage 应用级兼容层不等于 6600 整机启动；其内存布局也不能�
 3. 对 ARM/Thumb 停点先检查字节、PC/LR、状态位和 veneer，再判定是否缺失重定位。
 4. 当前 `BOOT.md` 提到的 `KaeP`/压缩、地址偏置与互操作原因仍需目标映像证据；
    下载这些资料本身不构成确认，也不能证明高熵区域一定需要某种解压算法。
-   第 14 轮已把 `0x20b0..0x6d9134` 的 852 个 page tag 和 `KaeP` 头变成可复现
-   测量（`recompiler/kaep.py`），但 tag 语义与真实 KaeP 解包仍未确认。
+   第 16 轮已把 `0x20b0` 起的 852 个 `0x20ec` 记录确定为 **`0xec` page
+   header + `0x2000` payload**，并用 `recompiler/pagestream.py` 去 header；
+   kernel export 命中率因此从 17.2% 升到 98.1%。`KaeP` 头（`0x124`）和真实
+   解包仍未确认。
 5. UPP_WD2 的 LCD、计时器和键盘寄存器仍需另找板级资料或实际访问轨迹，以上资料不能填补这一空白。

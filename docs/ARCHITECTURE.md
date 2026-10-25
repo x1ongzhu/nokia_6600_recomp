@@ -70,21 +70,23 @@ carries the CPSR T bit, a shadow call stack for mode restore, and an optional
 Thumb/ARM boundary.  The generator stays simple: lifted C calls `nk_call`,
 which either dispatches to generated C or enters the interpreter.
 
-The boot image is **paged**: the first 7 MiB carry a six-byte page tag
-(`20 00 00 00 dc 23`) every `0x20ec` bytes, and the `KaeP` header at `0x124`
-describes a boot-image payload the mask ROM normally installs.  The boot-region
-table is therefore modelled with explicit type/flag bits: `0x1a1c` needs type
-5..8 plus attr `0x04000000`, while `0x1b34` needs type 2.  `recompiler/kaep.py`
-measures the page grid.  `bootbank.py` now relocates all three boot-bank
-fragments A/B/C (C carries the CPU/board table at linked `0x74b8`), and
-`bootregions.py --profile staging` uses the `0xffffffff` no-expand sentinel for
-the type-2 RAM bank plus type-5 kernel code/data section banks.
-`bootbringup.py` combines that with an explicit KaeP descriptor/boot-image
-node list and a one-word skip of the compressed-image parser; the real loader
-then programs UPP, builds page tables and reaches the **boot-image handoff at
-linked `0x80`** after 36,732 instructions.  That target is where the real mask
-ROM would have installed the decompressed boot image; the KaeP unpack itself
-is still open.
+The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
+(first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.
+`recompiler/pagestream.py` removes the headers and makes the packed records
+contiguous; round 16 showed that the kernel text/export layout only matches
+the linked image after this step (469/478 exports, 98.1%).  The `KaeP` header
+at `0x124` still describes a boot-image payload the mask ROM normally
+installs, and the boot-region table is modelled with explicit type/flag bits:
+`0x1a1c` needs type 5..8 plus attr `0x04000000`, while `0x1b34` needs type 2.
+`bootbank.py --stream` takes the stream slice `[0xb0, 0x100b0)` as the linked
+boot bank (all switch tables bias 0); `bootregions.py --profile staging` uses
+the `0xffffffff` no-expand sentinel for the type-2 RAM bank plus type-5 kernel
+code/data section banks.  `bootbringup.py` combines that with an explicit KaeP
+descriptor/boot-image node list and a one-word skip of the compressed-image
+parser; the real loader then programs UPP, builds page tables and reaches the
+**boot-image handoff at linked `0x80`** after 36,732 instructions.  The
+correct stream view instead stops in a board/CPU detection panic at `0x624c`;
+the KaeP unpack itself is still open.
 
 For the packed-image bring-up it also has:
 
@@ -129,7 +131,7 @@ are independent of their file offsets.  The runtime loader (`boot_kernel.c`)
 locates the sections backwards from the next header, loads the referenced DLLs
 (UID3 `0x100065a5` and `0x100039e5`), and resolves import stubs through their
 export directories.  `recompiler/romimage.py build` now reconstructs the
-runtime ROM layout (all 722 packed images at their header addresses plus the
+runtime ROM layout (all 725 packed images at their header addresses plus the
 ROMFS tree); 1,580 sections are placed without overlaps in
 `out/6600_runtime.bin`.
 
@@ -148,15 +150,19 @@ unrelated neighbour.  This is why a single radius cannot resolve every site.
 The bring-up stack now combines a bounded snap, an explicit per-site callmap,
 host-side HLE for a few compiler helpers, and crash recovery.
 
-**Round 5 correction.**  The interpreter's Thumb `add/sub rd,rs,#imm3` selector
-was inverted, so the earlier ~2,000,000-instruction traces were executing wrong
-operands and are void.  After the fix the kernel entry completes in **197
-instructions** and returns through the mask-ROM stand-in (4 skipped calls, no
-undefined instruction).  Call repair is also confined to registered code
-ranges, so it cannot snap into ROMFS data.  Round 6 added a literal-pool
-relayout (`recompiler/relayout.py`) that is directly validated by the entry's
-`ldr` and all 787 detected pools, and round 7/9 showed why it cannot be the
-whole answer: the stored text's **function layout** is not the linked layout.
+**Round 16 correction.**  The apparent "function layout" problem was the
+`0xec`-byte page headers: rounds 7-15 kept them inline, inserting `0xec` bytes
+every `0x2000` bytes of every packed record.  `recompiler/pagestream.py`
+removes them; on the resulting stream the kernel's 478 export entries (genuine
+fixed-up addresses, small Thumb DLL 5/5) land on function starts **469 times
+(98.1%)** and DLL `0x100039e5` **1757/1788 (98.3%)** at shift 0.  The real
+ARM kernel entry runs **924,964 instructions** in the flat image (0 undefined,
+0 call fixups, 0 recoveries) and stops at a stack/exception underrun at
+`0x5039b2b8`.  The earlier "197-instruction entry", callmap, missing Thumb
+`pop` and drift-null results are history.
+
+The old text below is kept as a record of the wrong model:
+
 The kernel's 478 export entries are genuine fixed-up function addresses (a
 small Thumb DLL is 5/5), but only 82 (17.2%) land on a stored function start
 versus a 13.1% random baseline; the big DLL is 14.4% versus 5.9%.  The stored

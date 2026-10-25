@@ -6,7 +6,7 @@
  *   -> sparse guest memory (ROM at 0x50000000, RAM at 0x80000000)
  *   -> nk_call dispatch.
  *
- * func_5031308c is an ARM helper in the kernel that writes a 32-bit value to
+ * func_50312eb4 is an ARM helper in the kernel that writes a 32-bit value to
  * the ROM export area (0x58000000 + r1).  The runtime has no device there yet,
  * so the write is logged by the MMIO bus; seeing that log proves the guest
  * instruction executed natively.
@@ -16,7 +16,7 @@
 #include "nokia_rt.h"
 #include "nokia_interp.h"
 
-void func_5031308c(nk_cpu_t* c);
+void func_50312eb4(nk_cpu_t* c);
 
 int main(void) {
     nk_cpu_t c;
@@ -33,11 +33,11 @@ int main(void) {
     c.r[13] = NK_RAM_BASE + NK_RAM_SIZE;   /* stack */
     c.r[0] = 0x1234;                       /* value */
     c.r[1] = 0;                            /* offset into the export area */
-    func_5031308c(&c);
+    func_50312eb4(&c);
     printf("native 6600 kernel function returned: r2=%#x\n", c.r[2]);
 
     /* Same bytes, same instructions, but executed by the ARMv4T interpreter
-     * instead of the generated C.  func_5031308c is:
+     * instead of the generated C.  func_50312eb4 is:
      *   mov r2, #0x58000000 ; str r0, [r2, r1] ; mov pc, lr
      * LR points at a trap address so the interpreter stops on the return. */
     nk_cpu_t ic;
@@ -51,7 +51,7 @@ int main(void) {
     ic.r[13] = NK_RAM_BASE + NK_RAM_SIZE;
     ic.r[14] = 0xdeadbee0u;
     ic.cpsr = 0x400000d3u;                 /* SVC, ARM state */
-    ic.r[15] = 0x5031308cu;
+    ic.r[15] = 0x50312eb4u;
     nk_interp_t ip;
     nk_interp_init(&ip);
     ip.return_pc = 0xdeadbee0u;

@@ -54,7 +54,7 @@ at container offset **0x10b** in v5.53.0 and slices from there.  The result is a
 | +0x84 | mask-ROM entry | `0x00e0ca39` (Thumb) |
 | +0x88 | ROM link base | `0x50000000` |
 | +0x8c | ROM size | `0x01600000` (22 MiB; the file is 23.3 MB because the flash is packed) |
-| +0x90 | ROMFS root-list pointer | `0x50300000` (runtime VA; the packed file offset is `0x3162b0`) |
+| +0x90 | ROMFS root-list pointer | `0x50300000` (runtime VA; raw packed offset `0x3162b0`, page-header-free stream offset `0x3000b0`) |
 | +0x94 | kernel data base | `0x80000000` |
 | +0x98 | kernel data limit | `0x80300000` |
 | +0x9c | primary file entry | `0x50301ec4` |
@@ -85,13 +85,13 @@ data_size 0x500
 bss_size  0x1c58
 ```
 
-The code is stored at ROM offset **0x326924**, not at the link address; the
-loader copies it to **0x50310000** and starts at **0x50310054**.  `wd2.py
-kernel` carves `text_size` bytes (`0x28ac0`) into `fw/6600_kernel.bin`.
-`runtime/test/boot_kernel.c --e32 0x3268c0` with `NK_E32_SECTIONS=1` uses the
-packed-record layout below to place text, data, export directory and the
-DLL-ref table at their runtime addresses, and recursively loads the referenced
-DLLs.
+The code is stored at **packed-stream 0x3100b0** (the `TRomImageHeader` is at
+`0x31004c`, so text = header + `0x64`); raw flash `0x326924` is a page header,
+not the text.  The loader copies it to **0x50310000** and starts at
+**0x50310054** (ARM).  `wd2.py kernel` carves the page-header-free text (it
+now skips the raw page header); the runtime build uses the same stream.
+`runtime/test/boot_kernel.c --e32 0x3268c0` still supports the old packed-record
+path for bring-up.
 
 The EKA1 `TRomImageHeader` is **0x64 bytes for every image, including the
 kernel**.  (An earlier bring-up used `+0x6c`; that shifted the whole kernel by
@@ -180,23 +180,23 @@ The records are only **2-byte aligned** (the ROM build removed the linker's
 `0x7271ca`), so the scanner must step by 2.  Scanning every 4th byte used to
 recover 448 headers and silently dropped 40+ images.  With the 2-byte scan and
 a plausibility filter (declared sections fit before the next header), the ROM
-yields **722 images** from 781 candidates; their text ranges are disjoint and
-span `0x5030ff9c..0x515978dc`, for `0xc4ef20` bytes of text.
+yields **725 images** from 783 candidates; their text ranges are disjoint and
+span `0x5030ff9c..0x515978dc`.
 
-`recompiler/romimage.py build` reconstructs the flat runtime image from those
-records:
+`recompiler/romimage.py build` reconstructs the flat runtime image from the
+page-header-free packed stream:
 
 ```
-0x50000000..0x50010000   boot code / vectors        (file 0..0x10000, linear)
-0x50300000..0x5030ff9c   ROMFS root list + dirs     (packed block + overlays)
-0x50310000               kernel text                (file 0x326924)
-0x50338ac0               kernel .data               (file 0x350740)
-0x50338fc0               kernel .edata              (file 0x350c40)
-0x50339738               kernel dll-ref table       (file 0x3513b8)
-0x503397b4..0x515978dc   722 packed images          (all records, disjoint)
+0x50000000..0x50010000   boot code / vectors        (stream 0..0x10000)
+0x50300000..0x5030ff9c   ROMFS root list + dirs     (stream 0x3000b0 + overlays)
+0x50310000               kernel text                (stream 0x3100b0)
+0x50338ac0               kernel .data               (stream 0x338b70)
+0x50338fc0               kernel .edata              (stream 0x339070)
+0x50339738               kernel dll-ref table       (stream 0x3397e8)
+0x503397b4..0x515978dc   725 packed images          (all records, disjoint)
 ```
 
-The output is `out/6600_runtime.bin` (exactly `0x1600000` bytes); 1,580 placed
+The output is `out/6600_runtime.bin` (exactly `0x1600000` bytes); 1,833 placed
 sections do not overlap (`romimage.py build --only-reachable` keeps the old
 3-image behaviour).  The 0x34f5c bytes at the end of the original file are a
 trailer, not ROM content.
@@ -210,44 +210,51 @@ that they are the pre-ROM-build debug/rodata copies.
 
 ## Paged boot image and KaeP
 
-The first 7 MiB of the flash image are not a plain byte stream.  A six-byte
-page tag
+The first 7 MiB of the flash image are not a plain byte stream.  They are
+**`0x20ec`-byte records**, each consisting of a **`0xec`-byte page header**
+followed by a **`0x2000`-byte payload**:
 
 ```
-20 00 00 00 dc 23
+20 00 00 00 dc 23 ...      ; first 6 bytes of every page header
 ```
 
-is inserted every `0x20ec` bytes.  The first tag is at file `0x20b0`, the last
-at `0x6d9134`, and there are **852** tags.
+The first header is at file `0x20b0`, the last at `0x6d9134`, and there are
+**852** of them.  The `0xe6` header bytes after the six-byte marker are *not*
+part of the packed image; they contain another stream (and the first one
+starts with ARM boot code, which is why the old "6-byte tag" model looked
+plausible).  **Rounds 7-15 kept the whole `0xec`-byte header inline**, which
+inserted `0xec` bytes every `0x2000` bytes of every packed record.
 
 ```
 0x0124  "KaeP" 20 00 00 00 dc 23 14 00   ; magic, size 0x20, value 0x1423dc
-0x0128  20 00 00 00 dc 23 ...             ; size/value prefix, *not* a tag
-0x20b0  20 00 00 00 dc 23 ...             ; first page tag, stride 0x20ec
+0x0128  20 00 00 00 dc 23 ...             ; size/value prefix, *not* a header
+0x20b0  20 00 00 00 dc 23 + 0xe6 bytes    ; first page header
+0x219c  ...                               ; first 0x2000-byte payload
 ...
-0x326924 20 00 00 00 dc 23 ...            ; kernel text also starts on a tag
-0x6d9134 20 00 00 00 dc 23                ; last tag
+0x326924 20 00 00 00 dc 23 ...            ; page header *before* kernel text
+0x6d9134 20 00 00 00 dc 23                ; last header
 ```
 
-The tag semantics are not documented yet.  What is measurable is that the
-kernel text starts on a tag and that code after later tags is shifted by six
-bytes per page; `recompiler/kaep.py` (`analyze`/`despan`/`synth`/`verify`)
-pins the grid.  A tag-free view does **not** fix the packed-vs-linked export
-layout: the kernel's pool-aware export hit rate drops from 104/478 to 67/478,
-so the page tags and the function-order mismatch are independent.
+`recompiler/pagestream.py build` removes the headers and concatenates the
+payloads.  The result is `0x1605ed8` bytes; it is the packed record stream the
+ROM build produced.  The kernel header is at stream `0x31004c`, its text at
+stream `0x3100b0` (`header + 0x64`), and entry `0x50310054` is **ARM**
+(`push {r4,r5,r6,lr}`).  With this view the 478 kernel exports land on function
+starts **469 times (98.1%)** and DLL `0x100039e5` **1757/1788 (98.3%)** at
+shift 0; the old 17.2%/21.8% and drift-null results were the page headers.
 
 `KaeP` is a 12-byte header followed by a 32-byte payload at file `0x130`
 (linked `0x80`).  The mask ROM normally turns it into the boot-image list the
 secondary loader consumes; the payload in this dump is the repeated
 `0xdff9ea00` block, not the final descriptor.
 
-The boot bank itself is a concatenation of fragments linked for different
-bases.  `bootbank.py` relocates **A** (`0x0..0x2000 <- 0xb0`), **B**
-(`0x2000..0x6000 <- 0x219c`) and **C** (`0x6000..0x8000 <- 0x6374`).  C is
-pinned by the 16-bit CPU/board table at linked `0x74b8`: the correct entries
-(including CPU `0x3b`) are at file `0x782c` (`linked + 0x374`).  Without that
-relocation the loader compares `0x3b` with instruction bytes and halts in the
-`0x3d44` self-branch.
+The boot bank is simply the first 64 KiB of the packed stream, shifted so that
+linked 0 is stream offset `0xb0` (`stream[0xb0:0x100b0]`).  All 15 compiler
+switch tables then measure bias 0, so the old A/B/C fragment relocation
+(`bootbank.py`, with biases `0xb0/0x19c/0x374`) was another page-header
+artifact.  `bootbank.py --stream` builds the linked view directly; the correct
+loader stops in a board/CPU detection panic at linked `0x624c` after 2,111
+instructions (the old raw-view 600k run used the B2 page header as code).
 
 `bootbringup.py` writes an explicit descriptor at linked `0x80`, a
 **head -> node -> terminator** boot-image list at `0xfd00 -> 0xfd10`, and a
@@ -267,15 +274,14 @@ names` locates the root and the boot directory by content:
 
 ```
 py recompiler/romimage.py names 6600_mcu.bin
-  root directory: file 0x32639c, 2 entries
+  root directory: file 0x30fb28, 2 entries
     dir  \System      @ 0x5030f180
     dir  \Nokia       @ 0x5030fa54
-  \System: file 0x325aa4, 23 entries
+  \System: file 0x30f230, 23 entries
     dir  \System\Programs @ 0x50307964
     dir  \System\Libs     @ 0x50301ec0
     ...
-  \System\Programs: file 0x318170, 9 valid entries (declared size 0x5608;
-                    the rest is overwritten by the next packed record)
+  \System\Programs: file 0x301f70, 586 entries
     file \System\Programs\ekern.exe  0x02974c @ 0x5030ff9c  -> uid3 0x100058e8
     file \System\Programs\ecust.dll  0x002320 @ 0x50339750  -> uid3 0x100058e7
     ...
@@ -291,24 +297,22 @@ not ordered by runtime address, so the tree is recovered by content:
 `\System\Apps` is the only directory whose entries are all subdirectories,
 and each app directory is the small directory holding `<App>.app`.  All
 **63** app directories resolve, including `snakeex` (`SnakeEx.app`, `0x7ddc`)
-and `mixpix` (`mixpix.app`, `0xd718`).  `romimage.py build` copies the 76
-E32Image files (63 `.app` plus 13 plugin/driver files) from their packed file
+and `mixpix` (`mixpix.app`, `0xd718`).  `romimage.py build` copies 156
+E32Image files (63 `.app` plus plugin/driver files) from their packed file
 records to the runtime addresses given by the directory entries, and locates
-84 AIF/MBM companions by their UID headers in the same packed runs.  `\System\
-Programs` is the exception: its `TRomDir` declares `0x5608` bytes but only
-**9 entries / 0x114 bytes** are present (the next packed record overwrites the
-tail), so only the boot modules `ekern.exe`, `ecust.dll`, `ecomm.ldd`,
-`ramdrive.pdd`, `rtc.dll`, `nosstarter.ext`, `pnmsg.dll`, `isimsg.dll` and
-`isaapi.dll` survive.
+85 AIF/MBM companions by their UID headers in the same packed runs.
+`\System\Programs` is complete: the packed stream has **586 entries**, not the
+9 the raw view saw (the page header used to cut the directory).  The remaining
+`.r01`/`.wav` data files are still packed in FS order (B3g).
 
-| structure | packed file | runtime VA | entries |
+| structure | packed stream | runtime VA | entries |
 |---|---|---|---|
-| root list | `0x3162b0` | `0x50300000` | 1 |
-| root dir | `0x32639c` | `0x5030fa78` | 2 |
-| `\System` | `0x325aa4` | `0x5030f180` | 23 |
-| `\System\Libs` | `0x3162bc` | `0x50301ec0` | 171 |
-| `\System\Programs` | `0x318170` | `0x50307964` | 9 valid (truncated) |
-| `\System\Apps` | `0x324a0c` | `0x5030e0e8` | 63 dirs |
+| root list | `0x3000b0` | `0x50300000` | 1 |
+| root dir | `0x30fb28` | `0x5030fa78` | 2 |
+| `\System` | `0x30f230` | `0x5030f180` | 23 |
+| `\System\Libs` | `0x3000bc` | `0x50301ec0` | 171 |
+| `\System\Programs` | `0x301f70` | `0x50307964` | **586** |
+| `\System\Apps` | `0x30e198` | `0x5030e0e8` | 63 dirs |
 
 The stored `addr_lin` values are *final-layout* addresses, while the packed
 bytes were written after the ROM build removed alignment gaps, so a single
