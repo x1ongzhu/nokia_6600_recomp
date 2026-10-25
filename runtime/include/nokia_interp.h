@@ -167,6 +167,17 @@ typedef struct nk_interp {
      * returns immediately.  This stands in for the interrupt/DMA completion
      * path a headless boot does not have yet.  Bit i covers SWI index i. */
     uint64_t swi_complete[8];
+    /* Bring-up allocator: EUser's RHeap is created by the kernel/scheduler
+     * startup that a direct E32-entry boot skips.  When enabled, a call to
+     * the guest RHeap::Alloc entry is served by a bump allocator over the
+     * harness heap instead of walking an uninitialised heap object.  This is
+     * an explicit stand-in (like NK_SWI_COMPLETE), not a heap emulation. */
+    int      alloc_hle;
+    uint32_t alloc_pc;      /* guest RHeap::Alloc entry (default 0x50380270) */
+    uint32_t alloc_cur;     /* bump cursor, inside hle_heap */
+    uint32_t alloc_end;
+    unsigned long alloc_hits;
+    int      alloc_log;     /* log the first N allocations */
     /* Bring-up recovery: when a callee faults (undefined instruction, PC
      * escape), roll back to the most recent BL/BLX and continue as if that
      * call had returned 0.  Logs the skipped call.  Off by default. */

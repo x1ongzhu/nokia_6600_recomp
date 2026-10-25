@@ -97,7 +97,9 @@ def find_rom_header(rom: bytes) -> dict:
         return {
             "header_offset": base,
             "checksum": u32(rom, base + 0x04),
-            "entry": u32(rom, base + 0x08),
+            "entry": u32(rom, base + 0x08),   # legacy alias: iTimeHi, not an entry
+            "time_lo": u32(rom, base + 0x04),
+            "time_hi": u32(rom, base + 0x08),
             "rom_base": u32(rom, base + 0x0C),
             "rom_size": u32(rom, base + 0x10),
             "root_dir_list": u32(rom, base + 0x14),
@@ -106,6 +108,8 @@ def find_rom_header(rom: bytes) -> dict:
             "primary_file": u32(rom, base + 0x20),
             "secondary_file": u32(rom, base + 0x24),
             "checksum2": u32(rom, base + 0x28),
+            "variant_file": u32(rom, base + 0x4c),
+            "extension_file": u32(rom, base + 0x50),
         }
     raise SystemExit("no EKA1 ROM header (rom_base 0x50000000)")
 
@@ -538,15 +542,35 @@ class BootDirs:
     libs_entries: list[RomfsEntry]
     programs_off: int
     programs_entries: list[RomfsEntry]
+    plugins_off: int = -1
+    plugins_entries: list[RomfsEntry] | None = None
     root_dir: RomDir | None = None
     system_dir: RomDir | None = None
     libs_dir: RomDir | None = None
     programs_dir: RomDir | None = None
+    plugins_dir: RomDir | None = None
 
     def dir_reports(self) -> list[tuple[str, RomDir | None]]:
         return [("root", self.root_dir), ("\\System", self.system_dir),
                 ("\\System\\Libs", self.libs_dir),
-                ("\\System\\Programs", self.programs_dir)]
+                ("\\System\\Programs", self.programs_dir),
+                ("\\System\\Libs\\Plugins", self.plugins_dir)]
+
+    def dirs_by_va(self) -> list[tuple[str, int, int]]:
+        """(name, stored VA, packed file offset) for every \\System subdir.
+
+        The packed stream keeps every directory at its *runtime* VA when the
+        block below the kernel is read linearly from the root list.  This
+        walks the parent's address fields and turns each into the matching
+        packed offset, so callers can verify the layout instead of guessing.
+        """
+        out: list[tuple[str, int, int]] = []
+        for e in self.system_entries:
+            if not (e.attr & 0x10):
+                continue
+            out.append((e.name, e.addr,
+                        self.root_list_off + (e.addr - self.root_list_va)))
+        return out
 
     def truncation_warnings(self) -> list[str]:
         out = []
@@ -561,25 +585,35 @@ class BootDirs:
 
 
 def find_boot_dirs(rom: bytes, root_off: int, root_va: int) -> BootDirs:
-    """Recover the root, \\System, \\System\\Libs and \\System\\Programs dirs.
+    r"""Recover the root, \System, \System\Libs and \System\Programs dirs.
 
     The root list sits at `root_off` (file) / `root_va` (runtime).  The root
-    directory itself is packed near the end of the directory block; `\\System`
-    lists Libs/Programs/Apps/...; `\\System\\Libs` holds the shared DLLs and
-    `\\System\\Programs` holds the boot executables (ekern.exe, ecust.dll, ...).
+    directory itself is packed near the end of the directory block; `\System`
+    lists Libs/Programs/Apps/...
+
+    The names must be matched by *content*, not by position: round 19 proved
+    that the large directory packed first below the kernel is `\System\Libs`
+    (586 entries, starting with `ekern.exe`/`ecust.dll`), not Programs.
+    `\System\Programs` is the 55-entry server list (`BTTestServer.exe`, ...),
+    and the 171-entry list of `AcmClassController.dll` is `\System\Libs\Plugins`.
     """
     root_dir_off, root_entries = find_dir_by_names(
         rom, root_off, root_off + 0x30000, {"system", "nokia"})
     system_off, system_entries = find_dir_by_names(
         rom, root_off, root_off + 0x30000, {"libs", "programs", "data"})
     libs_off, libs_entries = find_dir_by_names(
+        rom, root_off, root_off + 0x30000, {"ekern.exe", "ecust.dll",
+                                            "euser.dll"})
+    programs_off, programs_entries = find_dir_by_names(
+        rom, root_off, root_off + 0x30000, {"bttestserver.exe",
+                                            "shareddataserver.exe"})
+    plugins_off, plugins_entries = find_dir_by_names(
         rom, root_off, root_off + 0x30000, {"acmclasscontroller.dll",
                                             "httpclient.dll"})
-    programs_off, programs_entries = find_dir_by_names(
-        rom, root_off, root_off + 0x30000, {"ekern.exe", "ecust.dll"})
     return BootDirs(root_off, root_va, root_dir_off, root_entries,
                     system_off, system_entries, libs_off, libs_entries,
                     programs_off, programs_entries,
+                    plugins_off=plugins_off, plugins_entries=plugins_entries,
                     root_dir=read_rom_dir_full(rom, root_dir_off)
                     if root_dir_off >= 0 else None,
                     system_dir=read_rom_dir_full(rom, system_off)
@@ -587,7 +621,9 @@ def find_boot_dirs(rom: bytes, root_off: int, root_va: int) -> BootDirs:
                     libs_dir=read_rom_dir_full(rom, libs_off)
                     if libs_off >= 0 else None,
                     programs_dir=read_rom_dir_full(rom, programs_off)
-                    if programs_off >= 0 else None)
+                    if programs_off >= 0 else None,
+                    plugins_dir=read_rom_dir_full(rom, plugins_off)
+                    if plugins_off >= 0 else None)
 
 
 def image_by_header_address(images: list[Image], va: int) -> Image | None:
@@ -698,6 +734,8 @@ def collect_romfs_files(rom: bytes, root_off: int) -> list[tuple[RomfsEntry, boo
 
     add(dirs.libs_entries, False)
     add(dirs.programs_entries, False)
+    if dirs.plugins_entries:
+        add(dirs.plugins_entries, False)
     tree = read_app_tree(rom, root_off)
     if tree is not None:
         for d in tree.apps.values():
@@ -907,13 +945,16 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
                 f"is not placed (use `scan` to inspect it)")
 
     # 3. ROMFS directory area.  The packed directory block below the kernel is
-    #    stored in packed order; its first bytes map onto the ROM header's
-    #    root_dir_list (0x50300000).  Copy that block, then overlay the two
-    #    directories that live in a separately packed run next to the kernel
-    #    header: the root directory and \System.  Their stored addresses are
-    #    authoritative, and the packed bytes are found by content (see
-    #    find_boot_dirs), because a single file<->VA bias does not cover the
-    #    whole tree.
+    #    stored *at its runtime addresses*: reading it linearly from the root
+    #    list puts the root list at 0x50300000, \System\Libs\Plugins at
+    #    0x5030000c, \System\Libs at 0x50301ec0, \System\Programs at
+    #    0x50307964, and so on.  Round 19 found that an older build overlaid
+    #    \System\Libs with the Plugins content (the 171-entry directory) and
+    #    Programs with the Libs content, which destroyed the TRomEntry records
+    #    the ROM header's iPrimaryFile/iSecondaryFile/iVariantFile/
+    #    iExtensionFile point at (the kernel's boot loader reads them at
+    #    0x500000c4..0x500000cc).  The linear copy is now authoritative; each
+    #    \System subdirectory is verified in place instead of relocated.
     hdr = find_rom_header(rom)
     root_off = find_romfs_root(rom, hdr["root_dir_list"])
     kernel = next(im for im in images if im.uid3 == UID_KERNEL)
@@ -933,27 +974,27 @@ def build_image(rom: bytes, images: list[Image], romfs: list[RomfsEntry],
             dirs = find_boot_dirs(rom, root_off, hdr["root_dir_list"])
             warnings.extend(dirs.truncation_warnings())
 
-            def place_dir(off: int, va: int, name: str):
-                if off < 0 or not va:
-                    return
-                blob = rom[off:off + 4 + u32(rom, off)]
-                put(va, blob, name, off, overlay=True)
-
-            # The stored addresses are authoritative.  The packed block above
-            # is a compressed copy, so a linear copy puts \System\Libs at
-            # 0x5030000c instead of its real 0x50301ec0; the overlay repairs
-            # the directories the boot path needs.
-            root_va = u32(rom, root_off + 8) if u32(rom, root_off) == 1 else 0
-            system_va = next((e.addr for e in dirs.root_entries
-                              if e.name.lower() == "system"), 0)
-            libs_va = next((e.addr for e in dirs.system_entries
-                            if e.name.lower() == "libs"), 0)
-            programs_va = next((e.addr for e in dirs.system_entries
-                                if e.name.lower() == "programs"), 0)
-            place_dir(dirs.root_off, root_va, "romfs_root")
-            place_dir(dirs.system_off, system_va, "romfs_system")
-            place_dir(dirs.libs_off, libs_va, "romfs_libs")
-            place_dir(dirs.programs_off, programs_va, "romfs_programs")
+            # Fallback only: if a directory is not where its parent's address
+            # says it is (a differently packed view), relocate it by content.
+            known = {
+                "libs": dirs.libs_off,
+                "programs": dirs.programs_off,
+                "plugins": dirs.plugins_off,
+            }
+            for name, va, off in dirs.dirs_by_va():
+                if read_rom_dir_full(rom, off).entries:
+                    continue
+                src = known.get(name.lower(), -1)
+                if src >= 0:
+                    blob = rom[src:src + 4 + u32(rom, src)]
+                    put(va, blob, f"romfs_{name}", src, overlay=True)
+                    warnings.append(
+                        f"romfs: {name} was packed away from its runtime VA "
+                        f"{va:#x}; relocated by content")
+                else:
+                    warnings.append(
+                        f"romfs: {name} at {va:#x} does not parse "
+                        f"(packed offset {off:#x})")
             if dirs.root_off < 0 or dirs.system_off < 0:
                 warnings.append("romfs: root/System directory not located")
     elif root_off is not None:
@@ -1226,7 +1267,9 @@ def cmd_scan(a):
                       "entries": [asdict(e) for e in entries],
                       "root_dir_file_off": dirs.root_off,
                       "system_dir_file_off": dirs.system_off,
-                      "libs_dir_file_off": dirs.libs_off},
+                      "libs_dir_file_off": dirs.libs_off,
+                      "programs_dir_file_off": dirs.programs_off,
+                      "plugins_dir_file_off": dirs.plugins_off},
         }
         open(a.json, "w").write(json.dumps(payload, indent=1))
         print(f"-> {a.json}")
@@ -1241,6 +1284,7 @@ def cmd_build(a):
     place = reach if a.only_reachable else good
     root = find_romfs_root(rom, hdr["root_dir_list"])
     romfs = parse_romfs(rom, root) if root is not None else []
+    dirs = find_boot_dirs(rom, root, hdr["root_dir_list"]) if root is not None else None
     # Snapping was a bring-up aid for the misaligned packed text.  The
     # page-header-free stream now matches the export table at ~98%, so keep
     # the raw export addresses unless --snap is requested explicitly.
@@ -1254,8 +1298,11 @@ def cmd_build(a):
         buf = bytes(buf)
     open(a.output, "wb").write(buf)
     print(f"wrote {a.output}: {len(buf):#x} bytes at {ROM_BASE:#x}")
-    print(f"  {len(placed)} sections from {len(place)} images, "
-          f"{len(romfs)} ROMFS entries")
+    print(f"  {len(placed)} sections from {len(place)} images")
+    if dirs is not None:
+        print(f"  ROMFS: \\System\\Libs {len(dirs.libs_entries)} entries, "
+              f"\\System\\Programs {len(dirs.programs_entries)}, "
+              f"Plugins {len(dirs.plugins_entries or [])}")
     e32n = sum(1 for s in placed if s.name.startswith("romfs_e32_"))
     if e32n:
         print(f"  ROMFS E32Image files: {e32n} placed at their runtime addresses")
@@ -1334,6 +1381,10 @@ def cmd_names(a):
         dump("\\System\\Libs", dirs.libs_entries)
         mapped = sum(1 for e in dirs.libs_entries if e.addr in by_hdr)
         print(f"  ({mapped}/{len(dirs.libs_entries)} entries map to packed images)")
+        if dirs.plugins_off >= 0 and dirs.plugins_entries:
+            print(f"\n\\System\\Libs\\Plugins: file {dirs.plugins_off:#x}, "
+                  f"{len(dirs.plugins_entries)} entries")
+            dump("\\System\\Libs\\Plugins", dirs.plugins_entries)
 
 
 

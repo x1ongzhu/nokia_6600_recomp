@@ -7,15 +7,15 @@ what is executed, and the exact frontier.
 
 | entry | address | mode | in the flash image? |
 |---|---|---|---|
-| UPP mask ROM | `0x00e0ca39` | Thumb | **no** — internal boot ROM |
+| UPP mask ROM | not in the dump | Thumb | **no** — internal boot ROM (the `0x00e0ca39` word at +0x84 is `TRomHeader.iTime` high, not an entry) |
 | EKA1 ROM reset vector | `0x50000000` | ARM | yes (the image's exception table) |
 | Kernel E32Image | `0x50310054` | **ARM** | yes, in the page-header-free stream at `0x31004c`/`0x3100b0` (link `0x50310000`); the raw `0x326924` is a page header |
 | Boot-image handoff | `0x00000080` | ARM | target of the secondary loader; round 17 installs `ldr pc,[pc,#-4]; .word 0x50310054` there, so the handoff enters the kernel |
 
-The ROM header's `entry` field is the **mask-ROM** entry.  The kernel is
-separate: its EKA1 `TRomImageHeader` (`uid3 0x100058e8`) is at ROM `0x3268c0`,
-its text is stored at ROM `0x326924`, and the loader copies it to
-**`0x50310000`**.  The entry is the Thumb address **`0x50310054`**.
+The ROM header's `iTime` high word is **not** a mask-ROM entry.  The kernel is
+separate: its EKA1 `TRomImageHeader` (`uid3 0x100058e8`) is at stream
+`0x31004c`, and the loader copies its text to **`0x50310000`**.  The entry is
+**`0x50310054`** (ARM).
 
 ## What runs today
 
@@ -34,13 +34,54 @@ NK_E32_SECTIONS=1 NK_CALL_INFER=1 \
 tools/build_bringup_image.sh
 tools/test_boot_recover.sh
 
-# round 16: real kernel entry (ARM) with its vector table installed
+# round 16/19: real kernel entry (ARM) with its vector table installed
 tools/build_rom_image.sh
 NK_KERNEL_VECTORS=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=1000000 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_pagestream.sh
+
+# round 19: direct call gate + the one export-table hole bridged
+NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
+  NK_IMPORTMAP=config/imports-6600.txt NK_RECOVER=0 NK_CALL_INFER=0 \
+  NK_BUDGET=200000 NK_MMIO_N=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_imports.sh
 ```
+
+### Round 19: the ROMFS boot table and image imports (2026-10-25)
+
+Two corrections move the frontier past the locale/extension hand-off.
+
+**1. The 586-entry directory is `\System\Libs`.**  The packed directory block
+below the kernel is stored at its runtime VAs when read linearly from the root
+list: `\System\Libs\Plugins` at `0x5030000c` (171 entries), `\System\Libs` at
+`0x50301ec0` (586 entries, starting with `ekern.exe`), `\System\Programs` at
+`0x50307964` (55 server entries).  `TRomHeader.iPrimaryFile` (`0x5000009c`),
+`iSecondaryFile` (`0xa0`), `iVariantFile` (`0xc8`) and `iExtensionFile` (`0xcc`)
+are `TRomEntry` pointers into the **Libs** table: `ekern.exe` (`0x5030ff9c`),
+`EFile.exe` (`0x503b70a0`), `ecust.dll` (`0x50339750`) and `rtc.dll`
+(`0x5033edb0`).  The old builder overlaid Libs with the Plugins content (and
+Programs with the Libs content), so `0x5031eae0` read UTF-16 name bytes as a
+`TRomImageHeader` and jumped to 0.  Directories are now verified in place; no
+destructive overlay is applied when the packed bytes already sit at their VA.
+
+**2. A flat image already binds every real import.**  EKA1 stubs are
+`ldr ip,[pc]; ldr pc,[ip]` and the literal is the **exporting image's export
+table entry**.  Because that entry holds the linked code address, only holes
+(`0xffffffff`) need loader work.  `recompiler/imports.py` enumerates 1,111
+stubs; the kernel has 257 (236 EUser + 21 ELocl) and exactly one hole:
+**ELocl ordinal 20**, called unconditionally by the locale initialiser
+`0x50326078`.  `NK_IMPORTMAP=config/imports-6600.txt` binds it to a
+high-vector `mov r0,#0; bx lr` stub.
+
+With both fixes the kernel runs the real `rtc.dll` extension:
+**8,512 instructions, 0 undefined, 0 unbound IAT**.  The next stop is EUser's
+`RHeap::Alloc` (`0x50380270`): the kernel overwrites the current-thread global
+`[0x800017d4]` with `0x802ffd00`, so `[thread+0x18] -> [process+0x38]` yields a
+null heap and `bx ip` leaves to 0 (`pc=0`, `lr=0x503802ac`, `cpsr=0xdb`).
+That is the B7e initial-thread/process/heap task, not an import or layout bug.
 
 ### Round 16 correction: the 0xec page headers (2026-10-25)
 
@@ -57,7 +98,8 @@ truncated `\System\Programs` directory were all page-header artifacts.
 stream `0x31004c`, its text at `+0x64` (`0x3100b0`), and entry `0x50310054` is
 **ARM** (`push {r4,r5,r6,lr}` / `0xe92d4070`).  The 478 exports land on
 function starts **469 times (98.1%)**; DLL `0x100039e5` is **1757/1788
-(98.3%)** at shift 0.  `\System\Programs` has **586** entries, not 9.
+(98.3%)** at shift 0.  The 586-entry directory is `\System\Libs` (the boot
+image table); `\System\Programs` is the 55-entry server list (round 19).
 
 The flat image built from the stream boots the real entry for **924,964
 instructions** (0 undefined, 0 call fixups, 0 recoveries, 2 MMIO reads /
@@ -204,26 +246,28 @@ Two things were wrong with the flat image, and both were silent:
    declares the kernel + its `TDllRefTable` DLLs as code ranges by default
    (`NK_RANGE_ALL=1` accepts every image for call repair).
 
-2. **ROMFS has a directory tree, and file data is not linear.**  The 64 KiB
-   block below the kernel is a compressed *copy* of the directories, not a
-   linear mapping.  Locating directories by content recovers:
+2. **ROMFS has a directory tree, and file data is not linear.**  The directory
+   block below the kernel is copied at its runtime VAs (round 19).  Locating
+   directories by content recovers:
 
    | directory | packed file | runtime VA | entries |
    |---|---|---|---|
-   | root | `0x32639c` | `0x5030fa78` | 2 (`\System`, `\Nokia`) |
-   | `\System` | `0x325aa4` | `0x5030f180` | 23 |
-   | `\System\Libs` | `0x3162bc` | `0x50301ec0` | 171 |
-   | `\System\Programs` | `0x318170` | `0x50307964` | 9 raw-view entries; **586** on the stream (round 16) |
+   | root | `0x30fb28` | `0x5030fa78` | 2 (`\System`, `\Nokia`) |
+   | `\System` | `0x30f230` | `0x5030f180` | 23 |
+   | `\System\Libs` | `0x301f70` | `0x50301ec0` | **586** (boot image table) |
+   | `\System\Programs` | `0x307a14` | `0x50307964` | 55 (servers) |
+   | `\System\Libs\Plugins` | `0x3000bc` | `0x5030000c` | 171 |
 
-   `\System\Programs` is the boot module table: `ekern.exe` (the kernel,
-   uid3 `0x100058e8`, code `0x50310000`), `ecust.dll`, `ecomm.ldd`,
-   `ramdrive.pdd`, `rtc.dll`, `nosstarter.ext`, `pnmsg.dll`, `isimsg.dll`,
-   `isaapi.dll`.  `romimage.py names` prints it and maps each entry to its
-   packed record (`ekern.exe` is at file `0x3268c0`).  Round 10 corrected the
-   old "236 entries / 193 mapped" figure: the declared directory tail is
-   overwritten by the next packed record, so only those nine entries and
-   6 Programs image records are present.  `\System\Libs` keeps 73/171 image
-   records; the rest are resources (`.rsc`, `.mbm`, `.r01`, ...).
+   `\System\Libs` is the ROM's boot image table: `ekern.exe` (the kernel,
+   uid3 `0x100058e8`, code `0x50310000`), `EStart.exe`, `EFile.exe`,
+   `ecust.dll`, `ecomm.ldd`, `ramdrive.pdd`, `rtc.dll`, `ELocl.dll`,
+   `EUser.dll`, ...  The ROM header's primary/secondary/variant/extension
+   pointers are `TRomEntry` addresses into it.  `romimage.py names` prints it
+   and maps entries to packed records.  `\System\Programs` holds the remaining
+   server executables (BTTestServer, PhoneServer, SharedDataServer, ...).
+   `\System\Libs\Plugins` holds the plugins (`AcmClassController.dll`, ...).
+   The old "9 valid Programs entries" and "586 Programs" figures were page
+   header / parent-name artifacts.
 
    The data files themselves are stored in packed FS order with `0xff`
    padding, not at `addr - 0x50000000`.  The old build copied from the linear
@@ -355,8 +399,9 @@ nosstarter.ext  pnmsg.dll  isimsg.dll  isaapi.dll
 
 The old parser read the code that follows as more entries and produced 236
 plausible-looking names (`EStart.exe`, `EFile.exe`, `EFSrv.dll`, ...); those
-entries are **not in this dump**.  `\System\Libs` (171), `\System` (23) and
-the root (2) are complete.  `romimage.py` now validates every entry (ASCII
+entries are **not in this dump**.  `\System\Libs` (586, round 19),
+`\System` (23), `\System\Programs` (55) and the root (2) are complete.
+`romimage.py` now validates every entry (ASCII
 name, address inside the ROM window, sane size) and reports the truncation in
 `scan`, `names` and `build` instead of inventing entries.  This is a hard
 limit on B3e/B3g: the app directory tail must come from the final flash
@@ -833,11 +878,13 @@ control and reports `469/478` vs. a null of ~218 (2.15x) at every budget.
 The residual `relayout.py` plan is 26 inserts / `0x34` bytes and is diagnostic
 only — applying it would corrupt real instructions.
 
-**3. The full ROMFS tree is intact.**  `\System\Programs` parses **586**
-entries (the old parser saw 9 because the page header cut the directory).
-`romimage.py build` places 1,833 sections / 725 images at their runtime
-addresses, including 156 E32Image files and 85 AIF/MBM companions.  The
-`.r01`/`.wav` data area is still packed in FS order and remains B3g work.
+**3. The full ROMFS tree is intact.**  The 586-entry directory below the
+kernel is **`\System\Libs`** (the boot image table; round 19 corrected the old
+"Programs" label); `\System\Programs` is the 55-entry server list and Plugins
+has 171 entries.  `romimage.py build` places 1,847 sections / 725 images at
+their runtime addresses, including 174 E32Image files and 85 AIF/MBM
+companions.  The `.r01`/`.wav` data area is still packed in FS order and
+remains B3g work.
 
 **4. The real kernel boots.**  `boot_kernel.c` now takes the flat-image entry
 mode from the E32 entry bit (`0x50310054` → ARM), and `NK_KERNEL_VECTORS=1`

@@ -6,8 +6,11 @@
 #     sit at 2 mod 4), giving the full image map instead of just the kernel's
 #     direct DLL references
 #   - the ROMFS tree is located (root / \System / \System\Libs / Programs) and
-#     ekern.exe maps to the kernel image
-#   - every placed section is disjoint (the ROMFS overlays are explicit)
+#     ekern.exe maps to the kernel image.  Round 19 corrected the names: the
+#     586-entry list below the kernel is \System\Libs (the boot image table),
+#     \System\Programs is the 55-entry server list, and the 171-entry
+#     AcmClassController list is \System\Libs\Plugins.
+#   - every placed section is disjoint (the ROMFS directory block stays linear)
 #   - the flat image boots and the kernel's imports are all bound
 #
 # It does not assert *where* the kernel frontier is: that moves as the ROM
@@ -36,7 +39,7 @@ LOG=out/romimage_test.log
 "$PY" recompiler/romimage.py build "$ROM" "$IMG" --json "$LAYOUT" \
     >>"$LOG" 2>&1
 NAMES_LOG=out/romimage_names.log
-"$PY" recompiler/romimage.py names "$ROM" >"$NAMES_LOG" 2>&1
+"$PY" recompiler/romimage.py names "$ROM" --all >"$NAMES_LOG" 2>&1
 TREE_LOG=out/romimage_tree.log
 "$PY" recompiler/romimage.py tree "$ROM" >"$TREE_LOG" 2>&1
 
@@ -58,18 +61,21 @@ check "ekern.exe -> uid3 0x100058e8" "ekern.exe maps to the kernel record"
 check "root       file" "packed root directory located"
 check "programs   file" "\\System\\Programs directory located"
 check "kernel entry 0x50310054" "kernel entry placed"
-check "programs   file 0x301f70  586 entries" \
-    "full \\System\\Programs directory recovered (586 entries)"
-if grep -q "ekern.exe" "$NAMES_LOG"; then
-    echo "ok: Programs names include ekern.exe"
+check "libs       file 0x301f70  586 entries" \
+    "full \\System\\Libs directory recovered (586 entries)"
+check "programs   file 0x307a14   55 entries" \
+    "\\System\\Programs is the 55-entry server list"
+if grep -q "Libs\\\\ekern.exe" "$NAMES_LOG"; then
+    echo "ok: Libs names include ekern.exe (the ROM header's iPrimaryFile)"
 else
-    echo "FAIL: Programs names lost ekern.exe"
+    echo "FAIL: Libs names lost ekern.exe"
     fail=1
 fi
-if grep -q "EStart.exe" "$NAMES_LOG" && grep -q "BIGINT.DLL" "$NAMES_LOG"; then
-    echo "ok: full Programs tail is present (EStart.exe, BIGINT.DLL)"
+if grep -q "Libs\\\\EStart.exe" "$NAMES_LOG" && \
+   grep -q "Libs\\\\BIGINT.DLL" "$NAMES_LOG"; then
+    echo "ok: full Libs image table is present (EStart.exe, BIGINT.DLL)"
 else
-    echo "FAIL: Programs tail is still missing"
+    echo "FAIL: Libs image table is incomplete"
     fail=1
 fi
 if grep -q "63 app directories, 63 resolved" "$TREE_LOG"; then

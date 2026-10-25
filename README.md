@@ -91,9 +91,11 @@ criteria and phased roadmap live in
   DLL `0x100039e5` scores **1757/1788 (98.3%)** at shift 0.  The old
   "different function order / monotone drift" conclusion (B1g) was the page
   header, not the linker.  `romimage.py`, `layout.py` and `relayout.py` now read
-  the page-header-free stream by default.  Bonus: `\System\Programs` is no
-  longer truncated — all **586 entries** parse (the old 9-entry limit was the
-  page header), and `build` places 156 E32Image files and 85 AIF/MBM companions.
+  the page-header-free stream by default.  Bonus: the 586-entry directory below
+  the kernel is **`\System\Libs`** — the boot image table the ROM header points
+  into — and the old "586 Programs entries" label was wrong (round 19); the
+  real `\System\Programs` has 55 server entries and Plugins has 171.
+  `build` places 174 E32Image files and 85 AIF/MBM companions.
   `tools/test_pagestream.sh` is the acceptance test.
 - [x] **Kernel entry runs — the real one (round 16)** — after removing the page
   headers the entry `0x50310054` is ARM, not Thumb.  The flat runtime image
@@ -174,15 +176,16 @@ criteria and phased roadmap live in
   record-plausibility filter, **722 images** are recovered in the raw view
   (725 after the round-16 page-header removal) and their text ranges are
   disjoint, spanning `0x5030ff9c..0x515978dc`.
-  `romimage.py build` now places **all** of them (1,833 sections, no overlaps)
+  `romimage.py build` now places **all** of them (1,847 sections, no overlaps)
   instead of only the kernel and its two direct DLL refs; the boot harness
   registers their text as code.  The ROMFS is a tree, and its directories are
   now located by content: root file `0x30fb28`, `\System` `0x30f230`,
-  `\System\Libs` `0x3000bc` (171 entries) and `\System\Programs` `0x301f70`
-  (**586 entries** in the page-header-free stream; the old "9 valid / tail
-  overwritten" result was the page header).  This gives the boot module
-  table — `ekern.exe` (the kernel, uid3 `0x100058e8`), `ecust.dll`,
-  `ecomm.ldd`, `ramdrive.pdd`, `rtc.dll`, ... — via the new
+  `\System\Libs` `0x301f70` (**586 entries — the ROM's boot image table**,
+  round 19), `\System\Programs` `0x307a14` (55 server entries) and
+  `\System\Libs\Plugins` `0x3000bc` (171 entries).  The old "9 valid Programs
+  entries" and "586 Programs" labels were page-header/naming artifacts.  This
+  gives the boot module table — `ekern.exe` (the kernel, uid3 `0x100058e8`),
+  `ecust.dll`, `ecomm.ldd`, `ramdrive.pdd`, `rtc.dll`, ... — via the new
   `romimage.py names`.  Also fixed: ROMFS **data** files are not stored at
   `addr - 0x50000000`; the old build spliced unrelated code into 17 MB of the
   flat image.  They are packed in FS order (0xff-padded), so `build` no longer
@@ -358,6 +361,27 @@ criteria and phased roadmap live in
   until PC 0; that is a control, not the frontier.  `tools/test_executive.sh`
   pins the table, the stubs and both outcomes.  The old 924k number is kept
   only as a regression baseline.
+- [x] **ROMFS boot table + flat-image import binding (round 19)** — two coupled
+  corrections.  First, the 586-entry directory below the kernel is
+  **`\System\Libs`**, not Programs: the ROM header's
+  `iPrimaryFile`/`iSecondaryFile`/`iVariantFile`/`iExtensionFile` are
+  `TRomEntry` pointers into it and name `ekern.exe`, `EFile.exe`, `ecust.dll`
+  and `rtc.dll`.  An older build overlaid Libs with `\System\Libs\Plugins`
+  (171 entries), so the kernel's boot loader read UTF-16 name bytes as an
+  image header.  The directory block is now copied linearly at its runtime
+  addresses and verified in place; `\System\Programs` is the real 55-entry
+  server list and Plugins is the 171-entry plugin directory.  Second,
+  [`imports.py`](recompiler/imports.py) enumerates **257 kernel import stubs
+  (236 EUser + 21 ELocl)** and proves every slot already holds a code address
+  except **ELocl ordinal 20**, an export-table hole (`0xffffffff`).  A flat
+  image needs no copy for real exports — the slot *is* the exporting image's
+  export entry.  `NK_IMPORTMAP=config/imports-6600.txt` binds the hole to an
+  explicit zero-return stub at load time.  With the fixed ROMFS the kernel now
+  runs the real `rtc.dll` extension path for **8,512 instructions, 0 unbound
+  IAT, 0 undefined**, and stops at the next real blocker: EUser's
+  `RHeap::Alloc` with a null current-thread heap (the kernel overwrote
+  `[0x800017d4]`).  `tools/test_imports.sh` pins the import map, the ROM-header
+  boot entries and the new frontier.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -379,13 +403,16 @@ criteria and phased roadmap live in
   924,964-instruction run is now explained: it was the SWI-table fall-through
   loop, with a `0x4b0` stack leak per iteration.  The direct call gate stops
   earlier (7,540 instructions) at a real missing state: `[0x800017d4]` (the
-  scheduler/current-thread pointer) is zero, and IAT slot `0x5037d0e8` is
-  unbound.  A banked-register model (`NK_BANKED=1`) and mode stacks are
+  scheduler/current-thread pointer) is zero.  Round 19 fixed the ROMFS boot
+  table and the import hole, so the same path now runs the real `rtc.dll`
+  extension load and stops at **EUser `RHeap::Alloc` with a null heap** — the
+  kernel's post-return write to `[0x800017d4]` (`0x802ffd00`) replaces the
+  bring-up object.  A banked-register model (`NK_BANKED=1`) and mode stacks are
   implemented, but the kernel's own stack setup derives its base from boot
-  state we do not have yet.  The next tasks are flat-image import binding, a
-  real initial thread/scheduler object, and the **banked-register/SPSR
-  exception model** (so `svc`, mode switches and `movs pc,lr` are faithful) —
-  not more stack window.
+  state we do not have yet.  The next task is a real initial
+  thread/process/heap object (B7e) plus the **banked-register/SPSR exception
+  model** (so `svc`, mode switches and `movs pc,lr` are faithful) — not more
+  stack window.
 - [ ] **Boot bank board/CPU detection (round 16 stream view)** — after the page
   headers are removed the boot bank is the contiguous stream slice
   `[0xb0, 0x100b0)` and all switch tables measure bias 0.  The **correct**
@@ -393,12 +420,14 @@ criteria and phased roadmap live in
   stops in a deliberate board/CPU detection panic at linked `0x624c`
   (`r5 = 0x0c0047fd`, `r0 = 0x10`).  The old 600k-instruction raw run was
   using the B2 page header as code; it is kept only as a legacy regression.
-- [x] **Packed ROMFS is not truncated (round 16)** — the old "9 valid Programs
-  entries / tail overwritten" result was the page header cutting the directory.
-  The stream parses **586 Programs entries** (`EStart.exe`, `BIGINT.DLL`, all
-  boot DLLs/plugins); `\System\Libs` 171, `\System` 23, `\System\Apps` 63.
-  `build` now places 156 E32Image files and 85 AIF/MBM companions.  The
-  remaining ROMFS work is the `.r01`/`.wav` packed data area (B3g).
+- [x] **Packed ROMFS naming corrected (round 19)** — the 586-entry list below
+  the kernel is `\System\Libs` (the boot image table read by the ROM header),
+  `\System\Programs` is the 55-entry server list and
+  `\System\Libs\Plugins` is the 171-entry plugin directory.  The old
+  "586 Programs / 171 Libs" label came from matching directory contents to the
+  wrong parent names.  `build` places 174 E32Image files and 85 AIF/MBM
+  companions; the remaining ROMFS work is the `.r01`/`.wav` packed data area
+  (B3g).
 - [ ] **Boot continuation** — the real post-entry path (mask ROM → kernel main
   → scheduler) is still unknown.  The direct executive-call run now reaches
   the scheduler/UND-mode frontier; the next step is to supply the initial
@@ -411,9 +440,10 @@ criteria and phased roadmap live in
   the ROMFS directory/files are packed at their own offsets. The ROM header says
   `rom_size = 0x1600000`; file size is `0x1634f5c`. The 2.7 MB high-entropy
   region (`0x10000..0x2a0000`) is the likely packed core.
-- [ ] **Mask ROM** — the reset path at `0x00e00000` (entry `0x00e0ca39`) is in
-  the UPP's internal boot ROM and is not in the flash dump.  Round 11 found the
-  secondary loader entry it calls: **`0x500003bc` → `0x50001648`**, driven by
+- [ ] **Mask ROM** — the UPP's internal boot ROM is not in the dump (the
+  `0x00e0ca39` word at header `+0x84` is `iTime` high, not an entry).
+  Round 11 found the secondary loader entry it calls: **`0x500003bc` →
+  `0x50001648`**, driven by
   the **`KaeP`** descriptor at `0x50000124` (payload `0x130`).  Round 12 showed
   the bank must be **unpacked**, not just copied: it is a concatenation of
   fragments linked for different bases.  `bootbank.py build` +
@@ -492,11 +522,18 @@ tools/test_romimage.sh
 NK_KERNEL_VECTORS=1 ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
   --rom-image out/6600_runtime.bin
 
-# round 7/16: the full image map + the complete boot module table
+# round 7/16/19: the full image map + the complete boot module table
 .venv/bin/python recompiler/romimage.py scan 6600_mcu.bin
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin
 .venv/bin/python recompiler/romimage.py names 6600_mcu.bin --all
-#   725 images placed; ekern.exe -> uid3 0x100058e8; 586 Programs entries
+#   725 images placed; ekern.exe -> uid3 0x100058e8
+#   Libs 586 (boot image table), Programs 55, Plugins 171
+
+# round 19: EKA1 import/IAT map and the one export-table hole
+.venv/bin/python recompiler/imports.py verify 6600_mcu.bin
+.venv/bin/python recompiler/imports.py scan 6600_mcu.bin --image 0x100058e8
+.venv/bin/python recompiler/imports.py map 6600_mcu.bin --json out/imports_map.json
+tools/test_imports.sh
 
 # the S60 app tree (63 app directories, including SnakeEx and MixPix)
 .venv/bin/python recompiler/romimage.py tree 6600_mcu.bin
@@ -594,11 +631,20 @@ tools/test_kaep.sh
 .venv/bin/python recompiler/executive.py list 6600_mcu.bin --used
 .venv/bin/python recompiler/executive.py stubs 6600_mcu.bin --image 0x100039e5
 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
-  NK_IAT_FAKE=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=20000 NK_MMIO_N=0 \
+  NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=20000 NK_MMIO_N=0 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 # ... 7,540 instructions, 0 undefined, stop at the unbound IAT slot 0x5037d0e8
-# add NK_IAT_FAKE=1 for the 8,425-instruction control that corrupts r4
+# round 19: bridge that slot instead of faking it, and fix the ROMFS table
+NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
+  NK_IMPORTMAP=config/imports-6600.txt NK_RECOVER=0 NK_CALL_INFER=0 \
+  NK_BUDGET=200000 NK_MMIO_N=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+# ... 8,512 instructions, 0 unbound IAT, stop at EUser RHeap::Alloc (null heap)
+.venv/bin/python recompiler/imports.py verify 6600_mcu.bin
+tools/test_imports.sh
+# add NK_IAT_FAKE=1 for the 8,510-instruction control that reaches the same heap
 # add NK_BANKED=1 for the banked r13/r14 + SPSR model and per-mode stacks
 tools/test_executive.sh
 

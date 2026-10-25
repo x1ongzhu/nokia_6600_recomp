@@ -44,6 +44,14 @@
  *                           allocated RAM window, at least 0x80400000)
  *   NK_IAT_FAKE=1           unresolved imports return 0 instead of stopping
  *   NK_IAT_LOG=n            log the first n unbound imports (default 16)
+ *   NK_IMPORTMAP=path       bind export-table holes from a file
+ *                           (`<slot> <target|zero>`, see config/imports-6600.txt)
+ *   NK_ALLOC_HLE=1          serve EUser RHeap::Alloc calls from a bump heap
+ *                           (experimental bring-up for the missing current-thread
+ *                           heap; see NK_ALLOC_* below)
+ *   NK_ALLOC_PC=0x...       guest RHeap::Alloc entry (default 0x50380270)
+ *   NK_ALLOC_BASE/END=0x... bump heap range (default: the harness HLE heap)
+ *   NK_ALLOC_LOG=n          log the first n HLE allocations (default 8)
  *   NK_ENTRY_ARM=1          force ARM state (the flat image now takes the mode
  *                           from the E32 entry bit; the real kernel is ARM)
  *   NK_ENTRY_THUMB=1        force Thumb state
@@ -327,9 +335,151 @@ static int load_image(rom_loader_t* L, long hdr, int depth) {
 
 typedef struct {
     uint32_t uid3, entry, code, text, data, dsize, bss, ram, hdr_va;
+    uint32_t edata, exp_count;
 } rom_image_t;
 
 static uint32_t g_kernel_code;
+
+/* ---- flat-image import binding ------------------------------------- *
+ *
+ * A ROM image imports through a two-instruction stub:
+ *     ldr ip, [pc]      ; e59fc000
+ *     ldr pc, [ip]      ; e59cf000
+ *     .word <slot>      ; exporting image's export-table entry
+ *
+ * The slot itself is authoritative: a valid export already holds the bound
+ * code address, so a flat image normally needs no work.  The remaining cases
+ * are export-table holes (`0xffffffff`): 6600's ELocl.dll leaves ordinal 20
+ * unimplemented while the kernel's locale initialiser still calls it.  Such a
+ * slot can only be bound by an explicit bring-up override (NK_IMPORTMAP),
+ * which keeps the workaround visible instead of silently returning 0.
+ */
+
+typedef struct {
+    uint32_t slot, target;
+    int thumb;
+} import_override_t;
+
+#define NK_MAX_IMPORT_OVERRIDES 64
+
+static int load_import_overrides(const char* path, import_override_t* out,
+                                 int max) {
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "cannot open import map %s\n", path); return 0; }
+    char line[256];
+    int n = 0;
+    while (n < max && fgets(line, sizeof line, f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0' || *p == '\n' || *p == '#' ||
+            (p[0] == '/' && p[1] == '/')) continue;
+        char* end = NULL;
+        unsigned long slot = strtoul(p, &end, 0);
+        if (end == p) continue;
+        p = end;
+        while (*p == ' ' || *p == '\t') p++;
+        unsigned long target;
+        if (p[0] == 'z' || p[0] == 'Z') {
+            target = 0xffff0100u;          /* synthesized zero-return stub */
+        } else {
+            target = strtoul(p, &end, 0);
+            if (end == p) continue;
+        }
+        out[n].slot = (uint32_t)slot;
+        out[n].target = (uint32_t)target;
+        out[n].thumb = 0;
+        n++;
+    }
+    fclose(f);
+    printf("import map %s: %d slot overrides\n", path, n);
+    return n;
+}
+
+static int flat_has_override(const import_override_t* ov, int n, uint32_t slot,
+                             uint32_t* target) {
+    for (int i = 0; i < n; i++) {
+        if (ov[i].slot == slot) { *target = ov[i].target; return 1; }
+    }
+    return 0;
+}
+
+/* Does `v` point at executable code in the flat image?  Both ROM images and
+ * the synthesized high-vector stub page count. */
+static int flat_in_code(const rom_image_t* imgs, int nimg, uint32_t v) {
+    v &= ~1u;
+    for (int i = 0; i < nimg; i++)
+        if (v >= imgs[i].code && v < imgs[i].code + imgs[i].text) return 1;
+    if (v >= NK_HIGH_VECTORS && v < NK_HIGH_VECTORS + 0x10000u) return 1;
+    return 0;
+}
+
+static int flat_slot_owner(const rom_image_t* imgs, int nimg, uint32_t slot,
+                           uint32_t* uid3, uint32_t* ordinal) {
+    for (int i = 0; i < nimg; i++) {
+        if (imgs[i].edata && slot >= imgs[i].edata &&
+            slot < imgs[i].edata + imgs[i].exp_count * 4u) {
+            *uid3 = imgs[i].uid3;
+            *ordinal = (slot - imgs[i].edata) / 4u;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,
+                              const rom_image_t* imgs, int nimg,
+                              const uint8_t* flat, long len) {
+    import_override_t ov[NK_MAX_IMPORT_OVERRIDES];
+    int nov = 0;
+    const char* map = getenv("NK_IMPORTMAP");
+    if (map) nov = load_import_overrides(map, ov, NK_MAX_IMPORT_OVERRIDES);
+    int zero_stub = 0;
+    int total = 0, bound = 0, patched = 0, unresolved = 0, logged = 0;
+
+    for (int i = 0; i < nimg; i++) {
+        uint32_t code = imgs[i].code, size = imgs[i].text;
+        if (code < NK_FLASH_BASE || code + size > NK_FLASH_BASE + (uint32_t)len)
+            continue;
+        const uint8_t* t = flat + (code - NK_FLASH_BASE);
+        for (uint32_t o = 0; o + 12 <= size; o += 4) {
+            uint32_t w0 = u32(t + o), w1 = u32(t + o + 4);
+            if (w1 != 0xe59cf000u || (w0 & 0xfffff000u) != 0xe59fc000u)
+                continue;
+            uint32_t slot = u32(t + o + 8 + (w0 & 0xfffu));
+            uint32_t owner, ord;
+            if (!flat_slot_owner(imgs, nimg, slot, &owner, &ord)) continue;
+            total++;
+            uint32_t v = nk_r32(cpu, slot);
+            if (flat_in_code(imgs, nimg, v)) { bound++; continue; }
+            uint32_t target;
+            if (flat_has_override(ov, nov, slot, &target)) {
+                if (target == 0xffff0100u && !zero_stub) {
+                    /* mov r0,#0 ; bx lr */
+                    nk_w32(cpu, target, 0xe3a00000u);
+                    nk_w32(cpu, target + 4, 0xe12fff1eu);
+                    nk_code_range_add(ip, target, target + 8);
+                    zero_stub = 1;
+                }
+                nk_w32(cpu, slot, target);
+                patched++;
+                if (patched <= 8)
+                    printf("  import bind: %#010x (uid %#010x ord %u) "
+                           "%#010x -> %#010x\n", slot, owner, ord, v, target);
+            } else {
+                unresolved++;
+                if (logged++ < 12)
+                    printf("  import unresolved: slot %#010x (uid %#010x "
+                           "ord %u) = %#010x, stub %#010x\n",
+                           slot, owner, ord, v, code + o);
+            }
+        }
+    }
+    printf("imports: %d stubs (%d bound, %d patched, %d unresolved)\n",
+           total, bound, patched, unresolved);
+    if (unresolved)
+        printf("  hint: NK_IMPORTMAP=config/imports-6600.txt binds export-table "
+               "holes for bring-up\n");
+}
 
 static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
                                   const uint8_t* img, long len, int verbose) {
@@ -362,6 +512,8 @@ static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
         rom_image_t* ri = &images[nimg++];
         ri->uid3 = uid3; ri->entry = entry; ri->code = code; ri->text = tsize;
         ri->data = data; ri->dsize = dsize; ri->bss = bss; ri->ram = ram;
+        ri->edata = u32(p + 0x40);
+        ri->exp_count = u32(p + 0x3c);
         ri->hdr_va = h;
         /* Copy .data/.bss into RAM only for images whose RAM window is the
          * 6600 kernel window.  Other images carry placeholder bases such as
@@ -411,6 +563,12 @@ static uint32_t rom_image_prepare(nk_cpu_t* cpu, nk_interp_t* ip,
                 ranges++;
         }
     }
+
+    /* Resolve the import stubs of the images that are actually executable.
+     * A flat image already has every real export bound; only export-table
+     * holes need the explicit NK_IMPORTMAP override. */
+    if (ip)
+        bind_flat_imports(cpu, ip, images, nimg, img, len);
     if (verbose)
         printf("runtime image: %d images, %d code ranges"
                " (NK_RANGE_ALL=1 to accept every image)\n", nimg, ranges);
@@ -641,16 +799,27 @@ int main(int argc, char** argv) {
     if (getenv("NK_FAKE_THREAD")) {
         uint32_t obj = 0x80003000u, vt = 0x80003040u;
         uint32_t obj2 = 0x80003100u, vt2 = 0x80003140u;
+        /* The kernel's operator new reads the current thread's process
+         * ([thread+0x18]) and that process's heap ([process+0x38]); the
+         * 0x40000000 branch uses [thread+0x64] directly.  Give both paths a
+         * non-null heap object so NK_ALLOC_HLE can serve the allocation. */
+        uint32_t proc = 0x80003200u;
+        uint32_t heap = 0x80003300u;
         nk_w32(&cpu, 0x800017d4u, obj);
         nk_w32(&cpu, obj, vt);
         nk_w32(&cpu, obj + 0x14, 1);
-        nk_w32(&cpu, obj + 0x5c, obj2);         /* thread-local object */
+        nk_w32(&cpu, obj + 0x18, proc);          /* thread -> process */
+        nk_w32(&cpu, obj + 0x5c, obj2);          /* thread-local object */
+        nk_w32(&cpu, obj + 0x64, heap);          /* kernel-heap path */
+        nk_w32(&cpu, proc + 0x38, heap);         /* process -> heap */
+        nk_w32(&cpu, heap + 0x14, 1);            /* element size */
         nk_w32(&cpu, vt + 0x20, 0x50312e90u);  /* mov r0,#0; bx lr */
         nk_w32(&cpu, obj2, vt2);
         nk_w32(&cpu, vt2 + 0x20, 0x50312e90u);
         nk_w32(&cpu, vt2 + 0x28, 0x50312e90u);
-        printf("fake current thread: [%#010x] = %#010x, vtable %#010x\n",
-               0x800017d4u, obj, vt);
+        printf("fake current thread: [%#010x] = %#010x, vtable %#010x, "
+               "process %#010x, heap %#010x\n",
+               0x800017d4u, obj, vt, proc, heap);
     }
 
     const char* sp_env = getenv("NK_SP");
@@ -738,6 +907,19 @@ int main(int argc, char** argv) {
     ip.hle_heap = (uint32_t)env_ulong("NK_HLE_HEAP", hle_heap);
     ip.hle_heap_end = (uint32_t)env_ulong("NK_HLE_HEAP_END",
                                           (unsigned long)hle_heap + 0x400000u);
+    /* Bring-up RHeap::Alloc: the scheduler startup that would create the
+     * current thread's heap is skipped by a direct E32-entry boot.  Serve
+     * allocations from the harness heap and log the first few. */
+    if (env_ulong("NK_ALLOC_HLE", 0)) {
+        ip.alloc_hle = 1;
+        ip.alloc_pc = (uint32_t)env_ulong("NK_ALLOC_PC", 0x50380270u);
+        ip.alloc_cur = (uint32_t)env_ulong("NK_ALLOC_BASE", hle_heap);
+        ip.alloc_end = (uint32_t)env_ulong(
+            "NK_ALLOC_END", (unsigned long)hle_heap + 0x400000u);
+        ip.alloc_log = (int)env_ulong("NK_ALLOC_LOG", 8);
+        printf("HLE allocator: bump heap %#010x..%#010x, RHeap::Alloc at %#010x\n",
+               ip.alloc_cur, ip.alloc_end, ip.alloc_pc);
+    }
     if (getenv("NK_TRACE")) ip.trace = 1;
     ip.trace_limit = (long)env_ulong("NK_TRACE_N", 64);
     ip.trace_from = (uint32_t)env_ulong("NK_TRACE_FROM", 0);

@@ -113,22 +113,24 @@ fi
 echo "ok: direct SWI path executed $insns instructions, 0 undefined,"
 echo "    stop at the unbound IAT (slot 0x5037d0e8)"
 
-echo "== control: faking the IAT return exposes the next corruption"
+echo "== control: faking the IAT return exposes the next frontier"
 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \
 NK_IAT_FAKE=1 NK_IAT_LOG=8 NK_RECOVER=0 NK_CALL_INFER=0 \
-NK_BUDGET=20000 NK_MMIO_N=0 NK_SWI_LOG=0 \
+NK_BUDGET=200000 NK_MMIO_N=0 NK_SWI_LOG=0 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin >out/executive_iat_fake.log 2>&1
 grep -q "^--- stop: pc left the image (5) at 0000000000 ---" out/executive_iat_fake.log
-grep -q "cpsr=0x600000db" out/executive_iat_fake.log
-grep -q "sp=0x802ffc7c" out/executive_iat_fake.log
+grep -q "cpsr=0x000000db" out/executive_iat_fake.log
+grep -q "sp=0x802ffc2c" out/executive_iat_fake.log
+grep -q "lr=0x503802ac" out/executive_iat_fake.log
 finsns=$(sed -n 's/^insns=\([0-9][0-9]*\).*/\1/p' out/executive_iat_fake.log)
 if [ -z "$finsns" ] || [ "$finsns" -lt 8000 ]; then
     echo "FAIL: fake-IAT run only reached ${finsns:-0} instructions" >&2
     tail -20 out/executive_iat_fake.log >&2
     exit 1
 fi
-echo "ok: fake IAT return runs $finsns instructions, then r4=0x00730072 -> PC 0"
+echo "ok: fake IAT return runs $finsns instructions, then EUser RHeap::Alloc"
+echo "    (0x50380270) dereferences the missing current-thread heap"
 
 echo "== banked-register model reaches the same unbound-IAT frontier"
 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 NK_FAKE_THREAD=1 NK_SWI_COMPLETE=0x4d \

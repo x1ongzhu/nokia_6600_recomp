@@ -38,8 +38,11 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   ROMFS directory block; `tree` recovers the S60 app tree by content
   (`\System\Apps` has 63/63 app directories, including `snakeex`/`mixpix`);
   `names` prints the boot-module table and now validates every `TRomDir`
-  entry (ASCII name, address in the ROM window, sane size) and reports the
-  truncated `\System\Programs` tail instead of inventing entries; `calls`
+  entry (ASCII name, address in the ROM window, sane size).  Round 19 fixed
+  the naming and placement: the packed directory block sits at its runtime
+  VAs when read linearly from the root list; the 586-entry directory is
+  `\System\Libs` (the ROM header's boot image table), `\System\Programs` has
+  55 entries and `\System\Libs\Plugins` 171.  `calls`
   classifies every direct ARM `BL` by how far its target is biased into the
   callee.  `build --patch FILE` applies bring-up text repairs
   (`<va> <hex bytes>` per line) and records them in the layout JSON;
@@ -126,8 +129,19 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   `analyze` reports the grid and kernel record, `verify` pins the 852 headers
   and the kernel header/text/entry (`+0x64`, ARM `push`, vector table).
   Without this step the kernel's 478 exports only score 17.2% on function
-  starts; with it they score **469/478 (98.1%)**, and `\System\Programs` has
-  all **586** entries.  `../tools/test_pagestream.sh` is the acceptance test.
+  starts; with it they score **469/478 (98.1%)**, and the 586-entry
+  `\System\Libs` boot table is intact (round 19).  `../tools/test_pagestream.sh`
+  is the acceptance test.
+- **`imports.py`** — the EKA1 import/IAT map.  An import stub is
+  `ldr ip,[pc]; ldr pc,[ip]` and its literal is the **exporting image's
+  export-table entry**; a flat image already has every real export bound there.
+  `scan` enumerates every stub and classifies its slot (bound / missing export
+  / null / outside), `map --json` writes the table and `verify` pins the
+  kernel's 257 stubs (236 EUser + 21 ELocl) and the single hole, ELocl ordinal
+  20 (`0x5037d0e8 = 0xffffffff`).  The runtime binds that hole through
+  `NK_IMPORTMAP` (`config/imports-6600.txt`); `../tools/test_imports.sh` also
+  checks that the ROM header's primary/secondary/variant/extension entries
+  resolve to `ekern.exe`/`EFile.exe`/`ecust.dll`/`rtc.dll` in `\System\Libs`.
 - **`kaep.py`** — unpack the KaeP/PeaK boot container (`0x124`: magic, record
   size `0x20`, image size `0x1423dc`) and measure the page grid.  `unpack`
   extracts the 0x20-byte record at `0x12e` and the 0x1423dc-byte image at

@@ -51,7 +51,7 @@ The image recovered from `NHL105530.C1` tells us the important addresses:
 | kernel data / RAM | `0x80000000` .. `0x80300000` | 3 MiB, from the ROM header |
 | pre-MMU physical RAM | `0x00000000` .. `0x00300000` | bring-up alias: the early entry's literal pools contain physical data offsets (`0x0004_6564`) before the MMU remaps RAM to `0x80000000`; `NK_NO_LOW_RAM=1` disables it |
 | high vectors | `0xffff0000` | ARM exception vectors after MMU setup |
-| mask ROM | `0x00e00000` | **not in the flash dump**; entry `0x00e0ca39` |
+| mask ROM | `0x00e00000` | **not in the flash dump**; the `0x00e0ca39` word at header `+0x84` is `iTime` high, not an entry |
 | UPP MMIO | outside the above | display/keypad/timers/DSP, stubbed first |
 
 `runtime/include/nokia_cpu.h` models this as a **sparse 64 KiB page map**, not
@@ -77,9 +77,14 @@ the user-side kernel API as single-instruction `svc #N` stubs, and
 decodes and verifies that 273-entry table (270 code targets, four zero slots).
 The mode is a bring-up model, not the real SVC exception: the interpreter
 still lacks banked registers, SPSR and a faithful exception return, which is
-the next CPU-model task.  The run also exposed two loader gaps: the initial
-scheduler/current-thread object (`[0x800017d4]`) and flat-image import binding
-(IAT slot `0x5037d0e8` is `0xffffffff`).
+the next CPU-model task.  Round 19 closed the import gap:
+`recompiler/imports.py` proves the kernel's 257 stubs (236 EUser + 21 ELocl)
+have exactly one hole, ELocl ordinal 20 (`0x5037d0e8 = 0xffffffff`), and
+`NK_IMPORTMAP` bridges it explicitly.  The remaining loader gap is the initial
+scheduler/current-thread/process/heap object (`[0x800017d4]`), which the kernel
+overwrites during startup; `RHeap::Alloc` (`0x50380270`) then sees a null heap.
+Rounding out the ROMFS: the 586-entry directory below the kernel is
+`\System\Libs` (the ROM header's boot image table), not Programs.
 
 The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
 (first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.

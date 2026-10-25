@@ -274,7 +274,8 @@ def cmd_extract(a):
     hdr = parse_rom_header(rom)
     print(f"container header {off:#x}; ROM {len(rom):#x} bytes -> {a.output}")
     print(f"  base {hdr['rom_base']:#x}  size {hdr['rom_size']:#x}  "
-          f"entry(mask ROM) {hdr['entry']:#x}")
+          f"header {hdr['header_offset']:#x} (iTimeHi {hdr['entry']:#x}; "
+          f"the mask-ROM entry is not in flash)")
 
 
 def load_any(path):

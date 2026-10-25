@@ -49,22 +49,28 @@ at container offset **0x10b** in v5.53.0 and slices from there.  The result is a
 
 | ROM offset | field | 6600 v5.53.0 |
 |---|---|---|
-| +0x7c | EKA1 ROM header start | — |
-| +0x80 | checksum | `0x91f6bc80` |
-| +0x84 | mask-ROM entry | `0x00e0ca39` (Thumb) |
-| +0x88 | ROM link base | `0x50000000` |
-| +0x8c | ROM size | `0x01600000` (22 MiB; the file is 23.3 MB because the flash is packed) |
-| +0x90 | ROMFS root-list pointer | `0x50300000` (runtime VA; raw packed offset `0x3162b0`, page-header-free stream offset `0x3000b0`) |
-| +0x94 | kernel data base | `0x80000000` |
-| +0x98 | kernel data limit | `0x80300000` |
-| +0x9c | primary file entry | `0x50301ec4` |
-| +0xa0 | secondary file entry | `0x50302148` |
-| +0xa4 | second checksum | `0x8fc16051` |
+| +0x7c | `TRomHeader` start (`iRestartVector`) | `0` |
+| +0x80 | `iTime` low / high (build timestamp, microseconds) | `0x00e0ca39_91f6bc80` |
+| +0x88 | `iRomBase` | `0x50000000` |
+| +0x8c | `iRomSize` | `0x01600000` (22 MiB; the file is 23.3 MB because the flash is packed) |
+| +0x90 | `iRomRootDirectoryList` | `0x50300000` (runtime VA; page-header-free stream offset `0x3000b0`) |
+| +0x94 | `iKernDataAddress` | `0x80000000` |
+| +0x98 | `iKernelLimit` | `0x80300000` |
+| +0x9c | `iPrimaryFile` | `0x50301ec4` → `\System\Libs\ekern.exe` |
+| +0xa0 | `iSecondaryFile` | `0x50302148` → `\System\Libs\EFile.exe` |
+| +0xa4 | `iCheckSum` | `0x8fc16051` |
+| +0xa8 | `iHardware` | `0` |
+| +0xac / +0xb0 | `iLanguage` | `0` |
+| +0xb4 | `iKernelConfigFlags` | `0` |
+| +0xc4 | `iTotalSvDataSize` | `0xc70a0` |
+| +0xc8 | `iVariantFile` | `0x50301ee0` → `\System\Libs\ecust.dll` |
+| +0xcc | `iExtensionFile` | `0x50301f3c` → `\System\Libs\rtc.dll` |
 
-The **mask-ROM entry** `0x00e0ca39` is in the UPP's internal boot ROM, which is
-not part of the flash dump.  The ROM image itself is linked at
-**0x50000000**; its first eight words are exception vectors, and the ROM file
-system is appended after a **0x162b0-byte** header/kernel area.
+The four primary/secondary/variant/extension fields are `TRomEntry` pointers,
+not image headers: `iPrimaryFile = 0x50301ec4` is the first entry of the
+586-entry `\System\Libs` directory (round 19).  The 64-bit `iTime` high word
+(`0xe0ca39`) is *not* the mask-ROM entry; the UPP boot ROM entry comes from the
+ASIC/BSP, not from this header.
 
 ## Kernel
 
@@ -196,9 +202,11 @@ page-header-free packed stream:
 0x503397b4..0x515978dc   725 packed images          (all records, disjoint)
 ```
 
-The output is `out/6600_runtime.bin` (exactly `0x1600000` bytes); 1,833 placed
+The output is `out/6600_runtime.bin` (exactly `0x1600000` bytes); 1,847 placed
 sections do not overlap (`romimage.py build --only-reachable` keeps the old
-3-image behaviour).  The 0x34f5c bytes at the end of the original file are a
+3-image behaviour).  `romimage.py build` now copies the packed directory block
+at its runtime VAs (Libs 586 / Programs 55 / Plugins 171) instead of overlaying
+directories.  The 0x34f5c bytes at the end of the original file are a
 trailer, not ROM content.
 
 Two sections are still unplaced because no header describes them: the kernel's
@@ -285,12 +293,12 @@ py recompiler/romimage.py names 6600_mcu.bin
     dir  \System      @ 0x5030f180
     dir  \Nokia       @ 0x5030fa54
   \System: file 0x30f230, 23 entries
-    dir  \System\Programs @ 0x50307964
     dir  \System\Libs     @ 0x50301ec0
+    dir  \System\Programs @ 0x50307964
     ...
-  \System\Programs: file 0x301f70, 586 entries
-    file \System\Programs\ekern.exe  0x02974c @ 0x5030ff9c  -> uid3 0x100058e8
-    file \System\Programs\ecust.dll  0x002320 @ 0x50339750  -> uid3 0x100058e7
+  \System\Libs: file 0x301f70, 586 entries
+    file \System\Libs\ekern.exe  0x02974c @ 0x5030ff9c  -> uid3 0x100058e8
+    file \System\Libs\ecust.dll  0x002320 @ 0x50339750  -> uid3 0x100058e7
     ...
 ```
 
@@ -299,17 +307,23 @@ records, 4-byte aligned.  The `attr & 0x10` bit marks a subdirectory; its
 `addr_lin` is the runtime address of another `TRomDir`, so the tree can be
 walked.  `iSize` is the number of bytes after the 4-byte size word.
 
-The packed block below the kernel contains the whole directory tree.  It is
-not ordered by runtime address, so the tree is recovered by content:
-`\System\Apps` is the only directory whose entries are all subdirectories,
-and each app directory is the small directory holding `<App>.app`.  All
-**63** app directories resolve, including `snakeex` (`SnakeEx.app`, `0x7ddc`)
-and `mixpix` (`mixpix.app`, `0xd718`).  `romimage.py build` copies 156
-E32Image files (63 `.app` plus plugin/driver files) from their packed file
-records to the runtime addresses given by the directory entries, and locates
-85 AIF/MBM companions by their UID headers in the same packed runs.
-`\System\Programs` is complete: the packed stream has **586 entries**, not the
-9 the raw view saw (the page header used to cut the directory).  The remaining
+The packed block below the kernel contains the whole directory tree.  Round 19
+corrected its naming: the large 586-entry directory is **`\System\Libs`** (the
+kernel's boot image table), `\System\Programs` is the 55-entry server list and
+the 171-entry `AcmClassController.dll` list is `\System\Libs\Plugins`.  The
+block is stored at the directories' runtime VAs when read linearly from the
+root list; no per-directory relocation is needed.  The ROM header's
+`iPrimaryFile`/`iSecondaryFile`/`iVariantFile`/`iExtensionFile` are `TRomEntry`
+pointers into `\System\Libs` and name `ekern.exe`, `EFile.exe`, `ecust.dll`
+and `rtc.dll`.
+
+`\System\Apps` is the only directory whose entries are all subdirectories, and
+each app directory is the small directory holding `<App>.app`.  All **63** app
+directories resolve, including `snakeex` (`SnakeEx.app`, `0x7ddc`) and
+`mixpix` (`mixpix.app`, `0xd718`).  `romimage.py build` copies 174 E32Image
+files (63 `.app` plus plugin/driver files) from their packed file records to
+the runtime addresses given by the directory entries, and locates 85 AIF/MBM
+companions by their UID headers in the same packed runs.  The remaining
 `.r01`/`.wav` data files are still packed in FS order (B3g).
 
 | structure | packed stream | runtime VA | entries |
@@ -317,15 +331,16 @@ records to the runtime addresses given by the directory entries, and locates
 | root list | `0x3000b0` | `0x50300000` | 1 |
 | root dir | `0x30fb28` | `0x5030fa78` | 2 |
 | `\System` | `0x30f230` | `0x5030f180` | 23 |
-| `\System\Libs` | `0x3000bc` | `0x50301ec0` | 171 |
-| `\System\Programs` | `0x301f70` | `0x50307964` | **586** |
+| `\System\Libs` | `0x301f70` | `0x50301ec0` | **586** (boot image table) |
+| `\System\Programs` | `0x307a14` | `0x50307964` | 55 |
+| `\System\Libs\Plugins` | `0x3000bc` | `0x5030000c` | 171 |
 | `\System\Apps` | `0x30e198` | `0x5030e0e8` | 63 dirs |
 
-The stored `addr_lin` values are *final-layout* addresses, while the packed
-bytes were written after the ROM build removed alignment gaps, so a single
-`file = va - 0x50000000` bias does **not** map the tree.  `romimage.py` locates
-each directory by its content (the set of names it contains, and the first
-entry name) inside the packed block and places it at its stored VA.
+The stored `addr_lin` values are final-layout addresses and match the linear
+mapping from the root list for this build (round 19 verified every `\System`
+subdirectory in place).  `romimage.py` still locates directories by content
+(first entry plus required names), so a differently packed view can be
+relocated with a warning.
 
 The entry `addr_lin` values are **not** file offsets either:
 

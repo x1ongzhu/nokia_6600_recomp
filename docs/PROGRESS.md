@@ -15,7 +15,7 @@
 | Kernel | 链接地址 `0x50310000`，入口 `0x50310054`（**ARM**，`push {r4,r5,r6,lr}` / `0xe92d4070`）；page-header-free stream 中 header `0x31004c`、text `0x3100b0`、text_size `0x28ac0` |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像现在放置 **725 个 image / 1,833 个 section**（无重叠），并放入 156 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表 |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel super page `0x7ff00000..0x80000000`（round 16）、high vectors `0xffff0000`、MMIO bus；扁平镜像放置 **725 个 image / 1,847 个 section**（无重叠），并放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole（round 19） |
 | 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP`/PeaK 容器（record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`）已由 `kaep.py unpack` 导出；`install` 在 linked `0x80` 写可执行 handoff，loader 可进入 kernel `0x50310054`；mask ROM 的 record codec 仍未解出（B6a2d2b） |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）、**EKA1 executive call gate**（`NK_SWI_DIRECT`，round 18）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
@@ -35,7 +35,8 @@
 > - `\System\Programs` 的“9 项 / tail 被覆盖”也是 page header 截断目录。
 >
 > 去 header 后 kernel 入口是 **ARM**，真实运行 **924,964 条指令**；478 个
-> export 有 **469 个（98.1%）** 命中函数起点，Programs 完整 **586 项**。
+> export 有 **469 个（98.1%）** 命中函数起点，页面头去除后 586 项目录是
+> `\System\Libs`（round 19 修正；`\System\Programs` 为 55 项）。
 > 旧结论保留在本文件作为历史，但不要再作为当前 frontier 使用。详见 §2 M25
 > 和 [`BOOT.md`](BOOT.md) 的 Round 16。
 
@@ -74,6 +75,7 @@
 
 | M26 | **第 17 轮：KaeP/PeaK 容器解包；handoff 可执行并进入 kernel** | (1) **头/记录/镜像边界**：`0x124` 的 magic 是 little-endian `0x5065614B`（Nokia 的 **PeaK** 标记），后接 `u32 record_size=0x20`、`u32 image_size=0x1423dc`。0x20 字节 record 从 file **`0x12e`** 开始（其首个半字与 image-size 的高半字重叠，是打包时的 overlay），image 从 **`0x14e`** 开始，首字是干净的 ARM vector table `e59ff018`；image `+0x38`（file `0x186`）是真实 ARM `e59f11a0`，到 `0x14252a` 结束。 (2) **工具**：`kaep.py unpack` 逐字节导出 `out/6600_kaep_record.bin` 与 `out/6600_kaep_image.bin`（含 SHA-256）；`kaep.py install` 在 linked `0x80` 写入 `ldr pc,[pc,#-4]; .word 0x50310054`，保留 loader 需要的 `+0xc/+0x14/+0x1c/+0x20/...` 字段和 `0xfd00→0xfd10` 的 head→node→terminator 链。 (3) **handoff 可执行**：此前去掉 `NK_STOP_PC` 会在 `0x80` 执行 record 字节（`SWI 0xf9ea00`）；现在进入 **kernel entry `0x50310054`**，1.5M budget 下执行 **1,499,999 条 ARM 指令、0 undefined、1 次 stale-call recovery**，结束于 kernel 代码区 `0x5039...`。`bootbringup.py` 不再 patch `0xfb8` 的 parser。 (4) **剩余**：mask ROM 对 0x20 字节 record 的 codec 仍未解出；`unpack` 保留原始 record，`install` 是显式的 handoff stand-in，不是 record 解密。`0x3ae8 → 0x5bb4` stale call 仍在。验收：`tools/test_kaep.sh`、`tools/test_bootbringup.sh` |
 | M27 | **第 18 轮：SWI 不是 no-op —— EKA1 executive call gate 与真实 frontier** | (1) **924k 运行的真正原因**：EUser.dll 的用户侧 kernel API 是一张密集的 `svc #N` stub 表（`0x50392b00..0x50392dc8`）。解释器只打印 SWI 后继续执行，于是从 stub 进入后会**穿过整张表**，落到表后的真实函数 `0x50392dcc`，并进入每轮泄漏 **`0x4b0` 栈**的循环；`0x5039b2b8` 的 `lr=0` 是栈下穿后的症状，不是“kernel stack/super-page frontier”。 (2) **executive 表可读**：kernel SVC handler 在 `0x50314f30`，其 bound literal `[0x50314f7c] = 0x444`，即 **273 项**服务表 `0x50314aec`；269 项是 kernel text 内的代码地址，4 项为零（`0x8a/0x94/0x95/0x96`）。新增 [`executive.py`](../recompiler/executive.py)：`verify` 固定 handler/table/zero slots，`list --used` 统计每个服务的调用点，`stubs` 把所有 image 的 ARM/Thumb SVC stub 映射回服务地址。EUser 的 `0x68 -> 0x5032541c`、`0x4d -> 0x503244e4` 已验证。 (3) **direct call gate**：解释器新增 `NK_SWI_DIRECT=1`，按 EKA1 约定把 `svc #N` 直接派发到 `table[N & 0x1ff]`，并保留 caller 的 LR（stub 是 call gate，不是 SWI 后的继续执行）；这不是完整异常模型，是显式 bring-up 手段。 (4) **新 frontier**：直接派发暴露了两个真实缺口：scheduler/current-thread 全局 `[0x800017d4]` 为 0（直接跑 E32 entry 跳过了 mask ROM/kernel startup 创建初始线程的步骤），以及 IAT slot `0x5037d0e8 = 0xffffffff`（flat image 没有绑定 import）。用 `NK_FAKE_THREAD` 的最小对象 + `NK_SWI_COMPLETE=0x4d` 的“请求立即完成”stand-in 后，kernel 执行 **7,540 条指令、0 undefined**，停在 **unbound IAT slot `0x5037d0e8`**（`sp=0x802fff08`、`cpsr=0x800000d3`）。`NK_IAT_FAKE=1` 的对照跑 8,425 条后因 `r4=0x00730072` 跳到 PC 0，这不是 frontier。这比 924k 早，但第一次走在真实路径上；旧的 924k 只保留为回归基线。 (5) **IAT 检测修正**：import stub 的 slot 值不再只按 `<0x1000` 判定；`0xffffffff` 或任何不在 code range 内的值都按 unbound import 处理，`NK_IAT_FAKE=1` 可显式返回 0。 (6) **第二个解码 bug**：multiply 判定只看 bits 7-4=1001，导致 `sub sp,sp,#0x258` 被执行成 MUL 并清零 SP；现在同时要求 bits 27-22=000000，`interp_selftest` 固定。`NK_BANKED=1` 的 banked/SPSR 模型也已实现（模式栈可由 harness 预置），但 kernel 自己的 mode-stack setup 依赖缺失的 boot state，所以下一缺口仍是 boot descriptor。验收：`tools/test_executive.sh` |
+| M28 | **第 19 轮：ROMFS 启动表命名修正；import/IAT 全表；真实 rtc.dll extension 路径** | (1) **`\System\Libs` 不是 Programs**：kernel 下方 586 项目录是 **Libs**，ROM header 的 `iPrimaryFile/iSecondaryFile/iVariantFile/iExtensionFile`（`0x5000009c/0xa0/0xc8/0xcc`）就是指向它的 `TRomEntry`：`ekern.exe`、`EFile.exe`、`ecust.dll`、`rtc.dll`。旧 build 把 171 项 `Plugins` 内容覆盖到 Libs 的 VA `0x50301ec0`，破坏这些 entry，kernel loader 在 `0x5031eae0` 把 UTF-16 文件名当成 `TRomImageHeader`（`[r3+4]`）。现在 packed 目录块按线性 runtime VA 放置并逐目录校验；`\System\Programs` 是真正的 **55** 项 server 列表，`\System\Libs\Plugins` 是 **171** 项。 (2) **import map**：新增 [`imports.py`](../recompiler/imports.py)。EKA1 import stub 是 `ldr ip,[pc]; ldr pc,[ip]`，slot 就是导出 image 的 `.edata` entry；flat image 的合法 export 已经是绑定地址，无需搬运。全镜像 **1,111** 个可解析 stub；kernel **257** 个（236 EUser + 21 ELocl），唯一未绑定的是 **ELocl ord 20**（export table hole `0xffffffff`），由 locale 初始化 `0x50326078` 无条件调用。 (3) **`NK_IMPORTMAP`**：flat loader 扫描 stub，校验 slot→(uid,ordinal,value)，对 hole 应用 `config/imports-6600.txt`；`zero` 生成 high-vector `mov r0,#0; bx lr` code stub 并登记 code range。 (4) **IAT 判定修正**：slot 值 `<0xffff0000` 但属于已登记 code range（如 high-vector stub）现在是合法绑定。 (5) **新 frontier**：修正 ROMFS 后，kernel 走真实 `rtc.dll` extension 路径，**8,512 条指令、0 unbound IAT、0 undefined**，停在 EUser `RHeap::Alloc`（`0x50380270`）：kernel 把 `[0x800017d4]` 写成了 `0x802ffd00`，thread/process/heap 对象不再是 harness 预置值，`[heap+0x18]` 为 0 → `bx ip` 到 0。这是 **B7e 初始 thread/process/heap** 缺口，不再是 import/layout 问题。验收：`tools/test_imports.sh`；全部 13 个测试通过 |
 
 ### 可复现命令
 
@@ -210,7 +212,7 @@ tools/test_executive.sh
 | `0x80000000` | kernel data / RAM 基址 |
 | `0x80300000` | kernel data limit |
 | `0xffff0000` | high vectors（MMU 打开后） |
-| `0x00e0ca39` | UPP mask ROM 入口（不在 flash dump 中） |
+| `0x00e0ca39` | 旧文档标为 UPP mask ROM 入口；round 19 证明它是 `TRomHeader.iTime` 的高半字（`0x80` 起的 64-bit 时间戳），真正的 mask-ROM 入口不在 flash dump 中 |
 | `0x3268c0` | kernel `TRomImageHeader` 的 packed 文件偏移 |
 | `0x5030ff9c` | kernel header 在扁平 runtime image 中的地址（`code - 0x64`） |
 | `0x31004c` | kernel header 在 **page-header-free packed stream** 中的偏移 |
@@ -224,12 +226,19 @@ tools/test_executive.sh
 | `0x0000782c` | 同一张表的 packed file 偏移（= linked `0x74b8` + `0x374`） |
 | `0x00000fb8` | KaeP compressed-image parser；第 15 轮 stand-in 用 `mov pc,lr` 跳过 |
 | `0x5030ff9c` / `0x34f3e4` | 扁平 image 里 kernel header 的位置 / packed 文件里 header 之后那个 header 未描述的 rodata 块（0x135c） |
-| `0x32639c` | packed **root directory**（2 项：`\System`、`\Nokia`），运行时 VA `0x5030fa78` |
-| `0x325aa4` | packed **`\System` directory**（23 项），运行时 VA `0x5030f180` |
-| `0x3162bc` | packed **`\System\Libs` directory**（171 项），运行时 VA `0x50301ec0` |
-| `0x318170` | raw packed **`\System\Programs` directory**；第 16 轮在 stream 中完整解析 **586 项**（旧“9 项 / tail 被覆盖”是 page header 截断）。stream 偏移 `0x301f70`；运行时 VA `0x50307964`；`ekern.exe` 的 ROMFS entry 指到 `0x5030ff9c` |
+| `0x30fb28` | packed **root directory**（2 项：`\System`、`\Nokia`），运行时 VA `0x5030fa78`（round 19 修正 stream 偏移） |
+| `0x30f230` | packed **`\System` directory**（23 项），运行时 VA `0x5030f180` |
+| `0x301f70` | packed **`\System\Libs` directory**（**586** 项），运行时 VA `0x50301ec0`。这是 ROM 的 **boot image table**：ROM header 的 `iPrimaryFile`/`iSecondaryFile`/`iVariantFile`/`iExtensionFile` 指向其中的 `ekern.exe`/`EFile.exe`/`ecust.dll`/`rtc.dll` entry（round 19） |
+| `0x307a14` | packed **`\System\Programs` directory**（**55** 项：BTTestServer、PhoneServer、SharedDataServer 等），运行时 VA `0x50307964`（round 19） |
+| `0x3000bc` | packed **`\System\Libs\Plugins` directory**（**171** 项：AcmClassController.dll 等），运行时 VA `0x5030000c`（round 19；旧文档误标为 Libs） |
+| `0x5000009c` / `0xa0` / `0xc8` / `0xcc` | `TRomHeader` 的 primary/secondary/variant/extension **TRomEntry 指针**，分别指向 Libs 中的 `ekern.exe` / `EFile.exe` / `ecust.dll` / `rtc.dll` |
 | `0x5030ff9c` | `ekern.exe` / kernel `TRomImageHeader` 的运行时地址（code `0x50310000`，size `0x2974c`） |
-| `0x50339750` | `ecust.dll` 的 header（code `0x503397b4`）——kernel 的 dllref 表只引用 `0x5037c614` / `0x5037d154` 两个 DLL；`\System\Programs` 在 stream 中完整 586 项，包含这两个 DLL 及全部 boot plugin |
+| `0x50339750` | `ecust.dll` 的 header（code `0x503397b4`）——kernel 的 dllref 表只引用 `0x5037c614` / `0x5037d154` 两个 DLL |
+| `0x5031eae0` | kernel 的 E32 boot-file loader：读 `[0x500000cc]`（extension TRomEntry），`r4=[entry+4]`，用 `[r4+0x10]` 作为 entry；round 19 修正 ROMFS 后第一次走到真实 `rtc.dll` 路径 |
+| `0x50326078` | kernel locale 初始化；调用 ELocl 的 20 个 export 并写入 `0x80000410..0x8000044c`；最后一个就是 ord 20 hole |
+| `0x5037d0e8` | ELocl.dll 的 export table 第 20 项：`0xffffffff`。kernel 的唯一未绑定 import slot（stub `0x50336fe4`） |
+| `0x50380270` | EUser `RHeap::Alloc`（import slot `0x503b3948` 即 EUser ord 109）；round 19 的新 frontier |
+| `0x800017d4` | kernel current-thread 全局；kernel 启动后把它写成 `0x802ffd00`（round 19 观测），harness 的 `NK_FAKE_THREAD` 值被覆盖 |
 | `0x50314c0c` | 真正的 ARM IRQ-lock helper（`push {r0,r1}; mrs r1,apsr; ...`） |
 | `0x50314c16` | Thumb BL 编码目标（helper + 0xA，缺少 veneer） |
 | `0x50312186` | 指向 `0x50314c16` 的 Thumb BL |
@@ -275,33 +284,38 @@ tools/test_executive.sh
 
 ## 4. 当前阻塞（按优先级）
 
-#### B7 第 18 轮：SWI 语义 / scheduler 初始状态 / import binding
+#### B8 第 19 轮：ROMFS 启动表已修，frontier 变成初始 thread/process/heap
 
-第 18 轮发现 **924,964 条不是 boot**：EUser.dll 的 kernel API 是单指令
-`svc #N` stub 表，解释器把 SWI 当 no-op 后会从 stub 穿过整张表，落到
-`0x50392dcc` 并进入每轮泄漏 `0x4b0` 栈的循环。`0x5039b2b8` 的 `lr=0`
-是这个循环的栈下穿症状，不是“kernel stack/super-page”frontier。
+第 18 轮的 import 缺口已经关闭：
 
-现在可用 `NK_SWI_DIRECT=1` 按 EKA1 call-gate 约定直接派发到
-`0x50314aec` 的 273 项服务表（`executive.py` 可验证/枚举）。真实缺口是：
-
-1. **flat image import binding**：IAT slot `0x5037d0e8 = 0xffffffff`；
-   `--rom-image` 只放置 section，不解析 import。需要把 `--e32` loader 的
-   export/import 绑定逻辑移到 flat image，或在 build 时生成绑定后的 IAT。
-   当前 7,540 条的停止点就是这里；`NK_IAT_FAKE=1` 的 8,425 条对照只是
-   把 0 当作返回值，随后 `r4=0x00730072` 跳到 PC 0。
-2. **初始 scheduler/current-thread 对象**：`[0x800017d4]` 为 0；E32 entry
-   被直接执行，跳过了 mask ROM/kernel startup 创建初始线程的步骤。
-   `NK_FAKE_THREAD` 只是最小 stand-in。
-3. **banked registers / SPSR / 异常模型**：`svc` 目前是直接调用而非进入
+1. **flat-image import binding（完成）**：`imports.py` 证明 kernel 的 257 个
+   stub（236 EUser + 21 ELocl）中只有 **ELocl ord 20** 是 export-table hole
+   (`0xffffffff`)；flat image 的其它 slot 已经是导出 image 的 `.edata` 地址，
+   无需搬运。`NK_IMPORTMAP=config/imports-6600.txt` 在 flat loader 里把该
+   slot 绑定到 high-vector 的 `mov r0,#0; bx lr` stub。7,540 条的 IAT 停止点
+   因此消失（0 unbound IAT）。
+2. **ROMFS 启动表（完成）**：旧 build 把 `Plugins`（171 项）覆盖到
+   `\System\Libs` 的 VA，破坏了 ROM header 的 iPrimaryFile/iSecondaryFile/
+   iVariantFile/iExtensionFile 所指的 `ekern.exe`/`EFile.exe`/`ecust.dll`/
+   `rtc.dll` entry。修正后 packed 目录块按 runtime VA 线性放置，kernel 的
+   boot loader（`0x5031eae0`）真正加载/运行 `rtc.dll` extension。
+3. **新 frontier：初始 thread/process/heap（B7e）**：kernel 把
+   `[0x800017d4]` 从 harness 预置的 `0x80003000` 改写成 `0x802ffd00`；
+   随后 `RHeap::Alloc`（`0x50380270`）拿到的 heap 对象为 0，在
+   `[heap+0x18]` 解引用后 `bx ip` 到 0。结果 **8,512 条指令、0 undefined、
+   0 unbound IAT**，停点 `pc=0`、`lr=0x503802ac`、`cpsr=0xdb`。
+   需要从 kernel data / boot descriptor 恢复真实的 `SThread`/`SProcess`/
+   `RHeap` 布局，或让 kernel 自己的 startup 创建它；`NK_ALLOC_HLE` 是当前
+   的实验性 bump-allocator，尚未作为验收路径。
+4. **banked registers / SPSR / 异常模型**：`svc` 仍是直接调用而非进入
    `0x50314f30` 的 SVC vector；kernel 的 `msr cpsr_c` 模式切换、`mrs spsr`、
    `movs pc,lr`/`ldm ^` 还没有完整异常语义。`NK_BANKED=1` 已实现 banked/
    SPSR 模型和 harness 模式栈；kernel 自己的 mode-stack setup 仍依赖
    缺失的 boot state。
-4. **等待/中断完成路径**：`NK_SWI_COMPLETE=0x4d` 把 `TRequestStatus*` 直接
+5. **等待/中断完成路径**：`NK_SWI_COMPLETE=0x4d` 把 `TRequestStatus*` 直接
    写 0；真实路径需要 timer/interrupt/DMA 的完成投递。
 
-验收：`tools/test_executive.sh`。
+验收：`tools/test_imports.sh`、`tools/test_executive.sh`。
 
 #### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
 
@@ -477,7 +491,8 @@ unbound IAT slot `0x5037d0e8`（`sp=0x802fff08`、`cpsr=0x800000d3`），
   低于 code base 的调用目标（见 B1）。
 
 ### B2. Mask ROM 初始状态（P0/P1）
-- `0x00e0ca39` 在 UPP 内部 boot ROM 中，不在固件镜像里。
+- UPP 内部 boot ROM 不在固件镜像里。旧文档的 `0x00e0ca39` 是
+  `TRomHeader.iTime` 的高半字（round 19），不是 mask-ROM 入口。
 - 该路径通常负责 MMU、cache、时钟和向量表的初始设置，然后跳入 kernel。
 - **第 12 轮更新**：mask ROM 还会把 flash 前 64 KiB 的 boot bank **按链接地址
   展开**。boot bank 是多个不同基址的代码段拼接而成（A bias `0xb0`、B
@@ -701,14 +716,18 @@ entry：
   结果由 Thumb bug 制造，已作废。
 - 下一步：B1d（function map + 对齐 relayout），而不是继续放大 snap 窗口。
 
-**P0-5 Boot-image handoff（第 15 轮完成 stand-in；第 16 轮修正真实 kernel 路径）**
+**P0-5 Boot-image handoff（第 15 轮 stand-in；第 16 轮真实 kernel；第 19 轮真实 extension）**
 - 第 15 轮的 `bootbringup.py` + staging 表仍可到达 synthetic handoff（36,732
   条），但真实 KaeP 解包未完成。
 - 第 16 轮改为直接启动真实 kernel：`romimage.py build` 从 packed stream
   组装，boot harness 以 ARM 模式进入 `0x50310054`，`NK_KERNEL_VECTORS=1`
   安装 kernel vector table，运行 **924,964 条、0 undefined、0 recoveries**。
-- 新 frontier：SVC stack 下穿 `0x7ff00000` super page、`0x5039b2b8` 的
-  `bx lr` 返回 0。验收：`tools/test_pagestream.sh`。
+- 第 18 轮证明 924k 是 SWI stub fall-through；真实 call-gate 路径在
+  `NK_SWI_DIRECT=1` 下 7,540 条停在 unbound IAT。
+- 第 19 轮修掉 ROMFS 启动表覆盖并加入 `NK_IMPORTMAP`：kernel 走真实的
+  `rtc.dll` extension 加载，**8,512 条、0 unbound IAT、0 undefined**，
+  停在 EUser `RHeap::Alloc` 的 null heap（B7e）。
+  验收：`tools/test_imports.sh`、`tools/test_executive.sh`。
 
 ### P1 — Mask ROM stand-in 与首次设备初始化
 
@@ -767,8 +786,8 @@ entry：
 - [x] **B3d** 2 字节对齐 header 扫描 + record plausibility：722 个 image，text 区间不重叠；`build` 默认放置全部 image（1,580 section，无重叠），boot harness 注册 kernel + dllref 的 code range（`NK_RANGE_ALL=1` 接受全部）
 - [x] **B3e** ROMFS 目录树定位（root / `\System` / `\System\Libs` / `\System\Programs`）+ `romimage.py names` 启动模块表；`ekern.exe -> uid3 0x100058e8`。第 10 轮修正：`\System\Programs` 实际只有 **9 个有效条目**（其余 `0x54f4` 字节被下一个 packed record 覆盖）；旧“236 项 / 193 映射”是误报
 - [x] **B3f** 停止把 ROMFS 数据文件从 `addr - 0x50000000` 线性复制（它们按 packed FS 顺序存放）；`--romfs-linear` 仅保留作实验
-- [x] **B3h** ~~恢复被覆盖的 `\System\Programs` 尾部~~：第 16 轮证明目录从未被覆盖；`0xec` 字节 page header 把目录切断。去 header 后完整解析 **586 项**（`EStart.exe`、`BIGINT.DLL`、所有 boot DLL/plugin），旧“9 项 / tail 覆盖”结论作废
-- [ ] **B3g** 重建 ROMFS 数据文件的 packed 顺序（目录 → 文件偏移），并填入扁平镜像。第 16 轮已放置 **156 个 E32Image 文件**（63 个 `.app` + plugin/driver）和 **85 个 AIF/MBM** 伴随文件；剩余 `.r01`/`.wav` 等数据文件仍需定位
+- [x] **B3h** ~~恢复被覆盖的 `\System\Programs` 尾部~~：目录从未被覆盖，`0xec` page header 把它切断。**第 19 轮修正命名**：kernel 下方 586 项是 `\System\Libs`（ROM header 的 boot image table），`\System\Programs` 是 55 项 server 列表，171 项是 `\System\Libs\Plugins`；旧“586 Programs”结论作废
+- [ ] **B3g** 重建 ROMFS 数据文件的 packed 顺序（目录 → 文件偏移），并填入扁平镜像。第 19 轮已放置 **174 个 E32Image 文件**（63 个 `.app` + plugin/driver）和 **85 个 AIF/MBM** 伴随文件；剩余 `.r01`/`.wav` 等数据文件仍需定位
 - [x] **B3i** `romimage.py tree`：按内容恢复 `\System\Apps` 的 63 个 app 目录（含 `snakeex`、`mixpix`）；`build` 放置 76 个 E32Image 文件和 84 个 AIF/MBM
 - [x] **B1g1** `recompiler/layout.py` + `tools/test_layout.sh`：把 export dir 当 layout oracle 做 census（stored-start rate vs random baseline、常数 shift、pool 对齐），确认 packed text 与 linked text 不是同一套 function layout
 - [x] **B1g2a** 单调 drift 模型定量否定：`layout.py drift` 允许 export 匹配任意 `c <= V` 且 drift 非递减，kernel 在 `0x60/0xc0/0x200` 下仍只有 148/182/223，而随机 null 为 140/168/216（1.05/1.08/1.03×）。padding/relayout 不可能恢复 linked layout
@@ -782,8 +801,8 @@ entry：
 - [x] **B7d1** banked registers / SPSR 模型（`NK_BANKED=1`）：MSR/MRS CPSR/SPSR、模式 bank、`movs pc,lr`/`ldm ^` 异常返回、harness 模式栈
 - [ ] **B7d2** 真实 SVC/IRQ/FIQ 异常入口：`svc` 进入 `0x50314f30`，设置 SPSR_svc 并用 SPSR 返回；kernel 的 mode-stack setup 仍依赖缺失的 boot state
 - [ ] **B7d3** boot descriptor / 初始模式栈：kernel 从 boot state 推导 `0xfffffffc/0`，需要真实 descriptor 或恢复其字段
-- [ ] **B7e** 初始 scheduler/current-thread 对象：`[0x800017d4]`，替代 `NK_FAKE_THREAD`；从 kernel data/boot descriptor 恢复真实布局
-- [ ] **B7f** flat-image import binding：把 `--e32` loader 的 export/import 解析移到 `--rom-image` 路径，绑定 `0x5037d0e8` 等 IAT slot
+- [ ] **B7e** 初始 scheduler/current-thread/process/heap：kernel 在 round 19 把 `[0x800017d4]` 改写成 `0x802ffd00`，`RHeap::Alloc` 因此拿到 null heap（`0x50380270`）；需要从 kernel data/boot descriptor 恢复真实 `SThread`/`SProcess`/`RHeap` 布局，替代 `NK_FAKE_THREAD`
+- [x] **B7f** flat-image import binding：`recompiler/imports.py` 枚举全镜像 **1,111** 个 stub、kernel **257** 个（236 EUser + 21 ELocl），唯一 kernel hole 是 ELocl ord 20；`NK_IMPORTMAP=config/imports-6600.txt` 在 flat loader 绑定该 slot（1 patched），运行时 `unbound IAT=0`。验收：`tools/test_imports.sh`
 - [ ] **B7g** timer/interrupt/DMA 完成路径：替代 `NK_SWI_COMPLETE`，让 `TRequestStatus` 由设备模型完成
 - [x] **P0-3d** 修复 Thumb BL 返回地址 + ARM PC-relative load 并加回归测试
 - [x] **P0-3e** 修复 ARM data-processing 立即数被误判为 extra load/store（必须要求 bit25=0）；`and r0,r0,#0xff` 不再变成 `LDRH`。`interp_selftest` 新增 `and/orr immediate vs extra load/store` 回归
@@ -864,6 +883,41 @@ entry：
 ---
 
 ## 9. 变更记录
+
+- 2026-10-25（本轮 19）：**ROMFS 启动表命名修正 + import/IAT 全表；真实 rtc.dll
+  extension 路径**。
+  (1) **586 项目录是 `\System\Libs`，不是 Programs**。kernel 下方的 packed
+  目录块实际上按 runtime VA 线性排列：`\System\Libs` 在 `0x50301ec0`（586 项，
+  从 `ekern.exe` 开始）、`\System\Programs` 在 `0x50307964`（55 项 server）、
+  `\System\Libs\Plugins` 在 `0x5030000c`（171 项）。ROM header 的
+  `iPrimaryFile=0x50301ec4`、`iSecondaryFile=0x50302148`、
+  `iVariantFile=0x50301ee0`、`iExtensionFile=0x50301f3c` 都是 Libs 里的
+  `TRomEntry`，分别指向 `ekern.exe`、`EFile.exe`、`ecust.dll`、`rtc.dll`。
+  旧 build 把 171 项 Plugins 覆盖到 Libs 的 VA（并把 586 项 Libs 覆盖到
+  Programs 的 VA），于是 kernel 的 boot loader `0x5031eae0` 把 UTF-16 文件名
+  当作 `TRomImageHeader`（`[r3+4]`）并跳到 PC 0。`find_boot_dirs` 现按内容
+  正确命名并新增 `plugins_*`；`build_image` 不再做破坏性 overlay，改为逐目录
+  在 runtime VA 校验，只有布局不一致时才按内容回退重定位。
+  (2) **`recompiler/imports.py`**：枚举 1,111 个 import stub，把 slot 解析为
+  `(导出 image uid3, ordinal, 当前值)`。kernel 有 **257** 个（236 EUser + 21
+  ELocl），唯一未绑定的是 **ELocl ord 20** —— ELocl 的 export table 最后一
+  项是 `0xffffffff`，而 locale 初始化 `0x50326078` 无条件调用它。flat image
+  里其它 slot 已经保存 linked 代码地址（slot 就是导出 image 的 `.edata`），
+  所以“绑定 import”实际只需要处理这种 hole。
+  (3) **`NK_IMPORTMAP`**：flat loader 扫描 stub，验证 slot owner/ordinal，
+  对 `config/imports-6600.txt` 中的项写入绑定；`zero` 在 high-vector
+  `0xffff0100` 生成 `mov r0,#0; bx lr` 并登记 code range。解释器的 IAT 判定
+  也从“值 `>=0xffff0000` 一律 unbound”改为“只要落在已登记 code range 就是
+  合法绑定”。
+  (4) **新 frontier**：修正 ROMFS 后 kernel 真正加载/运行 `rtc.dll`
+  extension，**8,512 条指令、0 undefined、0 unbound IAT**。随后 kernel 把
+  `[0x800017d4]` 改写成 `0x802ffd00`（不再是 harness 的 `0x80003000`），
+  EUser `RHeap::Alloc`（`0x50380270`）从 `[thread+0x18]`/`[process+0x38]`
+  拿到 0，最后 `bx ip` 到 0：`pc=0`、`lr=0x503802ac`、`cpsr=0xdb`。下一项
+  是 B7e（真实 thread/process/heap 或 boot descriptor 恢复）。
+  (5) 新增 `tools/test_imports.sh`（import map + ROM header boot entry +
+  flat-image slot bridge）；`test_romimage.sh` 与 `test_executive.sh` 已按
+  新命名/新 frontier 更新。全部 13 个测试通过。
 
 - 2026-10-25（本轮 18）：**SWI 不是 no-op：EKA1 executive call gate；924k 运行被重新解释**。
   EUser.dll 的 kernel API 是密集的单指令 `svc #N` stub 表；解释器把 SWI

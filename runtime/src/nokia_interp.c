@@ -329,6 +329,50 @@ static void drop_call(nk_interp_t* ip) {
     if (ip->rec_n > ip->calls_n) ip->rec_n = ip->calls_n;
 }
 
+/* Bring-up RHeap::Alloc.  The kernel's `operator new` fetches the current
+ * thread's heap via [thread+0x18] -> [process+0x38] and calls EUser's
+ * RHeap::Alloc.  A direct E32-entry boot never created that heap, so serve
+ * the call from the harness heap instead of dereferencing a null object.
+ * r0 = heap (ignored), r1 = byte/element count.  A count of -1 asks for the
+ * end of the heap, which the real implementation answers without allocating. */
+static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
+    if (!ip->alloc_hle || ip->alloc_pc == 0 || pc != ip->alloc_pc)
+        return 0;
+    int32_t n = (int32_t)c->r[1];
+    uint32_t p;
+    uint32_t heap = c->r[0];
+    if (n < 0) {
+        p = ip->alloc_cur;
+    } else {
+        uint32_t sz = ((uint32_t)n + 7u) & ~7u;
+        if (sz == 0) sz = 8;
+        if (ip->alloc_cur == 0 || ip->alloc_cur + sz > ip->alloc_end) {
+            /* Out of the bring-up heap: report instead of returning garbage. */
+            ip->st.stop_reason = NK_STOP_UNDEFINED;
+            ip->st.stop_pc = pc;
+            fprintf(stderr,
+                    "[interp] HLE allocator exhausted at %#010x (size %#x)\n",
+                    ip->alloc_cur, sz);
+            return 1;
+        }
+        p = ip->alloc_cur;
+        ip->alloc_cur += sz;
+        for (uint32_t i = 0; i < sz; i++) nk_w8(c, p + i, 0);
+    }
+    ip->alloc_hits++;
+    ip->st.insns++;                /* the intercepted guest call */
+    c->r[0] = p;
+    uint32_t lr = c->r[14];
+    int new_t = 0;
+    (void)pop_call(ip, lr & ~1u, &new_t);
+    set_thumb(c, new_t ? 1 : 0);
+    c->r[15] = lr & ~1u;
+    if (ip->alloc_log-- > 0)
+        fprintf(stderr, "[interp] HLE alloc %d bytes -> %#010x "
+                "(heap %#010x) at %#010x\n", n, p, heap, pc);
+    return 1;
+}
+
 /* Roll back to the most recent BL/BLX and treat it as "returned 0".
  * Returns 1 when the caller was resumed, 0 when recovery is disabled or the
  * stack is empty. */
@@ -1036,8 +1080,7 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
                  * either not relocated yet (0/0xffffffff) or has been bound
                  * to code.  A slot value outside every declared code range is
                  * an unbound import, not a legitimate indirect branch. */
-                if (rn == 12 && off == 0 &&
-                    (v < 0x1000u || v >= 0xffff0000u || !in_code(ip, v & ~3u))) {
+                if (rn == 12 && off == 0 && !in_code(ip, v & ~3u)) {
                     ip->st.iat_hits++;
                     if (ip->iat_log-- > 0)
                         fprintf(stderr, "[interp] unbound IAT slot %#010x at %#010x (caller lr=%#010x)\n",
@@ -1517,6 +1560,8 @@ void nk_interp_init(nk_interp_t* ip) {
      * when swi_direct is enabled; the boot harness can override it. */
     ip->swi_table = 0x50314aecu;
     ip->swi_log = 16;
+    ip->alloc_pc = 0x50380270u;   /* EUser RHeap::Alloc (import ord 109) */
+    ip->alloc_log = 16;
     g_bank_log = getenv("NK_BANK_LOG") != NULL;
 }
 
@@ -1586,6 +1631,10 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
             ip->st.stop_pc = c->r[15];
             if (recover_call(ip, c, NK_STOP_OUT_OF_IMAGE)) continue;
             return 1;
+        }
+        if (alloc_hle(ip, c, c->r[15])) {
+            if (ip->st.stop_reason) break;
+            continue;
         }
         int was_thumb = thumb(c);
         int r = was_thumb ? thumb_step(c, ip) : arm_step(c, ip);

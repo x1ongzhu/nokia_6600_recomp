@@ -1,0 +1,16 @@
+# imports-6600.txt - bring-up overrides for EKA1 import-table holes
+#
+# Syntax: <slot-va> <target-va|zero>
+#
+# A flat runtime image already binds every real export (the slot *is* the
+# exporting image's export-table entry, and it holds the linked code address).
+# Only export-table holes - entries the ROM build left as 0xffffffff - need an
+# entry here.  `zero` installs a synthesized `mov r0,#0; bx lr` stub at
+# 0xffff0100 (the high-vector page) and points the slot at it.
+#
+# ELocl.dll (uid3 0x100065a5) has 21 export entries; ordinal 20 is a hole.
+# The kernel's locale initialiser (0x50326078) calls it unconditionally and
+# stores the result at 0x8000044c.  The real ROM build must patch this slot
+# somewhere in the mask-ROM/boot path that is not in this dump, so returning 0
+# is an explicit stand-in until B6a1d/B7e recover that state.
+0x5037d0e8 zero
