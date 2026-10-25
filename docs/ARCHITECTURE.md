@@ -95,9 +95,24 @@ each thread.  `CleanupStack::PushL` therefore runs the real level/pop code.
 It also pins four call-site ABI repairs: `TDes16::Copy(TDesC16 const&)`,
 `CObjectCon::FindByName`, `User::Alloc` for `DProcess::New`, and
 `TBufBase8(int)` for the 8-byte process name.  The initial `DProcess` now
-exists and is constructed; the next frontier is the **DProcess/DObject vtable
-ABI** (its `+0xc` slot points at a different EUser ordinal than this ROM's
-export order), not a missing CPU state.
+exists and is constructed.
+
+Round 26 recovers the **EUser CObject base-class ABI** behind that vtable.
+The target vtable `0x503b362c` is `~CObject 0x50384ac8`, `Open 0x50384b28`,
+`Close 0x50384b3c`, `Name 0x50384bf8` (hidden return pointer) and
+`FullName 0x50384c34`; the constructor `0x50384a98` sets `iAccessCount=1`.
+The kernel's DProcess vtable `0x50338690` inherits that order, so `+0xc` is
+`Open`, not `Close`.  The real `CObjectCon::AddL` is `0x503851e0`; the old
+`0x50385598` is only `CheckUniqueFullName`.  With the five base methods,
+AddL, `CObject::Name` and the shared `memmove`/`memcpy` rebound, the initial
+process is constructed, opened and inserted into `K::Containers[EProcess]`;
+the run reaches **126,866 instructions** and stops at **USER 7** inside the
+kernel's own `DProcess::Name` override, whose stale descriptor slots corrupt
+the temporary `TName`.  A documented stand-in that points DProcess vtable
+`+0x14` at EUser's `CObject::Name` reaches **126,778 instructions** and the
+`DProcess::Loaded` callback (`pc=0`, `lr=0x5031fe84`).  The next frontier is
+the **descriptor ABI in DProcess::Name** and the Loaded callback stack, not a
+missing CPU state.
 
 The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
 (first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.

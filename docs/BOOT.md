@@ -1874,3 +1874,58 @@ valid.  The cleanup handler and level marker are real; only the initial
 `iFrame`/leave context still needs the scheduler or mask-ROM startup TRAP.
 
 Acceptance: `tools/test_round25.sh`.
+
+
+## Round 26 (2026-10-26): CObject/DProcess base ABI; process registration
+
+Round 25 treated DProcess vtable `+0xc` as `Close` and stopped in an EUser
+object-close panic helper.  Target EUser actually contains a real `CObject`
+class: its vtable at `0x503b362c` is
+
+| slot | target | meaning |
+|---|---|---|
+| `+0x08` | `0x50384ac8` | `~CObject` |
+| `+0x0c` | `0x50384b28` | `Open()` (increment access count) |
+| `+0x10` | `0x50384b3c` | `Close()` (decrement / delete) |
+| `+0x14` | `0x50384bf8` | `Name()` (hidden return: `r0=TName*`, `r1=this`) |
+| `+0x18` | `0x50384c34` | `FullName()` |
+
+The constructor is `0x50384a98` (target ordinal 1393); it stores the vptr and
+sets `[this+4] = 1`.  The kernel's DProcess vtable `0x50338690` inherits the
+same order, so `0x5032b7d8` is **Open**, not Close.
+
+Round 26 applies eight real bindings:
+
+| kernel slot | old target | real target |
+|---|---|---|
+| `0x503b4d64` (ord 1396) | `0x503a2ec0` list ctor | `CObject::CObject` `0x50384a98` |
+| `0x503b4b5c` (ord 1266) | `0x50382cb8` | `~CObject` `0x50384ac8` |
+| `0x503b4410` (ord 799) | `0x5039e328` panic helper | `Open` `0x50384b28` |
+| `0x503b3a58` (ord 177) | `0x5039a00c` handle helper | `Close` `0x50384b3c` |
+| `0x503b3f14` (ord 480) | `0x50398390` handle helper | `FullName` `0x50384c34` |
+| `0x503b37b8` (ord 9) | `0x5037fca0` handle/panic 44 | `CObjectCon::AddL` `0x503851e0` |
+| `0x503b42cc` (ord 718) | `0x50387340` `CHeartbeat::NewL` | `CObject::Name` `0x50384bf8` |
+| `0x503b3798` (ord 1) | `0x5038ed58` locale/date helper | `memmove/memcpy` `0x5038cfe0` |
+
+`0x50385598` is only `CObjectCon::CheckUniqueFullName`; the real AddL is
+`0x503851e0` (ordinal 6).  AddL calls CheckUnique, grows the container array,
+stores the object, increments the count and links `object+0xc = this`.
+
+Result: **126,866 instructions, 0 undefined, 0 unbound IAT, 0 recoveries, 22
+call fixups** with 38 overrides in `config/imports-r26-6600.txt`.  The initial
+process `0x806008b8` is constructed, opened and inserted into
+`K::Containers[EProcess]` at `0x80600500`.
+
+The next stop is the kernel's own `DProcess::Name` override
+(`0x5032b5d4`): its descriptor slots (`0x5032b5f8` ordinal 1620,
+`0x5032b608` ordinal 717, `0x5032b614` ordinal 90) still use stale ordinals,
+overwrite the temporary `TName`, and make `CheckUniqueFullName` read type
+`0x80000000`; it panics **USER 7** (`ETDes16BadDescriptorType`).  Pointing
+DProcess vtable `+0x14` at EUser's real `CObject::Name` (an explicit stand-in,
+not recovered state) passes name registration and reaches **126,778
+instructions**, stopping at a zero return address in `DProcess::Loaded`
+(`pc=0`, `lr=0x5031fe84`).  The next front is therefore the descriptor ABI in
+`DProcess::Name` plus the Loaded callback stack.
+
+The interpreter self-test gained an LDMDB/STMDB writeback regression for the
+memmove backward path.  Acceptance: `tools/test_round26.sh`.

@@ -530,6 +530,30 @@ criteria and phased roadmap live in
   The next task is a **symbol-level DProcess/DObject vtable ABI map** (several
   slots in the same vtable target different EUser ordinals), not another
   single-function guess.  `tools/test_round25.sh` is the acceptance test.
+- [x] **Round 26: CObject/DProcess base-class ABI; process registration;
+  126,866 instructions** — target EUser has the real `CObject` class at
+  vtable `0x503b362c`: `+0x0c Open` (`0x50384b28`), `+0x10 Close`
+  (`0x50384b3c`), `+0x14 Name` (`0x50384bf8`, hidden return pointer),
+  `+0x18 FullName` (`0x50384c34`); the constructor `0x50384a98` sets
+  `iAccessCount=1`.  The kernel's DProcess vtable `0x50338690` inherits the
+  same order, so round 25's `+0xc` call was **Open**, not Close.  Eight
+  bindings are now real: the five CObject base methods, `CObjectCon::AddL`
+  (`0x503851e0`, ordinal 6 — not `CheckUniqueFullName 0x50385598`),
+  `CObject::Name` for the name copy, and the shared `memmove`/`memcpy`
+  `0x5038cfe0`.  The initial process `0x806008b8` is constructed, opened and
+  inserted into `K::Containers[EProcess]`; the run reaches **126,866
+  instructions, 0 undefined, 0 unbound IAT, 0 recoveries** (38 overrides in
+  [`config/imports-r26-6600.txt`](config/imports-r26-6600.txt)).  It then
+  stops in the kernel's own `DProcess::Name` override: its stale descriptor
+  slots overwrite the temporary `TName`, so `CheckUniqueFullName` raises
+  **USER 7** (`ETDes16BadDescriptorType`).  A documented stand-in that points
+  DProcess vtable `+0x14` at EUser's real `CObject::Name` passes name
+  registration and reaches **126,778 instructions**, stopping at a zero
+  return address in `DProcess::Loaded` (`pc=0`, `lr=0x5031fe84`).  The next
+  frontier is therefore the **descriptor ABI in DProcess::Name** and the
+  Loaded callback stack, not the CObject base class.  The interpreter
+  self-test gained an LDMDB/STMDB writeback regression for the memmove
+  backward path.  `tools/test_round26.sh` is the acceptance test.
 - [ ] **Initial thread trap frame (remaining after round 25)** — the handler
   and cleanup stack are real now, but `SThread::iFrame` (`+0x38`) is still
   zero.  A guest `TTrap::Trap` pushes and pops frames correctly; a `Leave`
@@ -578,7 +602,11 @@ criteria and phased roadmap live in
   `CTrapCleanup` graph**, fixes four process-construction ABI slots, and
   constructs the initial `DProcess` for the first time; the run reaches
   **125,864 instructions** and stops at the DProcess close-vtable ABI
-  (`KERN-NO-SESSION 52`).
+  (`KERN-NO-SESSION 52`).  **Round 26 recovers the CObject base ABI**
+  (`+0xc` is `Open`, not `Close`) and the real `CObjectCon::AddL`, so the
+  process is opened and inserted into `K::Containers[EProcess]`; the run
+  reaches **126,866 instructions** and the next stop is the descriptor ABI
+  inside `DProcess::Name` (`USER 7`).
 - [ ] **File server for UI/app loads (round 22 reclassification)** — the
   round-21 ECons.dll / **KERN-NO-SESSION 22** stop was the RTC driver's
   misbound `operator new` import entering EUser's `RTest` console path.  With
@@ -885,6 +913,30 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_round25.sh
+
+# round 26: EUser CObject/DProcess base ABI; process registration; 126,866 insns
+#   real path stops in DProcess::Name with USER 7 (descriptor ABI)
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r26-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0 \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 NK_HLE_HEAP=0x80700000 \
+  NK_CALLMAP=config/callmap-rtc-6600.txt \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_round26.sh
+
+# explicit Name stand-in (not recovered state): DProcess vtable +0x14 ->
+# EUser CObject::Name; reaches DProcess::Loaded with 126,778 insns and pc=0
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r26-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0 \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 NK_HLE_HEAP=0x80700000 \
+  NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_PATCH=0x503386a4:0x50384bf8,0x503384bc:0x50384bf8 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
 
 # round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
 # code+text_size; the default runtime image now includes it

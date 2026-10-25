@@ -295,6 +295,27 @@ int main(void) {
     CHECK(r == NK_STOP_SELF_BRANCH,
           "ARM `b .` stops with self-branch panic reason");
 
+    /* ---- ARM LDMDB/STMDB with writeback: the EUser memmove tail ----
+     * EUser's memmove uses `ldmdb rN!,{r3-r10}` / `stmdb rN!,{r3-r10}` in its
+     * backward-copy path.  A wrong P/U start address silently copies the
+     * caller's stack instead of the source, which shows up as a corrupted
+     * TName during process registration. */
+    for (unsigned i = 0; i < 8; i++)
+        poke32(&c, 0x80000920u + 4 * i, 0x11110000u + i);
+    poke32(&c, 0x80000500u, 0xe93107f8u);   /* ldmdb r1!, {r3-r10} */
+    poke32(&c, 0x80000504u, 0xe92007f8u);   /* stmdb r0!, {r3-r10} */
+    poke32(&c, 0x80000508u, 0xe12fff1eu);   /* bx lr               */
+    memset(&c.r, 0, sizeof c.r);
+    c.r[0] = 0x80000a40u;
+    c.r[1] = 0x80000940u;
+    r = run(&c, 0x80000500u, 0);
+    int ldmdb_ok = (r == NK_STOP_RETURN && c.r[0] == 0x80000a20u &&
+                    c.r[1] == 0x80000920u && c.r[10] == 0x11110007u);
+    for (unsigned i = 0; i < 8 && ldmdb_ok; i++)
+        if (nk_r32(&c, 0x80000a20u + 4 * i) != 0x11110000u + i)
+            ldmdb_ok = 0;
+    CHECK(ldmdb_ok, "ARM LDMDB/STMDB writeback copies the source range");
+
     /* ---- UPP boot handshake stub: 0x58150422 reports ready bit 0x400 ---- */
     CHECK(nk_r16(&c, 0x58150422u) == 0x0400u,
           "UPP 0x58150422 reports the boot ready bit");
