@@ -308,22 +308,29 @@ criteria and phased roadmap live in
   stubs the two UPP handshake reads (`0x58150422` bit `0x400`, `0x58120a08`
   non-zero).  Result: **36,732 instructions, 12 MMIO reads, 46 writes, one
   recovered stale call, zero undefined**, stopping at the **boot-image
-  handoff `0x80`**.  `tools/test_bootbringup.sh` is the acceptance test.  This
-  is still a stand-in — the packed KaeP stream is skipped with a one-word
-  `mov pc,lr` at `0xfb8` — but the handoff is the point the mask ROM would
-  decompress the boot image to.
+  handoff `0x80`**.  `tools/test_bootbringup.sh` is the acceptance test.
+  Round 17 replaces the parser skip with an executable handoff (below).
 
 **← current frontier →**
 
-- [ ] **KaeP boot-image payload (round 15)** — the loader now reaches the
-  handoff at linked `0x80` with the kernel code/data banks mapped.  That
-  address is the boot image the real mask ROM would decompress; in the
-  stand-in it still contains the synthetic descriptor, so executing it is not
-  meaningful.  The next task is the real KaeP transform (or a decompressor
-  stand-in that installs executable boot code at `0x80`/`0x8000`).  The
-  `0x3ae8 → 0x5bb4` call is also stale and is what walks into the handoff in
-  the synthetic run.  See `docs/BOOT.md` round 15 and
-  `tools/test_bootbringup.sh`.
+- [x] **KaeP/PeaK container unpacked; handoff enters the kernel (round 17)** —
+  the block at file `0x124` is the Nokia **PeaK** marker (`0x5065614B`
+  little-endian), a `u32` record size `0x20`, and a `u32` image size
+  `0x1423dc`.  The 0x20-byte record starts at `0x12e` (it overlaps the high
+  half of the size word) and the embedded image starts at `0x14e` with a clean
+  ARM vector table; image `+0x38` is real boot code.  [`kaep.py`](recompiler/kaep.py)
+  now has `unpack` (extracts the record and image byte-for-byte, with SHA-256)
+  and `install` (writes `ldr pc,[pc,#-4]; .word 0x50310054` at linked `0x80`
+  plus the descriptor/list the loader consumes).  The loader now enters the
+  real kernel instead of taking `SWI 0xf9ea00` on the record bytes:
+  **1,499,999 ARM instructions, 0 undefined, one recovered stale call**, ending
+  in the kernel code range.  `tools/test_kaep.sh` and
+  `tools/test_bootbringup.sh` pin the container and the kernel-entry run.
+- [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
+  is still undocumented.  `unpack` preserves the record; `install` is the
+  explicit handoff stand-in.  A future round should decode the record rather
+  than install the trampoline, and remove the remaining `0x3ae8 → 0x5bb4`
+  stale call.
 - [ ] **Boot-region page tables (round 14 control)** — the old `linear`
   profile still reaches the `0x2fe4` page-table fill because its type-2 RAM
   bank's `linbase` is a base address where the compaction pass expects a page
@@ -380,9 +387,11 @@ criteria and phased roadmap live in
   separate fragments, it is the packed stream slice `[0xb0, 0x100b0)`; all
   switch tables measure bias 0 (`bootbank.py --stream`).  The **correct**
   linked loader stops in a board/CPU detection panic at `0x624c`; the old
-  600k raw-fragment run was following the B2 page header.  The KaeP block at
-  `0x50000124` (`0x20`, value `0x1423dc`, repeated `0xdff9ea00`) still has to
-  be unpacked, not just mapped.
+  600k raw-fragment run was following the B2 page header.  Round 17 unpacks the
+  KaeP/PeaK container (`record 0x12e`, `image 0x14e`, length `0x1423dc`) and
+  installs an executable `ldr pc` handoff at `0x80`; the loader now enters the
+  kernel at `0x50310054`.  The mask ROM's codec for the 0x20-byte record is
+  still the open piece.
 - [ ] **MMIO + display** — the sparse bus is in place; the entry already writes
   UPP registers around `0x58150000`, which is the first real device surface.
 - [ ] **First light** — the Nokia boot logo on a host window.
@@ -534,9 +543,12 @@ NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
   --rom-image out/6600_runtime.bin
 # ... now the old 0xc58 frontier is gone; stop is the page-table fill 0x2fe4
 
-# optional: explicit KaeP descriptor/node stand-in
-.venv/bin/python recompiler/kaep.py synth \
-  out/6600_bootbank_linked.bin out/6600_bootbank_kaep.bin
+# round 17: unpack the KaeP/PeaK container and install the executable handoff
+.venv/bin/python recompiler/kaep.py unpack 6600_mcu.bin \
+  out/6600_kaep_record.bin out/6600_kaep_image.bin
+.venv/bin/python recompiler/kaep.py install \
+  out/6600_bootbank_linked.bin 6600_mcu.bin \
+  out/6600_bootbank_kaep_install.bin
 tools/test_kaep.sh
 
 # round 15: relocate fragment C, map the kernel sections and reach the handoff

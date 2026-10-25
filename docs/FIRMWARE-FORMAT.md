@@ -243,10 +243,17 @@ stream `0x3100b0` (`header + 0x64`), and entry `0x50310054` is **ARM**
 starts **469 times (98.1%)** and DLL `0x100039e5` **1757/1788 (98.3%)** at
 shift 0; the old 17.2%/21.8% and drift-null results were the page headers.
 
-`KaeP` is a 12-byte header followed by a 32-byte payload at file `0x130`
-(linked `0x80`).  The mask ROM normally turns it into the boot-image list the
-secondary loader consumes; the payload in this dump is the repeated
-`0xdff9ea00` block, not the final descriptor.
+`KaeP` is the little-endian constant `0x5065614B`, i.e. Nokia's **PeaK**
+marker.  The header is 10 bytes: magic, `u32` record size `0x20`, and `u32`
+image size `0x1423dc`.  The 0x20-byte record starts at file **`0x12e`** (its
+first halfword is the high half of the image-size word; this is a deliberate
+overlap in the packing) and the image starts at **`0x14e`**, where a clean ARM
+vector table (`ldr pc,[pc,#0x18]`) begins.  Image `+0x38` (file `0x186`) is
+real ARM boot code.  The image runs for `0x1423dc` bytes to file `0x14252a`.
+`kaep.py unpack` extracts the record and image byte-for-byte; the mask ROM's
+codec for the 0x20-byte record is still undocumented, so `kaep.py install`
+supplies an explicit executable handoff (`ldr pc` to the kernel entry) rather
+than claiming to decode that record.
 
 The boot bank is simply the first 64 KiB of the packed stream, shifted so that
 linked 0 is stream offset `0xb0` (`stream[0xb0:0x100b0]`).  All 15 compiler

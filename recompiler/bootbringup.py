@@ -1,40 +1,41 @@
 #!/usr/bin/env python3
 """bootbringup.py — explicit bring-up inputs for the secondary boot loader.
 
-The real UPP mask ROM does three things this project cannot reconstruct yet:
+The real UPP mask ROM does three things this project cannot fully reconstruct:
 
-1. it unpacks the ``KaeP`` boot image and installs a descriptor at linked
+1. it decodes the ``KaeP``/PeaK record and installs a boot descriptor at linked
    ``0x80``;
 2. it builds the boot-image node list the loader searches at ``0xc58``;
 3. it gives the loader the RAM/ROM section banks.
 
 The loader itself is real: after the round-15 fixes it passes the CPU/board
-lookup, programs UPP registers and builds page tables.  What it does not have
-is real KaeP data, so it eventually maps a 2 GiB section and burns the budget.
+lookup, programs UPP registers and builds page tables.  The container boundary
+is now explicit (``kaep.unpack``), but the mask ROM's codec for the 0x20-byte
+PeaK record is still opaque, so this module supplies the descriptor and an
+executable handoff rather than pretending the record is plaintext.
 
 This module makes the missing inputs **explicit** instead of pretending the
 packed payload is a descriptor:
 
-* a synthetic KaeP descriptor at linked ``0x80`` (key, kernel entry/code/data,
-  section sizes, list head),
+* a boot descriptor at linked ``0x80`` (key, kernel entry/code/data, section
+  sizes, list head),
+* an executable ARM handoff at the start of the descriptor
+  (``ldr pc,[pc,#-4]; .word 0x50310054``), so the loader enters the real
+  kernel instead of executing the opaque KaeP record bytes,
 * a two-level boot-image list at ``0xfd00``/``0xfd10`` whose node has
   ``next = 0`` and the type word ``0x05040000`` the ``0xc58`` search expects,
-* the ``staging`` boot-region table from :mod:`bootregions`,
-* a one-instruction skip of the KaeP compressed-image parser at ``0xfb8``
-  (``mov pc, lr``).  The parser is real code; it cannot run because the packed
-  stream is not a descriptor.  Skipping it lets the loader continue to its
-  own section mapping and handoff.
+* the ``staging`` boot-region table from :mod:`bootregions`.
 
-None of these values are a reconstruction of the KaeP transform.  They are a
-reproducible stand-in, exactly like ``kaep.py synth``, but now sufficient to
-reach the **boot-image handoff at linked 0x80** with the kernel code/data
-banks mapped.
+This is a container-level stand-in: :func:`kaep.unpack` preserves the KaeP
+record and image, while :func:`kaep.install` supplies the descriptor and the
+executable handoff.  The mask ROM's transform of the 0x20-byte record is still
+undocumented and is not claimed here.
 
-The acceptance frontier is deterministic: the run stops at linked ``0x00000080``
-(when ``NK_STOP_PC=0x80`` is used) with ``recoveries=1`` and no undefined
-instruction.  The handoff target is the boot image the mask ROM would have
-decompressed; the synthetic descriptor is not executable code, so the next
-step is the real KaeP unpack, not a larger budget.
+The acceptance frontier is deterministic: with ``NK_STOP_PC=0x80`` the loader
+stops at the handoff with ``recoveries=1`` and no undefined instruction.  With
+the stop removed, the trampoline enters the kernel at ``0x50310054`` and runs
+to the kernel stack/exception frontier instead of taking an SWI on the KaeP
+record bytes.
 
 Commands::
 
@@ -50,73 +51,32 @@ import sys
 
 import bootbank
 import bootregions
+import kaep
 
 BANK = 0x10000
 DESCRIPTOR = 0x80
-LIST_HEAD = 0xFD00
-NODE = 0xFD10
-PARSER = 0xFB8
-PARSER_SKIP = 0xE1A0F00E       # mov pc, lr
-NODE_TYPE = 0x05040000
+LIST_HEAD = kaep.LIST_HEAD
+NODE = kaep.NODE
+NODE_TYPE = kaep.NODE_TYPE
 
-# Descriptor fields consumed by the loader.  The offsets are relative to
-# linked 0x80; the values come from the kernel TRomImageHeader and the flat
-# runtime image.
-DESCRIPTOR_FIELDS = {
-    0x0C: 0x80000000,          # key / linear RAM base used by 0x1a1c
-    0x14: bootregions.KERNEL_ENTRY,
-    0x18: 0x80000000,          # data linear address
-    0x1C: bootregions.KERNEL_CODE,
-    0x20: LIST_HEAD,           # boot-image list head translated by 0xc58
-    0x24: bootregions.KERNEL_DATA_SIZE,
-    0x28: bootregions.KERNEL_BSS_SIZE,
-    0x2C: 0,
-    0x34: bootregions.KERNEL_CODE_SIZE,
-    0x48: bootregions.KERNEL_DATA_SIZE + bootregions.KERNEL_BSS_SIZE,
-    0x58: 0x80000000,
-    0x64: bootregions.KERNEL_ENTRY,
-}
-
-# The node is what `0xc58` returns and `0xe6c` treats as a section
-# descriptor: +0x2c/+0x34 are the code size, +0x5c is the list terminator,
-# +0x60 is the type/version word.
-NODE_FIELDS = {
-    0x04: bootregions.KERNEL_HEADER,
-    0x10: bootregions.KERNEL_ENTRY,
-    0x14: bootregions.KERNEL_CODE,
-    0x1C: bootregions.KERNEL_CODE,
-    0x2C: 0,
-    0x34: bootregions.KERNEL_CODE_SIZE,
-    0x48: bootregions.KERNEL_DATA_SIZE + bootregions.KERNEL_BSS_SIZE,
-    0x5C: 0,
-    0x60: NODE_TYPE,
-}
+# Kept as a compatibility alias for callers that imported the old tables.
+DESCRIPTOR_FIELDS = kaep.descriptor_fields()
+NODE_FIELDS = kaep.node_fields()
 
 
 def build(rom: bytes, ram_size: int = bootregions.DEFAULT_RAM_SIZE):
     """Return (linked boot bank, staging region table bytes)."""
-    bank = bytearray(bootbank.build(rom))
+    bank = bootbank.build(rom)
     if len(bank) != BANK:
         raise SystemExit(f"bootbank.build returned {len(bank)} bytes")
 
-    for off, value in DESCRIPTOR_FIELDS.items():
-        struct.pack_into("<I", bank, DESCRIPTOR + off, value)
-
-    # Zero the list area first: an unset `next` pointer would send the 0xc58
-    # search into executable code (the earlier synthetic node did exactly
-    # that and returned 0).
-    for off in range(0, 0x80, 4):
-        struct.pack_into("<I", bank, LIST_HEAD + off, 0)
-    struct.pack_into("<I", bank, LIST_HEAD + 4, NODE)
-    for off, value in NODE_FIELDS.items():
-        struct.pack_into("<I", bank, NODE + off, value)
-
-    # Skip the KaeP compressed-image parser.  This is a documented bring-up
-    # patch, not a claim about the real compressed stream.
-    struct.pack_into("<I", bank, PARSER, PARSER_SKIP)
+    # The first two descriptor words are an ARM `ldr pc` trampoline to the
+    # kernel entry.  The loader only checks +0/+4/+8 when its 0x40000000 flag
+    # is set, so the handoff target is executable instead of a descriptor blob.
+    bank = kaep.install(bank, rom)
 
     table = bootregions.encode(bootregions.staging_regions(rom, ram_size))
-    return bytes(bank), table
+    return bank, table
 
 
 def cmd_build(a):
@@ -137,6 +97,8 @@ def cmd_build(a):
     print("    NK_BUDGET=1500000 NK_STOP_PC=0x80 "
           "./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin "
           "--rom-image out/6600_runtime.bin")
+    print("  remove NK_STOP_PC to execute the handoff and enter the kernel at "
+          f"{bootregions.KERNEL_ENTRY:#x}")
     return 0
 
 
@@ -153,8 +115,9 @@ def cmd_verify(a):
 
     check(len(bank) == BANK, "linked boot bank is 64 KiB")
     check(rows["count"] == 4, "staging table has four banks")
-    check(struct.unpack_from("<I", bank, PARSER)[0] == PARSER_SKIP,
-          "KaeP parser at 0xfb8 is skipped by a bring-up `mov pc,lr`")
+    check(struct.unpack_from("<II", bank, DESCRIPTOR) ==
+          (kaep.TRAMPOLINE_WORD, bootregions.KERNEL_ENTRY),
+          "handoff at 0x80 is `ldr pc,[pc,#-4]; .word kernel entry`")
     check(struct.unpack_from("<I", bank, DESCRIPTOR + 0x20)[0] == LIST_HEAD,
           "descriptor points at the boot-image list head 0xfd00")
     check(struct.unpack_from("<I", bank, LIST_HEAD + 4)[0] == NODE,

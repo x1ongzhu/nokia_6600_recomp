@@ -111,6 +111,8 @@ N-Gage 应用级兼容层不等于 6600 整机启动；其内存布局也不能�
    下载这些资料本身不构成确认，也不能证明高熵区域一定需要某种解压算法。
    第 16 轮已把 `0x20b0` 起的 852 个 `0x20ec` 记录确定为 **`0xec` page
    header + `0x2000` payload**，并用 `recompiler/pagestream.py` 去 header；
-   kernel export 命中率因此从 17.2% 升到 98.1%。`KaeP` 头（`0x124`）和真实
-   解包仍未确认。
+   kernel export 命中率因此从 17.2% 升到 98.1%。第 17 轮把 `0x124` 的
+   `KaeP`/PeaK 容器边界固定为 record `0x20` @ `0x12e`、image `0x1423dc` @
+   `0x14e`，并由 `kaep.py unpack` 导出；但 mask ROM 对 0x20 字节 record 的
+   codec 仍未确认，`install` 的 `ldr pc` handoff 是显式 stand-in。
 5. UPP_WD2 的 LCD、计时器和键盘寄存器仍需另找板级资料或实际访问轨迹，以上资料不能填补这一空白。

@@ -116,20 +116,26 @@ generated.c ──(clang)──▶ native objects, linked against ../runtime/
   Without this step the kernel's 478 exports only score 17.2% on function
   starts; with it they score **469/478 (98.1%)**, and `\System\Programs` has
   all **586** entries.  `../tools/test_pagestream.sh` is the acceptance test.
-- **`kaep.py`** — measure the KaeP block (`0x124`: magic, size 0x20, value
-  `0x1423dc`) and the page grid.  `analyze` reports the 852 headers,
-  `despan` writes the old (six-byte-only) experimental view, `synth` writes an
-  explicit bring-up descriptor/list node into a linked boot bank, and `verify`
-  pins the structure (`../tools/test_kaep.sh`).  The real KaeP unpack is still
-  unknown.  **Note:** `despan` is superseded by `pagestream.py`; removing only
+- **`kaep.py`** — unpack the KaeP/PeaK boot container (`0x124`: magic, record
+  size `0x20`, image size `0x1423dc`) and measure the page grid.  `unpack`
+  extracts the 0x20-byte record at `0x12e` and the 0x1423dc-byte image at
+  `0x14e` byte-for-byte (with SHA-256); `install` writes an executable ARM
+  `ldr pc` handoff at linked `0x80` plus the descriptor/list the loader
+  consumes; `analyze` reports the 852 headers; `despan` writes the old
+  (six-byte-only) experimental view; `synth` keeps the old synthetic
+  descriptor stand-in; `verify` pins the container and the handoff
+  (`../tools/test_kaep.sh`).  The mask ROM's codec for the 0x20-byte record
+  is still unknown; `install` is an explicit handoff stand-in, not a decoded
+  record.  **Note:** `despan` is superseded by `pagestream.py`; removing only
   the six tag bytes still leaves the other `0xe6` header bytes inline.
-- **`bootbringup.py`** — the explicit round-15 mask-ROM stand-in.  It takes
-  the linked boot bank, writes a KaeP descriptor at `0x80`, a
+- **`bootbringup.py`** — the mask-ROM stand-in for the boot-image handoff.  It
+  takes the linked boot bank, calls `kaep.install` to write the executable
+  `ldr pc` handoff and descriptor at `0x80`, builds the
   `head -> node -> terminator` list at `0xfd00 -> 0xfd10` (node type
-  `0x05040000`, `next = 0`), skips the compressed-image parser at `0xfb8`
-  with `mov pc,lr`, and emits the `staging` region table.  The real loader
-  then programs UPP and reaches the boot-image handoff at linked `0x80`; this
-  is not a KaeP reconstruction (`../tools/test_bootbringup.sh`).
+  `0x05040000`, `next = 0`), and emits the `staging` region table.  The real
+  loader programs UPP, reaches linked `0x80`, executes the handoff and enters
+  the kernel at `0x50310054`; the still-opaque 0x20-byte PeaK record is
+  preserved, not decoded (`../tools/test_bootbringup.sh`).
 - **`recursive.py`** — mode-aware recursive discovery (Thumb **and** ARM).  It
   follows `BL`, `ldr pc,[pc,#imm]` veneers, and the ARMv4T
   `mov lr,pc; bx lr` interworking stubs, then emits the same `functions.json`

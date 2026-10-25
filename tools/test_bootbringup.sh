@@ -5,12 +5,15 @@
 #     contains the value 0x3b and the loader no longer halts in 0x3d44;
 #  2. the staging boot-region table resolves the kernel code section to
 #     0x50310000 and the .data section to 0x80000000;
-#  3. the synthetic KaeP descriptor/list and the one-instruction parser skip
-#     let the real loader program UPP, build page tables and reach the
-#     boot-image handoff at linked 0x80 with no undefined instruction.
+#  3. the KaeP container descriptor/list and its executable `ldr pc` handoff
+#     let the real loader program UPP, build page tables and reach linked 0x80
+#     with no undefined instruction;
+#  4. removing NK_STOP_PC executes the handoff and enters the real kernel at
+#     0x50310054 (it runs on into the kernel's own stack/exception path),
+#     rather than taking an SWI on the opaque KaeP record bytes.
 #
-# This is an explicit bring-up stand-in, not a KaeP unpack: the handoff target
-# is the boot image the real mask ROM would have decompressed.
+# The 0x20-byte KaeP record itself is preserved, not decoded; the trampoline is
+# the explicit mask-ROM stand-in for the still-undocumented record codec.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
@@ -37,7 +40,8 @@ echo "== staging boot-region table"
 "$PY" recompiler/bootregions.py build "$ROM" \
     out/6600_bootregions_staging.bin --profile staging >/dev/null
 
-echo "== explicit KaeP descriptor / node stand-in"
+echo "== KaeP container descriptor / node and executable handoff"
+"$PY" recompiler/kaep.py verify "$ROM" >/dev/null
 "$PY" recompiler/bootbringup.py verify "$ROM" >/dev/null
 "$PY" recompiler/bootbringup.py build "$ROM" \
     out/6600_bootbank_bringup.bin \
@@ -96,4 +100,34 @@ if [ -z "$insns" ] || [ "$insns" -lt 30000 ]; then
     exit 1
 fi
 
-echo "PASS: fragment C, staging sections, UPP init and boot-image handoff"
+echo "== handoff executes the installed trampoline and enters the kernel"
+NK_RAM_EXTRA=0x300000 NK_LOW_ROM=1 \
+  NK_LOW_ROM_IMAGE=out/6600_bootbank_bringup.bin \
+  NK_REGIONS=out/6600_bootregions_staging.bin@0x80000000 \
+  NK_ENTRY=0x30c NK_R11=0x80000000 NK_R10=0x80000000 \
+  NK_RECOVER=1 NK_CODE_ONLY=1 NK_BUDGET=1500000 NK_MMIO_N=0 \
+  ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin > out/bootbringup_kernel.log 2>&1
+
+if grep -q -- "SWI 0xf9ea00 at 0x00000080" out/bootbringup_kernel.log; then
+    echo "FAIL: 0x80 still executes the opaque KaeP record as an SWI" >&2
+    tail -20 out/bootbringup_kernel.log >&2
+    exit 1
+fi
+if ! grep -q "undefined=0" out/bootbringup_kernel.log; then
+    echo "FAIL: kernel handoff hit an undefined instruction" >&2
+    tail -20 out/bootbringup_kernel.log >&2
+    exit 1
+fi
+if ! grep -q "^last pcs:.* 5039" out/bootbringup_kernel.log; then
+    echo "FAIL: handoff did not reach the kernel code range" >&2
+    tail -20 out/bootbringup_kernel.log >&2
+    exit 1
+fi
+kinsns=$(sed -n 's/^insns=\([0-9]*\).*/\1/p' out/bootbringup_kernel.log)
+if [ -z "$kinsns" ] || [ "$kinsns" -lt 1000000 ]; then
+    echo "FAIL: kernel did not run after the handoff (${kinsns:-0})" >&2
+    exit 1
+fi
+
+echo "PASS: KaeP container, executable handoff and real kernel entry"

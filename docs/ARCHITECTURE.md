@@ -74,19 +74,20 @@ The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
 (first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.
 `recompiler/pagestream.py` removes the headers and makes the packed records
 contiguous; round 16 showed that the kernel text/export layout only matches
-the linked image after this step (469/478 exports, 98.1%).  The `KaeP` header
-at `0x124` still describes a boot-image payload the mask ROM normally
-installs, and the boot-region table is modelled with explicit type/flag bits:
+the linked image after this step (469/478 exports, 98.1%).  The `KaeP`/PeaK
+container at `0x124` is now unpacked by `kaep.py` (record `0x20` at `0x12e`,
+image `0x1423dc` at `0x14e`); the 0x20-byte record's own codec is still
+undocumented.  The boot-region table is modelled with explicit type/flag bits:
 `0x1a1c` needs type 5..8 plus attr `0x04000000`, while `0x1b34` needs type 2.
 `bootbank.py --stream` takes the stream slice `[0xb0, 0x100b0)` as the linked
 boot bank (all switch tables bias 0); `bootregions.py --profile staging` uses
 the `0xffffffff` no-expand sentinel for the type-2 RAM bank plus type-5 kernel
-code/data section banks.  `bootbringup.py` combines that with an explicit KaeP
-descriptor/boot-image node list and a one-word skip of the compressed-image
-parser; the real loader then programs UPP, builds page tables and reaches the
-**boot-image handoff at linked `0x80`** after 36,732 instructions.  The
-correct stream view instead stops in a board/CPU detection panic at `0x624c`;
-the KaeP unpack itself is still open.
+code/data section banks.  `bootbringup.py` combines that with the
+`kaep.install` descriptor/boot-image node list and an executable
+`ldr pc,[pc,#-4]; .word 0x50310054` handoff at linked `0x80`; the real loader
+programs UPP, builds page tables and executes the handoff into the kernel
+after 36,732 instructions.  The correct stream view instead stops in a
+board/CPU detection panic at `0x624c`; the PeaK record codec remains open.
 
 For the packed-image bring-up it also has:
 

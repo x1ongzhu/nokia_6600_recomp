@@ -10,7 +10,7 @@ what is executed, and the exact frontier.
 | UPP mask ROM | `0x00e0ca39` | Thumb | **no** — internal boot ROM |
 | EKA1 ROM reset vector | `0x50000000` | ARM | yes (the image's exception table) |
 | Kernel E32Image | `0x50310054` | **ARM** | yes, in the page-header-free stream at `0x31004c`/`0x3100b0` (link `0x50310000`); the raw `0x326924` is a page header |
-| Boot-image handoff | `0x00000080` | ARM | target of the secondary loader; in the round-15 stand-in it still holds the synthetic KaeP descriptor |
+| Boot-image handoff | `0x00000080` | ARM | target of the secondary loader; round 17 installs `ldr pc,[pc,#-4]; .word 0x50310054` there, so the handoff enters the kernel |
 
 The ROM header's `entry` field is the **mask-ROM** entry.  The kernel is
 separate: its EKA1 `TRomImageHeader` (`uid3 0x100058e8`) is at ROM `0x3268c0`,
@@ -880,6 +880,52 @@ NK_KERNEL_VECTORS=1 NK_RECOVER=0 NK_CALL_INFER=0 NK_BUDGET=1000000 \
     --rom-image out/6600_runtime_paged.bin
 ```
 
+### Round 17: the KaeP/PeaK container is unpacked; the handoff is executable (2026-10-25)
+
+**1. The 12-byte header is a 10-byte header plus an overlapped record.**  The
+bytes are ``"KaeP"`` (the little-endian constant ``0x5065614B``, i.e. the
+Nokia "PeaK" marker), a `u32` record size `0x20`, and a `u32` image size
+`0x1423dc`.  The 0x20-byte record starts at file **`0x12e`**, two bytes before
+the nominal end of the size word: the high half of `0x001423dc` is also the
+first halfword of the record's ARM branch stub.  The image starts at file
+**`0x14e`**, where a clean ARM vector table begins (`ldr pc,[pc,#0x18]`), and
+runs for `0x1423dc` bytes to `0x14252a`.  Image `+0x38` (file `0x186`) is real
+ARM boot code (`ldr r1,[pc,#0x1a0]`), so this is a container payload, not a
+checksum.
+
+**2. `kaep.py unpack` preserves the boundary.**  It writes the 0x20-byte record
+and the embedded image byte-for-byte (`out/6600_kaep_record.bin`,
+`out/6600_kaep_image.bin`) and reports both SHA-256 values.  The record codec
+used by the mask ROM is still undocumented; the tool does **not** invent a
+plaintext descriptor.
+
+**3. The handoff is now executable.**  The previous stand-in wrote a synthetic
+descriptor at linked `0x80` and stopped there; removing `NK_STOP_PC` executed
+the record bytes as an SWI (`SWI 0xf9ea00` at `0x80`).  `kaep.install` writes
+`ldr pc,[pc,#-4]; .word 0x50310054` in the first two descriptor words.  The
+loader only checks descriptor `+0/+4/+8` when its `0x40000000` flag is set,
+which the boot-bank entry does not do, so the shared words are safe.  The
+fields the loader actually consumes (`+0xc/+0x14/+0x1c/+0x20/...`) stay in
+place.  `bootbringup.py` now calls this installer and no longer patches the
+`0xfb8` parser.
+
+**4. Result.**  The handoff run enters the kernel at `0x50310054`; with the
+staging regions and a 1.5M budget it executes **1,499,999 ARM instructions**
+with `undefined=0`, one recovered stale call, and ends in the kernel code range
+(`0x5039...`) instead of the KaeP record.  The `0x3ae8 → 0x5bb4` stale call is
+still present and is what reaches the handoff.  `tools/test_kaep.sh` and
+`tools/test_bootbringup.sh` pin both the container extraction and the
+kernel-entry run.
+
+```
+.venv/bin/python recompiler/kaep.py unpack 6600_mcu.bin \
+  out/6600_kaep_record.bin out/6600_kaep_image.bin
+.venv/bin/python recompiler/kaep.py install \
+  out/6600_bootbank_linked.bin 6600_mcu.bin \
+  out/6600_bootbank_kaep_install.bin
+tools/test_kaep.sh
+```
+
 ### Historical results (rounds 3-4, before the Thumb fix)
 
 Baseline (unchanged by the fix):
@@ -932,7 +978,7 @@ The bring-up stack now has these layers:
 | call ring / watch | `NK_WATCH=addr`, `NK_WATCH_LOG=n` | on a watched PC, print registers (including r4-r12 and the stack) and the last n BL/BLX sites with their arguments and resolved targets |
 | entry/register injection | `NK_ENTRY=addr`, `NK_Rn=value` (n=0..12), `NK_SP`, `NK_LR` | reproduce a mask-ROM entry without writing a new harness; `NK_R11` is `fp`, `NK_R10` is `sl` |
 | panic halt | `NK_STOP_SELFB=1` (default in the boot harness) | stop on `b .` with `NK_STOP_SELF_BRANCH` instead of treating the panic as a recoverable callee fault |
-| handoff stop | `NK_STOP_PC=0x80` | stop exactly when the loader reaches the boot-image handoff, before executing the synthetic descriptor |
+| handoff stop | `NK_STOP_PC=0x80` | stop exactly when the loader reaches the boot-image handoff, before executing the installed `ldr pc` trampoline |
 | UPP boot stubs | `runtime/src/nokia_rt.c` | `0x58150422` bit `0x400`, `0x58120a08` non-zero, `0x41001400` bit 0: the two handshakes and RAM probe the loader performs |
 | boot-bank alias | `NK_LOW_ROM=1` (`NK_LOW_ROM_SIZE=0x10000`) | copy the first ROM bank to address 0, register it as code, install the 16 high vectors and enable the interpreter's low-alias window |
 | boot-region table | `NK_REGIONS=path[@addr]` (`recompiler/bootregions.py`) | install the mask-ROM bank table (`count` + 16-byte `{base,size,attr,linbase}` entries) the secondary loader expects in `r0/fp` |
@@ -1232,7 +1278,9 @@ is mid-function.
    boot-region profile (`bootregions.py --profile linear`) passes the old
    `0xc58` KaeP lookup and stops in the page-table fill at `0x2fe4`; the
    `linbase` base-vs-page-mask semantics and the page-table destination are
-   the concrete next steps.  The real KaeP unpack remains open.
+   the concrete next steps.  Round 17 unpacks the KaeP/PeaK container and makes
+   the `0x80` handoff executable, but the mask ROM's codec for the 0x20-byte
+   PeaK record is still open.
 7. **MMIO/display** — the entry already writes UPP registers around
    `0x58150000` / `0x58150500`; the next useful milestone is a real UPP
    display/timer/keypad register table rather than logging every access.
