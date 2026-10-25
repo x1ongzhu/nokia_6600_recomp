@@ -148,6 +148,13 @@
  *   NK_BANKED=1             enable the banked r13/r14, FIQ r8-r12 and SPSR
  *                           model; the harness presets per-mode stacks
  *   NK_BANK_LOG=1           log every banked CPSR mode switch
+ *   NK_TIMER=1              enable the instruction-driven UPP timer/ICU model
+ *                           (implies NK_BANKED; guest writes arm the timer)
+ *   NK_TIMER_LOG=n          log the first n timer register writes/expiries
+ *   NK_IRQ_LOG=n            log the first n IRQ exception entries
+ *   NK_CPSR=0x...           override the initial CPSR.  The mask-ROM IRQ
+ *                           hand-off needs I=0 (0x40000053 for SVC/ARM);
+ *                           the default 0x400000d3 keeps IRQs masked.
  *   NK_E32_SECTIONS=1       with --e32: place data/exports/dllref at their
  *                           runtime addresses (finds the packed export run)
  *   NK_E32_HDR=0x64         serialized EKA1 image header size (code offset)
@@ -1232,6 +1239,12 @@ int main(int argc, char** argv) {
             nk_poke(&cpu, NK_HIGH_VECTORS, v, 0x64);
             printf("kernel vectors: 0x64 bytes from %#010x -> 0x0 / %#010x\n",
                    g_kernel_code, NK_HIGH_VECTORS);
+            /* The mask ROM runs the kernel with CP15.V=1 (high vectors); the
+             * kernel then installs its real vector code at 0xffff0000 via
+             * Kern::InitVectors.  Low memory is boot-bank scratch and is
+             * overwritten by the kernel, so exceptions must use this page. */
+            cpu.cp15_c1 |= 0x2000u;
+            printf("cp15 c1 V=1: exception vectors at %#010x\n", NK_HIGH_VECTORS);
         }
         printf("runtime image %s: entry %#010x (%s)\n",
                rom_image, entry, thumb_entry ? "Thumb" : "ARM");
@@ -1504,8 +1517,20 @@ int main(int argc, char** argv) {
      * "pc left the image". */
     cpu.r[14] = (uint32_t)env_ulong("NK_LR", 0xdead0000u);
     cpu.cpsr = 0x400000d3u | (thumb_entry ? NK_CPSR_T : 0);  /* SVC, IRQ/FIQ off */
+    /* NK_CPSR overrides the reset CPSR (bring-up: the mask ROM may hand the
+     * kernel an I=0 SVC context; the round-30 IRQ path needs it). */
+    {
+        const char* cs = getenv("NK_CPSR");
+        if (cs) {
+            cpu.cpsr = (uint32_t)strtoul(cs, NULL, 0);
+            printf("cpsr override: %#010x\n", cpu.cpsr);
+        }
+    }
     cpu.r[15] = entry & ~1u;
-    if (env_ulong("NK_BANKED", 0)) {
+    /* The IRQ path needs the banked r13/r14 + SPSR model.  Enabling the timer
+     * implies it: an IRQ taken without banks would reuse the SVC stack. */
+    int need_banks = (int)(env_ulong("NK_BANKED", 0) || env_ulong("NK_TIMER", 0));
+    if (need_banks) {
         /* The mask-ROM startup gives each ARM mode its own stack.  The kernel
          * switches to UND/SVC/ABT while dispatching executive calls; without
          * banks those writes all land on the SVC stack.  These tops are a
@@ -1576,7 +1601,8 @@ int main(int argc, char** argv) {
     ip.swi_direct = (int)env_ulong("NK_SWI_DIRECT", 0);
     ip.swi_table = (uint32_t)env_ulong("NK_SWI_TABLE", 0x50314aec);
     ip.swi_log = (int)env_ulong("NK_SWI_LOG", 16);
-    ip.banked = (int)env_ulong("NK_BANKED", 0);
+    ip.banked = need_banks;
+    ip.irq_log = (int)env_ulong("NK_IRQ_LOG", 0);
     const char* complete = getenv("NK_SWI_COMPLETE");
     if (complete) {
         const char* p = complete;
@@ -1631,11 +1657,15 @@ int main(int argc, char** argv) {
     printf("\n--- stop: %s (%d) at %#010x ---\n",
            nk_interp_reason(&ip), ip.st.stop_reason, ip.st.stop_pc);
     printf("insns=%lu (ARM %lu / Thumb %lu), mode switches=%lu, undefined=%lu, "
-           "call fixups=%lu, unbound IAT=%lu, recoveries=%lu\n",
+           "call fixups=%lu, unbound IAT=%lu, recoveries=%lu, irqs=%lu\n",
            ip.st.insns, ip.st.arm_insns, ip.st.thumb_insns,
            ip.st.mode_switches, ip.st.undefined, ip.st.call_fixups, ip.st.iat_hits,
-           ip.st.recoveries);
-    printf("mmio: %lu reads, %lu writes\n", nk_mmio_reads(), nk_mmio_writes());
+           ip.st.recoveries, ip.st.irqs);
+    printf("mmio: %lu reads, %lu writes; timer: %s, %lu expiries\n",
+           nk_mmio_reads(), nk_mmio_writes(),
+           nk_bus_timer_enabled() ? "on" : "off", nk_bus_irqs());
+    printf("idle flag [0x8000000c] = %#010x, cp15 c1 = %#010x\n",
+           nk_r32(&cpu, 0x8000000cu), cpu.cp15_c1);
     printf("regs: r0=%#010x r1=%#010x r2=%#010x r3=%#010x sp=%#010x lr=%#010x pc=%#010x\n",
            cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[13], cpu.r[14], cpu.r[15]);
     printf("regs: r4=%#010x r5=%#010x r6=%#010x r7=%#010x r8=%#010x "

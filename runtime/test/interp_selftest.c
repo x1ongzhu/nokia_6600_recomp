@@ -430,6 +430,91 @@ int main(void) {
     CHECK(nk_r16(&c, 0x58150422u) == 0x0400u,
           "UPP 0x58150422 reports the boot ready bit");
 
+    /* ---- IRQ exception entry/return through the high vector page ----
+     * This is the round-30 chain in miniature: an external IRQ line is
+     * asserted, the CPU enters IRQ mode with SPSR_irq = old CPSR, the vector
+     * subtracts 4 from LR and returns with `movs pc,lr`, restoring the
+     * interrupted mode/stack. */
+    if (nk_alloc_ram(&c, 0xffff0000u, 0x10000u) != 0) return 1;
+    nk_w32(&c, 0xffff0018u, 0xe24ee004u);   /* sub  lr, lr, #4     */
+    nk_w32(&c, 0xffff001cu, 0xe1b0f00eu);   /* movs pc, lr         */
+    poke32(&c, 0x80000800u, 0xe3a0002au);   /* mov  r0, #42        */
+    poke32(&c, 0x80000804u, 0xe12fff12u);   /* bx   r2             */
+    {
+        nk_interp_t ip;
+        memset(&c.r, 0, sizeof c.r);
+        c.r[2] = TRAP;
+        c.r[13] = 0x80010000u;
+        c.r[14] = TRAP;
+        c.cpsr = 0x40000053u;               /* SVC, I=0, ARM      */
+        c.cp15_c1 = 0x2000u;                /* V=1: high vectors  */
+        c.r[15] = 0x80000800u;
+        c.irq_pending = 1;
+        nk_bank_init(&c, NK_MODE_SVC, 0x80010000u, TRAP);
+        nk_bank_init(&c, NK_MODE_IRQ, 0x80018000u, 0);
+        nk_interp_init(&ip);
+        ip.banked = 1;
+        ip.budget = 20;
+        ip.return_pc = TRAP;
+        ip.return_thumb = 0;
+        nk_interp_run(&c, &ip);
+        int ok = ip.st.irqs == 1 && ip.st.stop_reason == NK_STOP_RETURN &&
+                 c.r[0] == 42 && (c.cpsr & NK_CPSR_MODE) == NK_MODE_SVC &&
+                 (c.cpsr & 0x80u) == 0 && c.r[13] == 0x80010000u &&
+                 c.r[14] == TRAP;
+        if (!ok)
+            printf("      irq test: irqs=%lu stop=%d r0=%#x cpsr=%#x sp=%#x lr=%#x\n",
+                   ip.st.irqs, ip.st.stop_reason, c.r[0], c.cpsr, c.r[13], c.r[14]);
+        CHECK(ok, "IRQ enters the high vector and restores SPSR/mode/stack");
+
+        /* The same line must be ignored while CPSR.I is set. */
+        memset(&c.r, 0, sizeof c.r);
+        c.r[2] = TRAP;
+        c.r[13] = 0x80010000u;
+        c.r[14] = TRAP;
+        c.cpsr = 0x400000d3u;               /* SVC, I=1           */
+        c.cp15_c1 = 0x2000u;
+        c.r[15] = 0x80000800u;
+        c.irq_pending = 1;
+        nk_bank_init(&c, NK_MODE_SVC, 0x80010000u, TRAP);
+        nk_bank_init(&c, NK_MODE_IRQ, 0x80018000u, 0);
+        nk_interp_init(&ip);
+        ip.banked = 1;
+        ip.budget = 20;
+        ip.return_pc = TRAP;
+        ip.return_thumb = 0;
+        nk_interp_run(&c, &ip);
+        CHECK(ip.st.irqs == 0 && ip.st.stop_reason == NK_STOP_RETURN &&
+              c.r[0] == 42,
+              "IRQ is masked while CPSR.I is set");
+    }
+
+    /* ---- UPP timer unit 0 drives ICU IRQ 1 and clears on acknowledge ----
+     * NK_TIMER is off by default; the device model must only answer while it
+     * is enabled, and a guest-programmed reload (not a host constant) decides
+     * when the interrupt is raised. */
+    {
+        unsigned long before = nk_bus_irqs();
+        nk_bus_timer_set(1);
+        c.irq_pending = 0;
+        nk_w32(&c, 0x58120a04u, 2);         /* control: periodic  */
+        nk_w32(&c, 0x58120a18u, 10);        /* reload = 10 ticks  */
+        for (int i = 0; i < 9; i++) nk_bus_tick(&c, 1);
+        int quiet = c.irq_pending == 0 && nk_r32(&c, 0x58120114u) == 0;
+        nk_bus_tick(&c, 1);
+        int fired = c.irq_pending == 1 && nk_bus_irqs() == before + 1 &&
+                    nk_r32(&c, 0x58120114u) == 1;
+        nk_w32(&c, 0x58120a08u, 1);         /* acknowledge unit 0 */
+        int acked = nk_r32(&c, 0x58120114u) == 0;
+        c.irq_pending = 0;
+        nk_bus_timer_set(0);
+        if (!(quiet && fired && acked))
+            printf("      timer test: quiet=%d fired=%d acked=%d irqs=%lu\n",
+                   quiet, fired, acked, nk_bus_irqs());
+        CHECK(quiet && fired && acked,
+              "UPP timer 0 raises IRQ 1 at the guest reload and acks");
+    }
+
     nk_mem_free(&c);
     if (fails) { printf("%d test(s) failed\n", fails); return 1; }
     printf("interpreter self-test OK\n");

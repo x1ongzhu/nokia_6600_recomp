@@ -49,6 +49,10 @@ typedef struct nk_cpu {
     nk_bus_t* bus;    /* MMIO / device dispatch */
     nk_mode_bank bank[8];  /* USR/SYS, FIQ, IRQ, SVC, ABT, UND */
     uint32_t cp15_c1;      /* CP15 control register (MMU/cache/V bits) */
+    /* External interrupt request line, driven by the bus/device model.  The
+     * interpreter samples it between instructions and takes the ARM IRQ
+     * exception when CPSR.I is clear. */
+    int      irq_pending;
 } nk_cpu_t;
 
 enum { NK_FLAG_N = 31, NK_FLAG_Z = 30, NK_FLAG_C = 29, NK_FLAG_V = 28 };

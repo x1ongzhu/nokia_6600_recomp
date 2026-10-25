@@ -54,13 +54,15 @@ height = 208
 color  = true                      # 176x208 16-bit TFT
 
 [boot]
-# Current acceptance profile (see tools/test_round29.sh).
+# Current acceptance profile (see tools/test_round30.sh).
 import_map   = "config/imports-r29-6600.txt"
 callmap      = "config/callmap-rtc-6600.txt"
 system_time  = true                # mask-ROM TTime hand-off at 0x50000084
 boot_handoff = true
 primary_ram  = 0x80900000
 hal_timer_hz = 4
+timer        = true                # round 30: UPP timer/ICU model (NK_TIMER)
+irq_cpsr     = 0x40000053          # mask-ROM I=0 hand-off (NK_CPSR)
 
 [output]
 dir     = "out/"

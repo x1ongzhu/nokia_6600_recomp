@@ -44,6 +44,7 @@ enum {
     NK_STOP_OUT_OF_IMAGE, /* PC left the mapped ROM/RAM windows */
     NK_STOP_SPIN,       /* tight loop with no progress (bring-up watchdog) */
     NK_STOP_SELF_BRANCH,/* `b .` / `b pc`: a firmware panic/halt loop */
+    NK_STOP_NULL_CALL,  /* branch/call through a null object/vtable slot */
     NK_STOP_HOST
 };
 
@@ -57,6 +58,7 @@ typedef struct nk_interp_stats {
     unsigned long call_fixups;     /* interworking calls redirected/snapped */
     unsigned long iat_hits;        /* unbound import calls observed */
     unsigned long recoveries;      /* skipped calls (bring-up recovery) */
+    unsigned long irqs;            /* IRQ exceptions taken */
     uint32_t      stop_pc;
     int           stop_reason;
 } nk_interp_stats;
@@ -226,6 +228,7 @@ typedef struct nk_interp {
     int         watch_hits;      /* how many times to report (-1 = every) */
     int         watch_log;       /* calls to print when the watch fires */
     int         watch_mem_reg;   /* register whose memory is dumped (-1 = off) */
+    int         irq_log;         /* log the first N IRQ entries (0 = off) */
     uint32_t    watch_mem_len;   /* bytes to dump around that register */
 
     /* Bring-up watchdog: a tight loop that keeps executing the same few

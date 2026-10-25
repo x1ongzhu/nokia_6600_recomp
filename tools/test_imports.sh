@@ -129,7 +129,7 @@ fi
 echo "ok: import bridge executed $insns instructions with 0 unbound IAT"
 
 # The next frontier must be the allocator, not an import/layout stop.
-grep -q "^--- stop: pc left the image (5) at 0000000000 ---" out/imports_boot.log
+grep -q "^--- stop: null call (8) at 0000000000 ---" out/imports_boot.log
 grep -q "lr=0x503802ac" out/imports_boot.log
 grep -q "cpsr=0x000000db" out/imports_boot.log
 echo "ok: next step is the initial process/object index (B7e)"

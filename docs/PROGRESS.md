@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 29）
+最后更新：2026-10-26（round 30）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -45,12 +45,23 @@
 - **忠实启动到 idle loop**：`NK_SYSTEM_TIME=1` +
   `config/imports-r29-6600.txt` 运行 **3,000,000 条、0 undefined、
   0 unbound IAT、0 recoveries**，停在 `0x50310f84` 的 idle 等待循环。
+- **真实 IRQ + UPP timer**（round 30）：`Kern::Init1` 自己把 UPP timer 0
+  （`0x58120a00`）设为 periodic、reload `0x632ea`；到期后模型拉起 **IRQ 1**，
+  ICU 当前中断号 `0x58120114` = 1。CPU 在 `CP15.V=1` 下进入
+  `0xffff0018` → `Kern::Irq`（`0x50311194`）→ handler 表 `0x5d`
+  （对象 `0x80000b5c`）→ `0x50310ee0` 置 `[0x8000000c]=1`。
+  idle 在 **430,557 条**退出，**1 次 IRQ、0 fault**。
 
 ### 未完成
 
-- **Timer/DFC 中断**：kernel 在 `0x50310f84` 轮询 `[0x8000000c]`；该标志在进入
-  idle 前被清零，只有 IRQ/DFC handler 会置位。需要 timer 设备 + 真实 IRQ 入口
-  （kernel vector `0x18` → handler `0x50315258`）。
+- **idle 之后的 timer-queue 对象 `[0x80001c34]`**：idle 返回后
+  `Kern::Init1` 在 `0x5031ef40` 执行 `[0x80001c34] -> vtable+0xc`；该对象
+  仍为 null，于是停在 **`0x5031ef50` 的 null call**。kernel export 344
+  （setter `0x5032b33c`）负责安装它，但本 ROM 没有任何 image import 这个
+  export，说明它来自 mask ROM/ASSP 启动状态。这是当前的 exact frontier，
+  不是 CPU/解析错误。
+- **Timer unit 1 / DFC 队列**：IRQ 2 的 handler `0x503113d8` 已注册，
+  但系统 tick 队列尚未启动（没有 pending timer）。
 - **显示/键盘/音频/文件服务/应用启动**（P3）。
 - **Mask-ROM PeaK record codec**：当前 hand-off 是显式 stand-in，不是解包实现。
 - **真实硬件 HLE**：display controller、DSP/radio、RTC 仍是最小模型。
@@ -79,6 +90,20 @@
 | `0x50310f6c` | idle 函数；循环在 `0x50310f84` |
 | `0x50310b30` | `Kern::Init1` 失败的 MKERN-WD2 24 panic 入口 |
 | `0x50315258` | kernel IRQ handler（vector `0x18`） |
+| `0xffff0018` | high-vector IRQ 入口（`CP15.V=1`；harness 同时复制到 `0x0`） |
+| `0x50311194` | `Kern::Irq`：读 `0x58120114`，按 `0x5c+irq` 查 handler 表 |
+| `0x80000b80` | interrupt handler table（186 项，`[0x80001774]/[0x80001778]`） |
+| `0x80000b5c` | IRQ 1 handler 对象；vtable `0x50338a40` → `0x50310ee0` |
+| `0x50310ee0` | 置 `[0x8000000c]=1` 的 scheduler-wake handler |
+| `0x80000574` | IRQ 2 / IrqTimer1 handler 对象；vtable `0x50338a34` → `0x503113d8` |
+| `0x503113d8` | ack timer unit 1（`0x58120a28`）并进入 timer DFC |
+| `0x58120a00` | UPP timer 0（`IrqTimer0`，IRQ 1）；`+4` control，`+0x18` reload |
+| `0x58120a20` | UPP timer 1（`IrqTimer1`，IRQ 2）；`+8` status/ack，`+0x10` compare |
+| `0x58120114` | UPP ICU current-IRQ register |
+| `0x5031ef40` | idle 返回后的 `[0x80001c34] -> vtable+0xc` 调用点 |
+| `0x80001c34` | **缺失的 timer-queue 对象**（当前为 0） |
+| `0x5032b33c` | kernel export 344：`[0x80001c34]` 的 setter（已存在则 panic 0x22） |
+| `0x5032b368` / `0x5032b37c` | kernel export 5 / 286：timer 队列操作 |
 
 ### 时间簇（EUser `edata[K-3]`）
 
@@ -96,6 +121,38 @@
   `RdHi==Rs` 是 firmware 实际用法，先读操作数再写回。
 - S=0 的 SUB/RSC/ADD/ADC/SBC/RSC **不得**写 N/Z/C/V。
   否则 EUser 64-bit 除法循环的 `adc r3,r3,r3` 会清借位，`movhs` 余数更新失效。
+
+### Timer / IRQ 链（round 30）
+
+```
+Kern::Init1
+  0x50310ff8  bl 0x50313250(0,2)     ; timer0 control = 2 (periodic)
+  0x50311004  bl 0x503132c8(0,0x632ea); timer0 reload  = 0x632ea
+  0x50310f6c  idle()                 ; polls [0x8000000c]
+
+UPP timer 0 expires (guest-programmed reload, no host period)
+  model: status=1, ICU current IRQ=1, cpu.irq_pending=1
+
+CPU (CP15.V=1, CPSR.I=0)
+  0xffff0018  kernel vector table -> 0x50315258
+  0x50315258  IRQ entry: sub lr,#4, save r0-r3/ip/lr on the IRQ bank
+  0x50311194  Kern::Irq: [0x58120114]=1 -> handler table[0x5c+1]
+  0x80000b5c  handler object -> vtable[0x50338a40]+8 = 0x50310ee0
+  0x50310ee0  ack timer0 (write 0 to 0x58120a08); [0x8000000c] = 1
+  0x50310f84  idle sees 1, returns to 0x5031ef20
+  0x5031ef40  [0x80001c34] -> null -> stop "null call" at 0x5031ef50
+```
+
+- timer 单元 stride `0x20`：`+0x00` counter、`+0x04` control、
+  `+0x08` status/ack、`+0x0c` mode、`+0x10` compare、`+0x14` reload2、
+  `+0x18` reload。
+- IRQ 编号 = 1 + unit；`0x58120114` 直接给出当前编号，`Kern::Irq`
+  用 `0x5c + irq` 作为 handler 表下标。
+- IRQ 入口：`SPSR_irq` 保存旧 CPSR，`LR_irq = PC + 4`，T bit 清零；
+  返回由 `subs pc,lr,#4` / `ldm {...,pc}^` 恢复 SPSR、bank 和模式。
+- `NK_TIMER=1` 才启用设备模型；默认关闭，round-29 的 3,000,000 条
+  control 保持不变。`NK_CPSR=0x40000053` 提供 mask-ROM 的 I=0 hand-off；
+  `NK_CPSR=0x400000d3`（I=1）是“timer 到期但不进 IRQ”的 control。
 
 ---
 
@@ -122,7 +179,18 @@ NK_IMPORTMAP=config/imports-r29-6600.txt \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 
+# round 30: 同一条命令加 timer / I=0 hand-off / IRQ 日志
+NK_TIMER=1 NK_TIMER_LOG=8 NK_CPSR=0x40000053 NK_IRQ_LOG=4 \
+  NK_IMPORTMAP=config/imports-r29-6600.txt \
+  NK_SYSTEM_TIME=1 NK_BOOT_HANDOFF=1 NK_SUPERPAGE=1 NK_B7E=1 \
+  NK_TRAPCLEAN=1 NK_EXT_STUB=1 NK_HAL_TIMER_HZ=4 NK_PRIMARY_RAM=0x80900000 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_SWI_DIRECT=1 NK_SWI_COMPLETE=0x4d NK_BUDGET=3000000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+
 # 验收
+tools/test_round30.sh
 tools/test_round29.sh
 for t in tools/test_*.sh; do sh "$t" || exit 1; done
 ```
@@ -135,19 +203,23 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 |---|---|---|
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
-| P2 | timer/DFC IRQ、调度器离开 idle、线程运行 | 进行中 |
+| P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；调度器对象缺失，进行中 |
 | P3 | 显示/键盘/音频、文件服务、S60 app 启动 | 未开始 |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
 
-1. **Timer 设备模型**：给 UPP timer 一个计数器与到期事件，接到 kernel 的
-   timer/DFC 队列。
-2. **真实 IRQ 入口**：用 banked IRQ 模式进入 vector `0x18`，保存/恢复
-   `SPSR_irq`/`LR_irq`，让 handler 处理并返回 idle。
-3. **验证**：idle 被第一次打断后，确认 `[0x8000000c]` 的语义、调度器是否
-   切换到初始线程，并记录新的 frontier。
-4. 之后再考虑 display controller 与 UI 路径。
+1. **解出 `[0x80001c34]` 的 boot-state 对象**：idle 返回后
+   `Kern::Init1` 必须通过 `[0x80001c34]->vtable+0xc`。优先确认它是否由
+   variant `ecust.dll`（当前未加载）、HAL channel 或 mask-ROM super page
+   创建；这是当前唯一阻塞点。
+2. **让 scheduler/timer 对象真正创建**：如果它来自 HAL timer channel，
+   补齐 vtable（不仅 `+0x5c` 频率），让 kernel 自己 new/注册。
+3. **验证 scheduler 切换到初始 thread**：记录第一次线程运行/上下文切换，
+   而不是停在 null call。
+4. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
+   IRQ 2 → `0x503113d8` → DFC 路径。
+5. 之后进入 display controller 与 UI 路径。
 
 ---
 
@@ -155,7 +227,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 
 - `NK_SYSTEM_TIME`、`NK_BOOT_HANDOFF`、`NK_PRIMARY_RAM`、`NK_B7E` 等是
   **显式的 mask-ROM/HLE 状态模型**，不是从 mask ROM 解出的真实初始化。
-- `[0x8000000c]` 的 IRQ/DFC 语义尚未验证；当前 3,000,000 条是预算耗尽，
-  不是“系统空闲”证明。
+- `[0x8000000c]` 的语义已在 round 30 验证：它由 IRQ 1 的 handler
+  `0x50310ee0` 置位，idle 随即退出；I=1 时同一到期事件不会进 IRQ。
+- `[0x80001c34]` 在启动结束时仍为 0；当前 stop 是 `0x5031ef50` 的
+  null call，不是 CPU fault。该对象应由 mask-ROM/HAL/variant 启动状态创建。
+- timer unit 1 / IRQ 2 / DFC 路径尚未被真实 pending timer 触发。
 - 显示/键盘/音频/文件服务均未实现；app 二进制已放置，但无法启动。
 - `references/` 与 `fw/` 是本地离线材料，不随仓库分发。

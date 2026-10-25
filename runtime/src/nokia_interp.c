@@ -124,6 +124,31 @@ void nk_bank_init(nk_cpu_t* c, uint32_t mode, uint32_t sp, uint32_t lr) {
     c->bank[i].preset = 1;
 }
 
+/* Enter an ARM exception.  `vector` is the architectural vector address
+ * (0x08 SVC, 0x18 IRQ, ...), `lr` the architecturally-correct return link and
+ * `spsr` the CPSR to save.  The old mode's bank is written back, the new
+ * mode's bank (sp/lr) is loaded, and CPSR.I is set.  ARMv4T sets T=0 on
+ * exception entry.  The caller must have preset the target bank's stack
+ * (NK_BANKED=1 in the harness).  Without banks the old SP would be reused,
+ * which the kernel's nested SVC/UND/IRQ paths cannot survive, so exceptions
+ * are only taken when ip->banked is on. */
+static void exception_enter(nk_cpu_t* c, uint32_t mode, uint32_t vector,
+                            uint32_t lr, uint32_t spsr) {
+    int newi = mode_idx(mode);
+    bank_save(c);
+    c->bank[newi].spsr = spsr;
+    c->bank[newi].spsr_valid = 1;
+    c->bank[newi].lr = lr;
+    if (!c->bank[newi].valid) {
+        c->bank[newi].sp = c->r[13];
+        c->bank[newi].valid = 1;
+    }
+    c->cpsr = (spsr & ~(NK_CPSR_MODE | NK_CPSR_T)) | mode | 0x80u;
+    bank_load(c);
+    c->r[14] = lr;
+    c->r[15] = vector;
+}
+
 static inline uint32_t rp_arm(nk_cpu_t* c, unsigned n, uint32_t pc) {
     return n == 15 ? pc + 8 : c->r[n];
 }
@@ -1291,8 +1316,19 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
     /* ---- coprocessor / CP15 / SWI (bits 27-26 = 11) ---- */
     if (cls == 3) {
         if (((op >> 8) & 0xf) == 0xf && (op & 0x0e000000u) == 0x0e000000u) {
+            unsigned crn = (op >> 16) & 0xf, rd = (op >> 12) & 0xf;
+            unsigned crm = op & 0xf, op2 = (op >> 5) & 7;
+            /* CP15 c1 (control) carries the ARMv4T V bit: exceptions then use
+             * the high vector page at 0xffff0000.  The 6600 kernel installs
+             * its vector code there, and its boot bank overwrites low memory,
+             * so exceptions must honour V instead of always using 0x0. */
+            if (crn == 1 && crm == 0 && op2 == 0) {
+                if (op & (1u << 20)) c->r[rd] = c->cp15_c1;
+                else                 c->cp15_c1 = c->r[rd];
+                return 0;
+            }
             fprintf(stderr, "[interp] CP15 %s c%d at %#010x\n",
-                    (op & (1u << 20)) ? "MRC" : "MCR", (op >> 16) & 0xf, pc);
+                    (op & (1u << 20)) ? "MRC" : "MCR", crn, pc);
             return 0;
         }
         /* SWI with cond != 1111 (rare but legal). */
@@ -1690,14 +1726,18 @@ static int pc_in_code_space(uint32_t pc, int allow_low_alias) {
 int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
     if (ip->budget <= 0) ip->budget = 10000000;
     if (ip->banked) bank_save(c);   /* publish the initial SVC/USR view */
+    unsigned tick_acc = 0;
     while (ip->budget-- > 0) {
+        /* Advance the UPP timer device in 16-instruction quanta.  It only
+         * does work when NK_TIMER=1 and the guest has armed a unit. */
+        if ((tick_acc++ & 15u) == 0) nk_bus_tick(c, 16);
         if (ip->watch_pc && ip->watch_hits != 0 &&
             (c->r[15] & ~1u) == (ip->watch_pc & ~1u)) {
             fprintf(stderr,
-                    "[watch] pc=%#010x thumb=%d r0=%#x r1=%#x r2=%#x r3=%#x "
-                    "sp=%#x lr=%#x cpsr=%#x\n",
-                    c->r[15], thumb(c), c->r[0], c->r[1], c->r[2], c->r[3],
-                    c->r[13], c->r[14], c->cpsr);
+                    "[watch] pc=%#010x thumb=%d insns=%lu r0=%#x r1=%#x r2=%#x "
+                    "r3=%#x sp=%#x lr=%#x cpsr=%#x\n",
+                    c->r[15], thumb(c), ip->st.insns, c->r[0], c->r[1],
+                    c->r[2], c->r[3], c->r[13], c->r[14], c->cpsr);
             fprintf(stderr,
                     "[watch] r4=%#x r5=%#x r6=%#x r7=%#x r8=%#x r9=%#x "
                     "r10=%#x r11=%#x r12=%#x\n",
@@ -1718,6 +1758,21 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
             dump_call_ring(ip, ip->watch_log);
             if (ip->watch_hits > 0) ip->watch_hits--;
         }
+        /* ARM IRQ: sampled between instructions, taken only when CPSR.I is
+         * clear.  LR_irq = PC + 4 (the handler's `sub lr,lr,#4` recovers the
+         * interrupted instruction) and T is cleared by exception entry. */
+        if (ip->banked && c->irq_pending && !(c->cpsr & 0x80u) &&
+            mode_idx(c->cpsr) != 2) {
+            uint32_t vector = (c->cp15_c1 & 0x2000u) ? 0xffff0018u : 0x18u;
+            if (ip->irq_log-- > 0)
+                fprintf(stderr, "[irq] enter insn=%lu pc=%#010x lr=%#010x -> %#010x cpsr=%#010x\n",
+                        ip->st.insns, c->r[15], c->r[15] + 4u, vector, c->cpsr);
+            c->irq_pending = 0;
+            ip->st.irqs++;
+            exception_enter(c, NK_MODE_IRQ, vector,
+                            c->r[15] + 4u, c->cpsr);
+            continue;
+        }
         if (spin_tick(ip, c->r[15])) {
             if (recover_call(ip, c, NK_STOP_SPIN)) continue;
             ip->st.stop_reason = NK_STOP_SPIN;
@@ -1730,6 +1785,18 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
             ip->st.stop_pc = c->r[15];
             set_thumb(c, ip->return_thumb);
             return 1;
+        }
+        /* High vectors are in use: address 0 can only be a null pointer.  The
+         * round-30 timer IRQ wakes Kern::Init1 out of idle, whose continuation
+         * calls [0x80001c34]->vtable+0xc; that boot-state object is still
+         * missing.  Report it as such instead of executing zero memory. */
+        if (c->r[15] == 0 && (c->cp15_c1 & 0x2000u)) {
+            ip->st.stop_reason = NK_STOP_NULL_CALL;
+            ip->st.stop_pc = 0;
+            fprintf(stderr,
+                    "[interp] null function pointer: branch to 0 (caller lr=%#010x)\n",
+                    c->r[14]);
+            break;
         }
         /* The 6600 maps ROM at 0x50000000, RAM at 0x80000000 and high
          * vectors at 0xffff0000.  A PC below 1 GiB normally means a corrupted
@@ -1834,6 +1901,7 @@ const char* nk_interp_stop_name(int reason) {
     case NK_STOP_OUT_OF_IMAGE: return "pc left the image";
     case NK_STOP_SPIN:      return "spin loop";
     case NK_STOP_SELF_BRANCH: return "self-branch (panic halt)";
+    case NK_STOP_NULL_CALL: return "null call";
     default:                return "host";
     }
 }

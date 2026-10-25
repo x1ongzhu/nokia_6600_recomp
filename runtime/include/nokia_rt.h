@@ -162,6 +162,21 @@ void nk_game_register(void);                       /* register all lifted funcs 
 unsigned long nk_mmio_reads(void);
 unsigned long nk_mmio_writes(void);
 
+/* ---- UPP timer / interrupt-controller device model ----
+ *
+ * The 6600's kernel programs four UPP timer units at 0x58120a00 (stride
+ * 0x20) and dispatches hardware interrupts by reading the current IRQ number
+ * from 0x58120114.  The model below is instruction-driven and disabled
+ * unless NK_TIMER=1, so the round-29 boot control stays unchanged.
+ *
+ * nk_bus_tick() advances every armed timer by `n` guest instructions and
+ * raises the CPU IRQ line on expiry.  nk_bus_timer_enabled() is used by the
+ * harness summary; nk_bus_irqs() counts expiries. */
+void          nk_bus_tick(nk_cpu_t* c, unsigned n);
+int           nk_bus_timer_enabled(void);
+void          nk_bus_timer_set(int on);
+unsigned long nk_bus_irqs(void);
+
 #ifdef __cplusplus
 }
 #endif

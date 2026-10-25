@@ -63,8 +63,13 @@ cross-page or unmapped accesses go through `nokia_rt.c`, where MMIO shims live.
 - data processing, shifts, loads/stores, LDM/STM, MUL/MLA,
   **UMULL/UMLAL/SMULL/SMLAL**, MRS/MSR, BX/BLX, SWI, CP15;
 - CPSR flags and banked modes (`NK_BANKED`), SPSR exception return;
+- ARM IRQ exception entry/return (round 30): SPSR_irq, banked r13/r14,
+  `LR_irq = PC+4`, vector base from CP15.V (high vectors), and the
+  `subs pc,lr,#4` / `ldm ...,{pc}^` SPSR restores;
+- an instruction-driven UPP timer/ICU model at `0x58120a00` / `0x58120100`
+  (`NK_TIMER=1`); guest writes arm a unit, expiry raises the IRQ line;
 - crash recovery, per-call-site repair (`NK_CALLMAP`), code-range guard,
-  spin watchdog, PC watch, `b .` panic halt;
+  spin watchdog, PC watch, `b .` panic halt, null-call stop;
 - EKA1 executive call gate (`NK_SWI_DIRECT`): `svc #N` → kernel service table
   `0x50314aec` with the caller's LR live.
 
@@ -109,6 +114,9 @@ instruction sequences are in [`BOOT.md`](BOOT.md).
 The runtime answers hardware the phone expects:
 
 - sparse ROM/RAM plus MMIO bus; UPP boot handshake stubs;
+- UPP timer/ICU (`0x58120a00` / `0x58120100`) driven by guest instructions:
+  the guest programs control/reload, expiry raises the IRQ line and sets the
+  ICU current-IRQ register (`NK_TIMER=1`);
 - HAL timer frequency (`NK_HAL_TIMER_HZ`), RTC/allocator stand-ins;
 - framebuffer/keypad/audio are **not implemented yet**.
 
@@ -123,8 +131,9 @@ success.
 | extraction / stream / layout / imports | done, pinned by tests |
 | interpreter + EUser relocation | done (round 29 fixed long multiply and non-S flags) |
 | faithful kernel boot | reaches idle loop `0x50310f84` (3,000,000 insns, 0 faults) |
-| timer/DFC IRQ | **next** |
+| timer/IRQ + idle exit | **done (round 30)**: first IRQ at 430,557 insns, idle exits |
+| scheduler / timer boot-state object | **next**: `[0x80001c34]` is null, stop at `0x5031ef50` |
 | display/keypad/audio/file server/apps | not started |
 
 Acceptance tests and the current frontier:
-[`PROGRESS.md`](PROGRESS.md), [`tools/test_round29.sh`](../tools/test_round29.sh).
+[`PROGRESS.md`](PROGRESS.md), [`tools/test_round30.sh`](../tools/test_round30.sh).

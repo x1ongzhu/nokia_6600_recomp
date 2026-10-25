@@ -61,10 +61,10 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 29)
+## Status (2026-10-26, round 30)
 
 The **real kernel boots from the flat image to its idle loop** under the native
-interpreter. What works:
+interpreter, and the **first hardware interrupt now wakes it**. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -80,12 +80,20 @@ interpreter. What works:
   `CTrapCleanup`, thread/process/object-index stand-ins.
 - [x] **Faithful boot to the kernel idle loop**: 3,000,000 instructions,
   0 undefined, 0 unbound IAT, 0 recoveries.
+- [x] **ARM IRQ exception + UPP timer**: SPSR_irq / banked r13-r14, high
+  vectors from CP15.V, and an instruction-driven timer/ICU model. The kernel's
+  own `Kern::Init1` arms timer unit 0 (reload `0x632ea`); the expiry raises
+  IRQ 1, the vector at `0xffff0018` dispatches `0x50310ee0`, that handler sets
+  `[0x8000000c]`, and the idle loop at `0x50310f84` exits after **430,557
+  instructions** with **1 IRQ** and **0 faults**.
 
 Not implemented yet:
 
-- [ ] **Timer/DFC IRQ** — the kernel idles on `[0x8000000c]`; only an interrupt
-  handler sets it. Next step is a timer device + real IRQ entry
-  (kernel vector `0x18` → handler `0x50315258`).
+- [ ] **Scheduler/timer boot-state object** — after idle, `Kern::Init1`
+  continues at `0x5031ef40` and calls `[0x80001c34]->vtable+0xc`; that object
+  is still null, so the boot stops at a **null call at `0x5031ef50`**. This is
+  the next frontier (the object is normally created by the mask-ROM/HAL boot
+  state, not by the E32 entry).
 - [ ] UI/display, keypad, audio, file server, app launching (P3).
 - [ ] Mask-ROM PeaK record codec (the hand-off is an explicit stand-in).
 - [ ] Real hardware HLE (display controller, DSP/radio, RTC).
@@ -125,11 +133,18 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 # ... 3,000,000 insns, 0 undefined/unbound/recoveries, idle loop 0x50310f84
+
+# 5. round 30: re-run step 4 with the timer/IRQ hand-off
+#    NK_TIMER=1 NK_CPSR=0x40000053 NK_IRQ_LOG=4
+# ... 430,557 insns, irqs=1, timer expiry at the guest reload, [0x8000000c]=1,
+# ... idle exits, then a null call at 0x5031ef50 ([0x80001c34] object)
 ```
 
 Without `NK_SYSTEM_TIME=1` the same boot stops at 133,950 instructions with
 the MKERN-WD2 24 panic (`0x50310b30`) — that is the control for the initial
-TTime hand-off.
+TTime hand-off.  With `NK_TIMER=1` but the reset CPSR left at `I=1`
+(`NK_CPSR=0x400000d3`) the timer still expires, but no IRQ is taken: that is
+the round-30 control for the exception entry.
 
 ## Tests
 
@@ -144,7 +159,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_romimage.sh` | flat image assembly, image map, ROMFS placement |
 | `tools/test_imports.sh` | IAT/stub scan and ELocl hole binding |
 | `tools/test_loader.sh` | EKA1 packed-record loader and first import binding |
-| `tools/test_round29.sh` | **current boot acceptance**: interpreter fixes, r29 map, idle loop |
+| `tools/test_round29.sh` | previous acceptance: interpreter fixes, r29 map, idle loop |
+| `tools/test_round30.sh` | **current acceptance**: UPP timer/ICU, IRQ entry, idle exit, null-call frontier |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -178,10 +194,29 @@ The kernel reaches its idle wait loop:
 0x50310f90  beq 0x50310f84
 ```
 
-`[0x8000000c]` is cleared just before the idle call and only an IRQ/DFC
-handler would set it again. The next round is a timer device and a real IRQ
-entry (banked mode, kernel vector `0x18` → `0x50315258`), so the scheduler can
-leave idle. See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for
+Round 30 closes the loop around that flag.  `Kern::Init1` arms UPP timer 0
+(`0x58120a04` control=2, `0x58120a18` reload=`0x632ea`); when it expires the
+model raises **IRQ 1** and reports it in the ICU current-IRQ register at
+`0x58120114`.  The CPU enters the high vector (`CP15.V=1`) at `0xffff0018`,
+`Kern::Irq` dispatches table entry `0x5d` (the handler object at `0x80000b5c`),
+and its vtable method `0x50310ee0` sets `[0x8000000c] = 1`.  The idle loop
+exits at instruction **430,557**.
+
+The next gap is the boot-state object `[0x80001c34]`.  After idle,
+`Kern::Init1` continues:
+
+```
+0x5031ef40  ldr r3, [0x80001c34]   ; object (currently null)
+0x5031ef44  ldr r0, [r3]           ; vtable
+0x5031ef48  ldr r3, [r0]
+0x5031ef4c  mov lr, pc
+0x5031ef50  ldr pc, [r3, #0xc]     ; -> null call at 0x5031ef50
+```
+
+That object is the kernel's timer-queue global: kernel export 344
+(`0x5032b33c`) is its setter, and no image in this ROM imports that export, so
+the mask-ROM/ASSP boot state must install it.  The frontier is therefore a
+**null call at `0x5031ef50`**, not a CPU fault.  See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for
 the roadmap.
 
 ## Legal
