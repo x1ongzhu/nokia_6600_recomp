@@ -335,42 +335,99 @@ static void drop_call(nk_interp_t* ip) {
  * the call from the harness heap instead of dereferencing a null object.
  * r0 = heap (ignored), r1 = byte/element count.  A count of -1 asks for the
  * end of the heap, which the real implementation answers without allocating. */
-static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
-    if (!ip->alloc_hle || ip->alloc_pc == 0 || pc != ip->alloc_pc)
+/* Every HLE block carries an 8-byte header so ReAlloc/Free can find its
+ * payload size.  The returned pointer is header+8.  The bump heap is never
+ * reclaimed; Free is a no-op and ReAlloc copies into a fresh block. */
+#define NK_HLE_BLOCK_HDR 8u
+
+static int hle_alloc_block(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc,
+                           uint32_t n, uint32_t* out) {
+    uint32_t sz = (n + 7u) & ~7u;
+    if (sz < 8u) sz = 8u;
+    if (ip->alloc_base == 0 || ip->alloc_cur + NK_HLE_BLOCK_HDR + sz >
+            ip->alloc_end) {
+        ip->st.stop_reason = NK_STOP_UNDEFINED;
+        ip->st.stop_pc = pc;
+        fprintf(stderr, "[interp] HLE allocator exhausted at %#010x "
+                "(size %#x)\n", ip->alloc_cur, sz);
         return 0;
-    int32_t n = (int32_t)c->r[1];
-    uint32_t p;
-    uint32_t heap = c->r[0];
-    if (n < 0) {
-        p = ip->alloc_cur;
-    } else {
-        uint32_t sz = ((uint32_t)n + 7u) & ~7u;
-        if (sz == 0) sz = 8;
-        if (ip->alloc_cur == 0 || ip->alloc_cur + sz > ip->alloc_end) {
-            /* Out of the bring-up heap: report instead of returning garbage. */
-            ip->st.stop_reason = NK_STOP_UNDEFINED;
-            ip->st.stop_pc = pc;
-            fprintf(stderr,
-                    "[interp] HLE allocator exhausted at %#010x (size %#x)\n",
-                    ip->alloc_cur, sz);
-            return 1;
-        }
-        p = ip->alloc_cur;
-        ip->alloc_cur += sz;
-        for (uint32_t i = 0; i < sz; i++) nk_w8(c, p + i, 0);
     }
-    ip->alloc_hits++;
+    uint32_t block = ip->alloc_cur;
+    ip->alloc_cur += NK_HLE_BLOCK_HDR + sz;
+    nk_w32(c, block, sz);                       /* payload size */
+    nk_w32(c, block + 4, 0x484c4548u);          /* 'HLEH' magic */
+    for (uint32_t i = 0; i < sz; i++) nk_w8(c, block + NK_HLE_BLOCK_HDR + i, 0);
+    *out = block + NK_HLE_BLOCK_HDR;
+    return 1;
+}
+
+static int hle_is_bump_ptr(nk_interp_t* ip, uint32_t p) {
+    return ip->alloc_base && p >= ip->alloc_base + NK_HLE_BLOCK_HDR &&
+           p < ip->alloc_cur;
+}
+
+static void hle_return(nk_interp_t* ip, nk_cpu_t* c, uint32_t value) {
     ip->st.insns++;                /* the intercepted guest call */
-    c->r[0] = p;
+    c->r[0] = value;
     uint32_t lr = c->r[14];
     int new_t = 0;
     (void)pop_call(ip, lr & ~1u, &new_t);
     set_thumb(c, new_t ? 1 : 0);
     c->r[15] = lr & ~1u;
-    if (ip->alloc_log-- > 0)
-        fprintf(stderr, "[interp] HLE alloc %d bytes -> %#010x "
-                "(heap %#010x) at %#010x\n", n, p, heap, pc);
-    return 1;
+}
+
+static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
+    if (!ip->alloc_hle) return 0;
+
+    if (ip->alloc_pc && pc == ip->alloc_pc) {
+        int32_t n = (int32_t)c->r[1];
+        uint32_t p;
+        uint32_t heap = c->r[0];
+        if (n < 0) {
+            p = ip->alloc_cur;
+        } else if (!hle_alloc_block(ip, c, pc, (uint32_t)n, &p)) {
+            return 1;
+        }
+        ip->alloc_hits++;
+        hle_return(ip, c, p);
+        if (ip->alloc_log-- > 0)
+            fprintf(stderr, "[interp] HLE alloc %d bytes -> %#010x "
+                    "(heap %#010x) at %#010x\n", n, p, heap, pc);
+        return 1;
+    }
+
+    if (ip->realloc_pc && pc == ip->realloc_pc) {
+        uint32_t old = c->r[1];
+        int32_t n = (int32_t)c->r[2];
+        uint32_t heap = c->r[0];
+        if (!old || !hle_is_bump_ptr(ip, old) || n < 0)
+            return 0;               /* not a block we own: use the real heap */
+        uint32_t oldsz = nk_r32(c, old - NK_HLE_BLOCK_HDR);
+        uint32_t newp;
+        if (!hle_alloc_block(ip, c, pc, (uint32_t)n, &newp)) return 1;
+        uint32_t copy = oldsz < (uint32_t)n ? oldsz : (uint32_t)n;
+        for (uint32_t i = 0; i < copy; i++)
+            nk_w8(c, newp + i, nk_r8(c, old + i));
+        ip->realloc_hits++;
+        hle_return(ip, c, newp);
+        if (ip->alloc_log-- > 0)
+            fprintf(stderr, "[interp] HLE realloc %#010x (%#x) -> %#010x "
+                    "(%d) at %#010x\n", old, oldsz, newp, n, pc);
+        (void)heap;
+        return 1;
+    }
+
+    if (ip->free_pc && pc == ip->free_pc) {
+        uint32_t p = c->r[1];
+        if (!hle_is_bump_ptr(ip, p)) return 0;
+        ip->free_hits++;
+        hle_return(ip, c, 0);
+        if (ip->alloc_log-- > 0)
+            fprintf(stderr, "[interp] HLE free %#010x at %#010x\n", p, pc);
+        return 1;
+    }
+
+    return 0;
 }
 
 /* Roll back to the most recent BL/BLX and treat it as "returned 0".
@@ -1574,7 +1631,9 @@ void nk_interp_init(nk_interp_t* ip) {
      * when swi_direct is enabled; the boot harness can override it. */
     ip->swi_table = 0x50314aecu;
     ip->swi_log = 16;
-    ip->alloc_pc = 0x50380270u;   /* EUser RHeap::Alloc (import ord 109) */
+    ip->alloc_pc = 0x5038e2ecu;   /* EUser RHeap::Alloc (ROM ordinal 43) */
+    ip->realloc_pc = 0x5039c630u; /* EUser RHeap1::ReAlloc1 */
+    ip->free_pc = 0x5038e3d8u;    /* EUser RHeap::Free */
     ip->alloc_log = 16;
     g_bank_log = getenv("NK_BANK_LOG") != NULL;
 }

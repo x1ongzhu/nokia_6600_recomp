@@ -50,7 +50,14 @@
  *                           (experimental bring-up for the missing current-thread
  *                           heap; see NK_ALLOC_* below)
  *   NK_ALLOC_PC=0x...       guest RHeap::Alloc entry (default 0x50380270)
- *   NK_ALLOC_BASE/END=0x... bump heap range (default: the harness HLE heap)
+ *   NK_REALLOC_PC=0x...     guest RHeap1::ReAlloc1 entry (default 0x5039c630;
+ *                           bump blocks are copied by the harness)
+ *   NK_FREE_PC=0x...        guest RHeap::Free entry (default 0x5038e3d8;
+ *                           bump blocks are a no-op, real blocks fall through)
+ *   NK_ALLOC_BASE/END=0x... bump heap range (default: the harness HLE heap).
+ *                           Each block has an 8-byte header (payload size +
+ *                           'HLEH'), so pointers returned to the guest are
+ *                           alloc_base+8 .. alloc_cur.
  *   NK_ALLOC_LOG=n          log the first n HLE allocations (default 8)
  *   NK_ENTRY_ARM=1          force ARM state (the flat image now takes the mode
  *                           from the E32 entry bit; the real kernel is ARM)
@@ -813,7 +820,7 @@ static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,
                 }
                 nk_w32(cpu, slot, target);
                 patched++;
-                if (patched <= 12)
+                if (patched <= 64)
                     printf("  import rebind: %#010x (uid %#010x ord %u) "
                            "%#010x -> %#010x\n", slot, owner, ord, v, target);
                 continue;
@@ -1348,13 +1355,18 @@ int main(int argc, char** argv) {
      * allocations from the harness heap and log the first few. */
     if (env_ulong("NK_ALLOC_HLE", 0)) {
         ip.alloc_hle = 1;
-        ip.alloc_pc = (uint32_t)env_ulong("NK_ALLOC_PC", 0x50380270u);
+        ip.alloc_pc = (uint32_t)env_ulong("NK_ALLOC_PC", 0x5038e2ecu);
+        ip.realloc_pc = (uint32_t)env_ulong("NK_REALLOC_PC", 0x5039c630u);
+        ip.free_pc = (uint32_t)env_ulong("NK_FREE_PC", 0x5038e3d8u);
         ip.alloc_cur = (uint32_t)env_ulong("NK_ALLOC_BASE", hle_heap);
+        ip.alloc_base = ip.alloc_cur;
         ip.alloc_end = (uint32_t)env_ulong(
             "NK_ALLOC_END", (unsigned long)hle_heap + 0x400000u);
         ip.alloc_log = (int)env_ulong("NK_ALLOC_LOG", 8);
-        printf("HLE allocator: bump heap %#010x..%#010x, RHeap::Alloc at %#010x\n",
-               ip.alloc_cur, ip.alloc_end, ip.alloc_pc);
+        printf("HLE allocator: bump heap %#010x..%#010x, RHeap::Alloc at "
+               "%#010x, ReAlloc %#010x, Free %#010x\n",
+               ip.alloc_cur, ip.alloc_end, ip.alloc_pc, ip.realloc_pc,
+               ip.free_pc);
     }
     if (getenv("NK_TRACE")) ip.trace = 1;
     ip.trace_limit = (long)env_ulong("NK_TRACE_N", 64);

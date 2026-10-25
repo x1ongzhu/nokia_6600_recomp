@@ -174,10 +174,15 @@ typedef struct nk_interp {
      * harness heap instead of walking an uninitialised heap object.  This is
      * an explicit stand-in (like NK_SWI_COMPLETE), not a heap emulation. */
     int      alloc_hle;
-    uint32_t alloc_pc;      /* guest RHeap::Alloc entry (default 0x50380270) */
+    uint32_t alloc_pc;      /* guest RHeap::Alloc entry (default 0x5038e2ec) */
+    uint32_t realloc_pc;    /* guest RHeap1::ReAlloc1 entry */
+    uint32_t free_pc;       /* guest RHeap::Free entry */
+    uint32_t alloc_base;    /* first bump block header */
     uint32_t alloc_cur;     /* bump cursor, inside hle_heap */
     uint32_t alloc_end;
     unsigned long alloc_hits;
+    unsigned long realloc_hits;
+    unsigned long free_hits;
     int      alloc_log;     /* log the first N allocations */
     /* Bring-up recovery: when a callee faults (undefined instruction, PC
      * escape), roll back to the most recent BL/BLX and continue as if that

@@ -1,0 +1,76 @@
+# imports-r24-6600.txt - round-24 bring-up rebinds for the 6600 boot frontier
+#
+# Syntax: <slot-va> <target-va|zero>
+#
+# A flat runtime image already binds every real export: the slot *is* the
+# exporting image's export-table entry.  The 6600 kernel, however, was linked
+# against EUser .def revisions whose ordinal order differs from the EUser DLL
+# in the same ROM.  The mismatch is not a constant shift: it is 0 at a few low
+# ordinals, 3 around the time cluster, and 4 in parts of the descriptor
+# cluster.  Every entry below was therefore identified from the *call site*
+# (argument registers, object layout, and the function the caller actually
+# needs), not by adding a fixed offset.
+#
+# Round 21/23 entries are repeated so one NK_IMPORTMAP reproduces the whole
+# boot.  These are explicit bring-up rebinds, not recovered ROM state.
+
+# ELocl.dll export-table hole (ordinal 20): locale init calls it
+# unconditionally.  Bind it to the high-vector zero-return stub.
+0x5037d0e8 zero
+
+# --- round 21: panic printer / object container / locale ABI -------------
+# 0x503b391c  TDesC16::AtC          (panic printer formats descriptor chars)
+# 0x503b4b9c  TBufBase16(int)       (object-container name buffer)
+# 0x503b3b70  TDes16::Copy(buf,len) (locale init)
+0x503b391c 0x50388474
+0x503b4b9c 0x50388254
+0x503b3b70 0x503883c0
+
+# --- round 23: timer names, RAM page bitmap, page-table allocator ---------
+# 0x503b4d34  TDesC8(const char*)         (FIQ/timer name table)
+# 0x503b3ac4  TDesC8::Compare             (timer-name lookup)
+# 0x503b433c  CBitMapAllocator::New
+# 0x503b3980  CBitMapAllocator::Alloc
+# 0x503b3efc  CBitMapAllocator::AllocAt(pos,count)
+0x503b4d34 0x50388984
+0x503b3ac4 0x50388e30
+0x503b433c 0x50381b28
+0x503b3980 0x50381b84
+0x503b3efc 0x50382418
+
+# --- round 24: system-time cluster ---------------------------------------
+# The kernel's P::InitSystemTime path.  Slot 0x503b50c0 is called as
+# TInt64::operator>>(int) (hidden return pointer r0, this r1, shift r2); the
+# ROM slot held __truncdfsf2, so the pointer was treated as a double and
+# underflowed into User::RaiseException (USER-EXEC 3).  The rest of the
+# cluster is the TInt64/TTime arithmetic that formats the initial time.
+0x503b50c0 0x50389fc8   # TInt64::operator>>(int)
+0x503b4980 0x5038cae8   # TTrap::Trap(int&)
+0x503b4d1c 0x50389a40   # TInt64::TInt64(int)
+0x503b4ffc 0x50389f0c   # TInt64::operator*(TInt64 const&)
+0x503b4ec4 0x503a4f84   # TTime::operator+=(TTimeIntervalMicroSeconds)
+0x503b46bc 0x503a4380   # TTime::SecondsFrom
+0x503b426c 0x503a4344   # TTime::MicroSecondsFrom
+0x503b4e50 0x50389ae8   # TInt64::operator/=(TInt64 const&)
+0x503b4ecc 0x50389a68   # TInt64::operator+=(TInt64 const&)
+0x503b4e58 0x50389e20   # TInt64::operator<<=(int)
+
+# --- round 24: kernel object containers (K::CreateObjectContainers) ------
+# K::Init1 calls NewL once and CreateL 16 times (thread, process, chunk, ...).
+# The ROM slots held an allocator wrapper and a USER-CBase panic helper.
+0x503b42e8 0x50385858   # CObjectConIx::NewL
+0x503b3be8 0x5038598c   # CObjectConIx::CreateL
+
+# --- round 24: initial process name parsing ------------------------------
+# 0x503b4c54  TBufBase16(int)       (r1 = explicit max length 0x24)
+# 0x503b3850  TDesC8::Alloc         (slot held TDes8::Format; the empty
+#                                    descriptor at 0x5033804c was used as a
+#                                    format string -> USER 23)
+# 0x503b4170  TDesC8::Left          (slot held a USER-CBase panic wrapper)
+# 0x503b41c0  TDesC16::Locate(TChar) (process path separator)
+# 0x503b4278  TDesC16::Mid(int)
+0x503b4c54 0x50388254
+0x503b3850 0x50396354
+0x503b4170 0x503885cc
+0x503b41c0 0x503884ac
+0x503b4278 0x50388654

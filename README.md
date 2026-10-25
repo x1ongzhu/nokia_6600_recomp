@@ -485,11 +485,32 @@ criteria and phased roadmap live in
   scheduler's initial trap state.  That is the new frontier.
   [`config/imports-wd2-6600.txt`](config/imports-wd2-6600.txt) pins all
   11 overrides; `tools/test_round23.sh` is the acceptance test.
-- [ ] **Initial thread trap/exception state (round 23)** — the `USER-EXEC 3`
-  stop is the user-side exception path with no handler installed.  The next
-  step is to model the initial thread's trap stack/`TExceptionHandler` (and
-  the scheduler's first request completion), not another import or page-table
-  fix.
+- [x] **Round 24: EUser ABI panorama; real time, object containers, process
+  creation; 126,238 instructions** — the round-23 `USER-EXEC 3` was not a
+  missing trap state: the kernel's EUser imports were linked against a
+  different export order than the EUser image in the same ROM.  The time
+  cluster's slot `0x503b50c0` resolves to `__truncdfsf2`, but the kernel calls
+  it as `TInt64::operator>>(int)` (hidden return pointer, this, shift); the
+  double underflow then raised the exception.  Round 24 rebinds the whole
+  call-site-visible cluster: ten `TInt64`/`TTime`/`TTrap` functions, the
+  `CObjectConIx::NewL`/`CreateL` pair used to build the 16 kernel object
+  containers, and `TDesC16::Locate`/`Mid` plus `TDesC8::Alloc` used to parse
+  the initial process name.  The HLE bump heap now carries 8-byte block
+  headers and serves `RHeap1::ReAlloc1`/`RHeap::Free`, so the real realloc
+  path copies bump blocks instead of reading a synthetic header.  The run
+  executes the real `P::InitSystemTime`, creates the object containers and
+  enters initial process creation, reaching **126,238 instructions, 0
+  undefined, 0 unbound IAT, 0 recoveries, 33 call fixups**.  It stops in
+  `CleanupStack::PushL` with **USER-CBase 69** because the direct E32 entry
+  has no scheduler-installed trap frame.  [`config/imports-r24-6600.txt`](config/imports-r24-6600.txt)
+  pins 26 overrides; `tools/test_round24.sh` is the acceptance test.
+- [ ] **Initial thread trap frame / cleanup stack (round 24)** — the
+  `USER-CBase 69` stop is `EClnNoTrapHandlerInstalled`: `CleanupStack::PushL`
+  sees a null trap handler because the scheduler startup that installs it was
+  skipped.  The next step is to model the initial thread's trap frame chain
+  (`thread+0x38` head, `thread+0x3c` handler, `thread+0x58`
+  `User::TrapHandler`) and the scheduler's first request completion, not
+  another import or page-table fix.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -523,8 +544,12 @@ criteria and phased roadmap live in
   reclassifies the ECons stop** (RTest console via the misbound RTC
   allocator) and advances the run to 27,470 instructions.  **Round 23 then
   shows the PLAT 21 gate was a TDesC8 ABI mismatch** and follows the RAM
-  allocator, page tables and WD2 CTSI DMA init to **139,784 instructions**,
-  ending in USER-EXEC 3 (the missing trap/exception state).
+  allocator, page tables and WD2 CTSI DMA init to **139,784 instructions**.
+  **Round 24 shows the resulting USER-EXEC 3 was the last wrong-ABI import**:
+  the time cluster, the 16 `CObjectConIx` containers and the initial process
+  name parser are all rebound, and the boot reaches **126,238 instructions**
+  before the initial process create hits the missing trap frame
+  (`USER-CBase 69`).
 - [ ] **File server for UI/app loads (round 22 reclassification)** — the
   round-21 ECons.dll / **KERN-NO-SESSION 22** stop was the RTC driver's
   misbound `operator new` import entering EUser's `RTest` console path.  With
@@ -806,6 +831,19 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
     --rom-image out/6600_runtime.bin
 tools/test_round23.sh
 
+# round 24: EUser ABI panorama; real system time, 16 object containers and
+# initial process creation; 126,238 instructions, cleanup-stack frontier
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r24-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=64 \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x50312b34 NK_WATCH_HITS=1 NK_WATCH_LOG=12 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_round24.sh
+
 # round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
 # code+text_size; the default runtime image now includes it
 .venv/bin/python recompiler/romimage.py build 6600_mcu.bin \
@@ -913,6 +951,10 @@ and credited in full below. Both tools operate on an image you supply.
 Offline reference sources and bundled format documentation are indexed in
 [`docs/REFERENCES.md`](docs/REFERENCES.md), including pinned versions, local paths,
 license cautions and the command to restore the ignored `references/` directory.
+A locally supplied **Series 60 2.0 SDK for Symbian OS** (7.0s) under
+`references/Series60_v20/` provides the matching headers, import libraries, SDK
+docs and examples. It is proprietary, stays out of the repository and build, and is
+used only for API/ABI comparison.
 
 - [N64: Recompiled](https://github.com/N64Recomp/N64Recomp) — the static-recomp pattern this follows
 - [ngagerecomp](https://github.com/sp00nznet/ngagerecomp) — sibling project; the ARMv4T lifter + runtime model
