@@ -504,13 +504,38 @@ criteria and phased roadmap live in
   `CleanupStack::PushL` with **USER-CBase 69** because the direct E32 entry
   has no scheduler-installed trap frame.  [`config/imports-r24-6600.txt`](config/imports-r24-6600.txt)
   pins 26 overrides; `tools/test_round24.sh` is the acceptance test.
-- [ ] **Initial thread trap frame / cleanup stack (round 24)** — the
-  `USER-CBase 69` stop is `EClnNoTrapHandlerInstalled`: `CleanupStack::PushL`
-  sees a null trap handler because the scheduler startup that installs it was
-  skipped.  The next step is to model the initial thread's trap frame chain
-  (`thread+0x38` head, `thread+0x3c` handler, `thread+0x58`
-  `User::TrapHandler`) and the scheduler's first request completion, not
-  another import or page-table fix.
+- [x] **Round 25: real CTrapCleanup graph; process construction ABI;
+  125,864 instructions** — `NK_TRAPCLEAN=1` now builds the objects the
+  skipped user-side startup would have created: a `TCleanupTrapHandler`
+  whose vtable is EUser's own (`0x503b3518` → `Trap/UnTrap/Leave`
+  `0x50383c38/40/48`), a `CCleanup` with `iBase/iTop/iNext`, eight cleanup
+  items and one TRAP level marker.  Each published thread gets its own slot,
+  published at `thread+0x3c` (`iTrapHandler`); `thread+0x38` (`iFrame`) stays
+  zero until guest `TTrap::Trap` pushes a real frame.  `CleanupStack::PushL`
+  therefore runs EUser's real `CCleanup` code instead of panicking 69.
+  Crossing that point exposed four call-site ABI mismatches: the process-name
+  copy needs `TDes16::Copy(TDesC16 const&)` (`0x503b42c8` → `0x50388408`),
+  the object lookup needs `CObjectCon::FindByName` (`0x503b3e28` →
+  `0x50385650`, not `FindByFullName`), `DProcess::New` needs `User::Alloc`
+  (`0x503b379c` → `0x503988f0`), and the 8-byte process name needs
+  `TBufBase8(int)` (`0x503b4bec` → `0x50388b24`).  The initial `DProcess`
+  `0x806008b8` is now really allocated and constructed; the run reaches
+  **125,864 instructions, 0 undefined, 0 unbound IAT, 0 recoveries, 22 call
+  fixups** (30 overrides in
+  [`config/imports-r25-6600.txt`](config/imports-r25-6600.txt)).  It stops
+  while closing that process through DProcess vtable `+0xc`: kernel slot
+  `0x503b4410` resolves to EUser index 799, which in this ROM is an object-close
+  panic helper, so the stop is **KERN-NO-SESSION 52**.  Rebinding that slot to
+  the `RHandleBase` close wrapper only moves the stop to E32USER-CBase 44.
+  The next task is a **symbol-level DProcess/DObject vtable ABI map** (several
+  slots in the same vtable target different EUser ordinals), not another
+  single-function guess.  `tools/test_round25.sh` is the acceptance test.
+- [ ] **Initial thread trap frame (remaining after round 25)** — the handler
+  and cleanup stack are real now, but `SThread::iFrame` (`+0x38`) is still
+  zero.  A guest `TTrap::Trap` pushes and pops frames correctly; a `Leave`
+  that unwinds past the synthetic startup level still has no saved context to
+  return to.  Restoring that needs the scheduler/mask-ROM startup TRAP or a
+  modeled initial `TTrap` context, and the first request completion.
 - [ ] **PeaK record codec** — the mask ROM's transform of the 0x20-byte record
   is still undocumented.  `unpack` preserves the record; `install` is the
   explicit handoff stand-in.  A future round should decode the record rather
@@ -549,7 +574,11 @@ criteria and phased roadmap live in
   the time cluster, the 16 `CObjectConIx` containers and the initial process
   name parser are all rebound, and the boot reaches **126,238 instructions**
   before the initial process create hits the missing trap frame
-  (`USER-CBase 69`).
+  (`USER-CBase 69`).  **Round 25 installs a real per-thread
+  `CTrapCleanup` graph**, fixes four process-construction ABI slots, and
+  constructs the initial `DProcess` for the first time; the run reaches
+  **125,864 instructions** and stops at the DProcess close-vtable ABI
+  (`KERN-NO-SESSION 52`).
 - [ ] **File server for UI/app loads (round 22 reclassification)** — the
   round-21 ECons.dll / **KERN-NO-SESSION 22** stop was the RTC driver's
   misbound `operator new` import entering EUser's `RTest` console path.  With
@@ -843,6 +872,19 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_round24.sh
+
+# round 25: real per-thread CTrapCleanup graph, descriptor Copy, FindByName,
+# User::Alloc and TBufBase8; 125,864 instructions, DProcess close-vtable frontier
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r25-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0 \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x5039e328 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_round25.sh
 
 # round 21: the header-less driver block (RTC PDD uid3 0x100000d8) at
 # code+text_size; the default runtime image now includes it

@@ -15,7 +15,7 @@
 | Kernel | 链接地址 `0x50310000`，入口 `0x50310054`（**ARM**，`push {r4,r5,r6,lr}` / `0xe92d4070`）；page-header-free stream 中 header `0x31004c`、text `0x3100b0`、text_size `0x28ac0` |
 | CPU | ARM920T / ARMv4T（ARM + Thumb），UPP_WD2 |
 | OS | Symbian OS 7.0s / S60 2nd Edition |
-| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel **super page `0x40000000`**（round 23 修正；`NK_SUPERPAGE=1` 写入 `iTotalRamSize`/`iRamBootData` 与 6 MiB bank 表，`TMachineConfig` 在 `+0x800`；旧 `0x7ff00000..0x80000000` 窗口保留为异常栈控制）、high vectors `0xffff0000`、MMIO bus；扁平镜像默认 **725 个 image / 1,847 个 section**（无重叠），`--place-rodata` 为 **726 / 2,335**（含 RTC PDD 的 header-less block）；放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole，并可对已绑定 slot 做 ABI rebind（round 21，`config/imports-b7e-6600.txt`；round 23 全量 map 为 `config/imports-wd2-6600.txt`，11 个 override；round 24 时间/对象/名字簇为 `config/imports-r24-6600.txt`，26 个 override）；`NK_ALLOC_HLE` 的 bump 块带 8 字节头，`NK_REALLOC_PC`（默认 `0x5039c630`）与 `NK_FREE_PC`（默认 `0x5038e3d8`）在 bump 区间内由 harness 服务（round 24）；`NK_B7E` 安装初始 thread→process→CObjectIx 图、watch `[0x800017d4]`，并跟随真实 DProcess 与 `[thread+0x5c]`（round 20/21/23）；`NK_WRITE_WATCH`/`NK_WRITE_WATCH_MAX` 在 store 后记录写入 PC（依赖写 watch 的 hook 可覆盖刚写入的值）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 在真实 `RHeap::Alloc` 入口提供 bump heap；`NK_WATCH_MEM=rN:len` 在 watch 命中时 dump guest 内存；`NK_EXT_STUB=1` 给无 export 的嵌套 extension 安装 export 1；`NK_HLE_ZERO2` 清零 64-bit time 输出；`NK_POKE`/`NK_PATCH` 做 bring-up 探测 |
+| 运行时 | 64 KiB 稀疏页表；ROM `0x50000000`、RAM `0x80000000`（`NK_RAM_EXTRA` 可扩到 6 MiB）、pre-MMU 物理 RAM `0x00000000`、kernel **super page `0x40000000`**（round 23 修正；`NK_SUPERPAGE=1` 写入 `iTotalRamSize`/`iRamBootData` 与 6 MiB bank 表，`TMachineConfig` 在 `+0x800`；旧 `0x7ff00000..0x80000000` 窗口保留为异常栈控制）、high vectors `0xffff0000`、MMIO bus；扁平镜像默认 **725 个 image / 1,847 个 section**（无重叠），`--place-rodata` 为 **726 / 2,335**（含 RTC PDD 的 header-less block）；放入 174 个 ROMFS E32Image + 85 个 AIF/MBM；`NK_KERNEL_VECTORS=1` 把 kernel text 头 0x64 字节装到 0/`0xffff0000`；`NK_LOW_ROM_IMAGE` 可把 linked 64 KiB boot bank 映射到 0；`NK_REGIONS` 可安装 bootregions 表；`NK_IMPORTMAP` 可绑定 export-table hole，并可对已绑定 slot 做 ABI rebind（round 21，`config/imports-b7e-6600.txt`；round 23 全量 map 为 `config/imports-wd2-6600.txt`，11 个 override；round 24 时间/对象/名字簇为 `config/imports-r24-6600.txt`，26 个 override；round 25 为 `config/imports-r25-6600.txt`，30 个 override）；`NK_TRAPCLEAN=1` 为每个发布的 thread 构造真实 `CTrapCleanup`（`TCleanupTrapHandler` + `CCleanup` + 一个 level marker，`thread+0x3c`/`+0x38`）；`NK_ALLOC_HLE` 的 bump 块带 8 字节头，`NK_REALLOC_PC`（默认 `0x5039c630`）与 `NK_FREE_PC`（默认 `0x5038e3d8`）在 bump 区间内由 harness 服务（round 24）；`NK_B7E` 安装初始 thread→process→CObjectIx 图、watch `[0x800017d4]`，并跟随真实 DProcess 与 `[thread+0x5c]`（round 20/21/23）；`NK_WRITE_WATCH`/`NK_WRITE_WATCH_MAX` 在 store 后记录写入 PC（依赖写 watch 的 hook 可覆盖刚写入的值）；`NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec` 在真实 `RHeap::Alloc` 入口提供 bump heap；`NK_WATCH_MEM=rN:len` 在 watch 命中时 dump guest 内存；`NK_EXT_STUB=1` 给无 export 的嵌套 extension 安装 export 1；`NK_HLE_ZERO2` 清零 64-bit time 输出；`NK_POKE`/`NK_PATCH` 做 bring-up 探测 |
 | 启动镜像格式（round 16） | flash 从 `0x20b0` 起是 **`0x20ec` 记录 = `0xec` 字节 page header + `0x2000` 字节 payload**，共 **852** 条；header 前 6 字节 `20 00 00 00 dc 23`，其余 `0xe6` 字节不是 packed 数据。`pagestream.py build` 去掉 header 后得到 `0x1605ed8` 字节 packed stream；kernel header `0x31004c`，text `0x3100b0`。`0x124` 的 `KaeP`/PeaK 容器（record `0x20` @ `0x12e`、image `0x1423dc` @ `0x14e`）已由 `kaep.py unpack` 导出；`install` 在 linked `0x80` 写可执行 handoff，loader 可进入 kernel `0x50310054`；mask ROM 的 record codec 仍未解出（B6a2d2b） |
 | 执行引擎 | 静态 lift 的 C + 原生 **ARMv4T 解释器**（`runtime/src/nokia_interp.c`，ARM + Thumb），带崩溃恢复、调用点修复表（callmap）、**代码范围约束**、**死循环看门狗**（`NK_SPIN`）、**调用环 / PC watch**（`NK_WATCH`）、**PC 空间守卫**（`NK_CODE_ONLY`）、**`b .` panic 硬停**（`NK_STOP_SELF_BRANCH`）、**EKA1 executive call gate**（`NK_SWI_DIRECT`，round 18）和少量 HLE 编译器运行时；MMIO bus 带 UPP boot 握手 stub（`0x58150422`/`0x58120a08`） |
 | 工具链 | Python 3 + Capstone；clang；IDA Pro 9.1（可选）；Unicorn 仅用于研究 trace |
@@ -82,6 +82,7 @@
 | M31 | **第 22 轮：RTC 扩展是嵌套 E32Image；分配器 ABI、HAL channel 与 27,470 条 boot** | (1) **“RTC rodata block” 是第二个 E32Image**：uid2 `0x100058d8`、text `0x5033ee14..0x50341414`（`0x2600`）、data `0x50341414`、export_count **0**。kernel 的 extension loader 先调用 image entry `0x5033ee14`（driver object 构造），随后通过 `[hdr+0x40]` 调 **export ordinal 1**；export_dir 为 0 时直接跳到 0。`NK_EXT_STUB=1` 在 high vector 安装一个单入口 export stub，并返回 HAL-like object 供 kernel 写入 `[0x800003ac]`。 (2) **RTC 驱动 `new` 的 ABI 不匹配**：`0x5033efa8`/`0x5033eff0` 以 `r0=0x38`/`8` 调用 EUser export index **1504**；该 ROM 的 export table 在该 index 是 **`RTest::operator()`**（引用 `": FAIL : ..."`/`"Checkpoint-fail"`），不是 `operator new`。driver 和 EUser 是用不同 `.def` revision 链接的。RTest 路径调用 `Console::NewL` → `RLibrary::Load("econs")` → `svc 0x76`，在没有 session 时 panic KERN-NO-SESSION。round 21 的 “file-server session” 因此是 ABI mismatch 的**症状**。`config/callmap-rtc-6600.txt` 用 `NK_HLE_ALLOC` 服务这两个 `new`。 (3) **HAL channel 必须是对象**：B7e HAL stub 旧版对 `r1=0` 返回整数 1；RTC driver 把它存到 `[this+8]`，随后 `ldr r3,[r0]; ldr pc,[r3,#0x18]` 解引用，跳到 0。现在返回 `0x80003a40`（vtable `0x80003c00`）。 (4) **系统时间/格式化路径**：`0x5033f040` 调 kernel 的 64-bit time helper，后者经 EUser slot `0x503b4d1c` 格式化；该 slot 在 round 21 被 rebind 成 2-arg `TPtr16` ctor 以修 panic printer，两个调用点需要不同 ABI。`NK_HLE_ZERO2=0xfffffff9` 直接把 64-bit 输出清零。 (5) **结果**：RTC 扩展完整初始化，kernel 进入 extension 之后的 boot init `0x50310fa4`；运行 **27,470 条、0 undefined、0 unbound IAT、0 recoveries**。新 frontier 是 `0x5031f3a8` 检查 kernel `.bss` 的 boot/timer descriptor `[0x80000b5c] == 0xff`（否则 panic PLAT 21）；调用点先构造 `"IrqTimer0"` descriptor（字面量 `0x50337200`），所以这是 kernel 的 timer/DFC 初始化，不是通用 HAL 表。直接跑 E32 entry 跳过了 mask ROM/kernel startup 对该结构的初始化。验收：`tools/test_rtc.sh` |
 | M32 | **第 23 轮：PLAT 21 是 TDesC8 ABI；超页模型、RAM 位图、页表与 WD2 CTSI DMA；139,784 条** | (1) **PLAT 21 不是缺失的 boot descriptor**：`0x50311508` 先构造 `0x80000b5c` 的 timer 对象（state `0xff`），随后用 kernel import slot `0x503b4d34` 初始化 **8 字节** `TDesC8` 名字数组（`0x80000b54, b4c, …`）。该 slot 在本 ROM 指向 idx 1384 的 **12 字节**默认构造 `0x5038a234`，其 `str r1,[r0,#8]` 正好把 timer 的 state 清成 0，后续 `"IrqTimer0"` start 于是 panic PLAT 21。把 slot rebind 到 `TDesC8(const char*)` `0x50388984` 后 timer 正常启动。 (2) **第二个 ABI**：timer 名字查表 `0x50310d5c` 调 slot `0x503b3ac4`（idx 204），本 ROM 是 `DObject::Close` `0x5039d870`，把 descriptor 长度 `0x1000000d` 当 handle 并 panic KERN-EXEC。rebind 到 `TDesC8::Compare` 的 EABI 入口 **`0x50388e30`**（不是 body `0x50388e34`；后者会 `bx ip` 到 stale slot 地址）。 (3) **超页在 `0x40000000`，不是 0x7ff00000**：kernel 的 `TheSuperPage` 是 `0x40000000`（`iTotalRamSize` +0x10、`iRamBootData` +0x18），`TMachineConfig` 在 `+0x800`。`NK_SUPERPAGE=1` 映射该 64 KiB 页并写入 6 MiB RAM bank 表（`4 MiB + 2 MiB`，`SRamBank{base,size}`）；RAM allocator 从此能建立页位图。 (4) **CBitMapAllocator ABI**：slot `0x503b433c`（idx 746）是 2 字节数组 allocator `0x50394b60`，不是 `New`；slot `0x503b3980`（idx 123）是 CBufSeg helper `0x50383718`，不是 `Alloc`；slot `0x503b3efc`（idx 474）是引用计数 buffer release `0x503a2980`，不是 `AllocAt(pos,count)`。分别 rebind 到 **`0x50381b28` / `0x50381b84` / `0x50382418`**。 (5) **B7e 跟随真实 DProcess**：kernel 在启动中把 thread→process 换成自己分配的 DProcess，其 `+0x38` 为 0；harness 现在 watch thread 的 process 字段，给真实 DProcess 挂上 `CObjectIx`，并在 current-thread 被瞬时清零时恢复最后一个 live thread；`[thread+0x5c]` 也提供带 vtable 的 thread-local 对象（`+0x24` 返回 1）。 (6) **WD2 CTSI DMA**：`0x5031380c` 的 HAL 调用在 E32-entry boot 中失败并 panic KERN-WD2 24；`config/imports-wd2-6600.txt` 用 `zero` 提供服务成功的 stand-in。 (7) **结果**：**139,784 条 ARM、0 undefined、0 unbound IAT、0 recoveries**，穿过页表与 WD2 CTSI DMA init，最后在 `0x503994e8` 以 **USER-EXEC 3** 停下：当前 thread 没有 trap/exception handler，E32 entry 跳过了 scheduler 的初始 trap state。新 frontier 是 thread 的 exception/trap 状态，不是 import/layout/页表。验收：`tools/test_round23.sh`；旧 `test_b7e/test_rtc/test_imports/test_interp` 保持通过 |
 | M33 | **第 24 轮：EUser ABI 全景修复；真实系统时间、对象容器与进程创建；126,238 条** | (1) **时间簇不是浮点问题**：round 23 的 `USER-EXEC 3` 是 `__truncdfsf2` 的 underflow 异常，但调用点 `0x50312720` 实际是 **`TInt64::operator>>(int)`**（隐藏返回指针 r0、this r1、shift r2），kernel 以 generic-7.0 ordinal 1612 导入，ROM EUser 的同一 slot 却是 `__truncdfsf2`。把整簇 rebind 到 ROM 中真正的实现后，`P::InitSystemTime` 首次走通：`0x503b50c0→0x50389fc8`（TInt64>>）、`0x503b4980→0x5038cae8`（TTrap::Trap）、`0x503b4d1c→0x50389a40`（TInt64(int)）、`0x503b4ffc→0x50389f0c`（TInt64*）、`0x503b4ec4→0x503a4f84`（TTime+=us）、`0x503b46bc→0x503a4380`（TTime::SecondsFrom）、`0x503b426c→0x503a4344`（MicroSecondsFrom）、`0x503b4e50→0x50389ae8`（TInt64/=）、`0x503b4ecc→0x50389a68`（TInt64+=）、`0x503b4e58→0x50389e20`（TInt64<<=）。这十个 rebind 全部由**调用点语义**确定，不是按偏移猜的。 (2) **对象容器创建**：`0x5031e594`（`K::Init1` 路径）调用 `0x50336b10`/`0x50336b1c` 各 16 次；两者是 EUser 的 `CObjectConIx::NewL` 和 `CObjectConIx::CreateL`。kernel 的 slot `0x503b42e8`/`0x503b3be8` 分别指向 `0x50396408`/`0x5039dd90`（错误 ABI）；rebind 到 ROM 的 `0x50385858`/`0x5038598c` 后，16 个容器全部创建成功。`0x503b3be8` 的原值不是早先记录的 `0x5039dc70`（那是 idx 276），而是 idx 277 的 `0x5039dd90`。 (3) **进程名解析**：`0x5032b6a4`（初始进程创建）用 `TDesC16::Locate('\\')`、`TDesC16::Locate('.')`、`TDesC16::Mid` 切片进程名；slot `0x503b41c0` 的原值是 SVC stub `0x503987c8`，slot `0x503b4278` 的原值是时间格式化器 `0x503a443c`。rebind 到 `0x503884ac`（TDesC16::Locate）和 `0x50388654`（TDesC16::Mid）。`0x503b3850`（TDesC8::Alloc）的原值是 `TDes8::Format` `0x503945e4`，运行到 `0x5031e680` 时把空 descriptor 当格式串，panic USER 23；rebind 到 `0x50396354`。 (4) **HLE 堆支持 ReAlloc/Free**：bump allocator 现在给每个块加 8 字节头（payload size + `HLEH`），`RHeap1::ReAlloc1`（`0x5039c630`）和 `RHeap::Free`（`0x5038e3d8`）在旧指针属于 bump 区间时由 harness 处理；否则落回真实实现。此前 `0x5039c630` 把 bump 指针当真实块头，算出 `0xfffffffc` 并进入 8.4M MMIO 的 memmove 循环。 (5) **结果与新 frontier**：**126,238 条 ARM、0 undefined、0 unbound IAT、0 recoveries、33 call fixups**，穿过真实系统时间、16 个对象容器、初始进程名解析，在初始进程创建中的 `CleanupStack::PushL` 停下。下一项是 **thread 的 trap frame / cleanup stack 初始状态**（USER-CBase 69），不是 import/layout/堆问题。验收：`tools/test_round24.sh`；`test_round23` 与旧 `test_b7e/test_rtc/test_imports/test_interp` 保持通过 |
+| M34 | **第 25 轮：真实 CTrapCleanup 图；进程对象构造的 4 个 ABI；125,864 条** | (1) **不是 no-op handler**：`NK_TRAPCLEAN=1` 在每个 kernel 发布的 thread 上分配一套真实对象：`TCleanupTrapHandler`（vptr `0x503b3518`，即 EUser 的 `Trap/UnTrap/Leave` `0x50383c38/40/48`）、`CCleanup`（vptr `0x503b36a4`，`iBase/iTop/iNext`）和 8 个 `TCleanupStackItem`，并预置一个 TRAP level marker；`thread+0x3c` 指向 handler、`thread+0x38=0`。`CleanupStack::PushL` 因此执行真实 `CCleanup::PushL`，不再 panic 69。 (2) **descriptor Copy**：`0x5032b4d0` 以 `(dest TDes16*, src TDesC16*)` 调 slot `0x503b42c8`（idx 717）；ROM 是 `HBufC16::NewLC(int)`，把 dest 指针当长度并 panic USER 18。rebind 到 ROM idx 247 的真实 `TDes16::Copy(TDesC16 const&)` `0x50388408`。 (3) **CObjectCon 查找**：`0x5032b534` 以 `(CObjectCon*, TInt&, const TDesC16&, TBuf<128>&)` 调 slot `0x503b3e28`（idx 421）；ROM 是 `TDes16::Format`，会把 CObjectCon 当 descriptor。rebind 到 `0x50385650`（`CObjectCon::FindByName`，`TBuf<128>`），不是 `0x50385754`（`FindByFullName`，`TBuf<256>`）。 (4) **初始 DProcess 真正分配**：`0x5031750c` 用 slot `0x503b379c`（idx 2）分配 `0xdc` 字节；ROM idx 2 是 3-descriptor parser `0x5038ee04`，返回 0，导致 process 指针为 0，`0x5032b7c8` 解引用 null vtable。rebind 到 `User::Alloc` `0x503988f0`。DProcess 基构造 `0x5032b54c` 还以 `(this+0x44, max=8)` 调 slot `0x503b4bec`（idx 1302）构造 8 字节 `TBuf8`；ROM 是 20 字节对象构造，后续 leave USER 23（ETDes8Overflow）。rebind 到真实 `TBufBase8(int)` `0x50388b24`。 (5) **结果与新 frontier**：**125,864 条 ARM、0 undefined、0 unbound IAT、0 recoveries、22 call fixups**（30 个 override）。初始 process 对象 `0x806008b8` 成功分配并构造；随后 `0x5032b7d8` 通过 DProcess vtable `+0xc` 关闭它，kernel import slot `0x503b4410` 指向 EUser idx 799（本 ROM 是 object-close panic helper `0x5039e328`），停在 **KERN-NO-SESSION 52**。试把该 slot 指到 `RHandleBase` close wrapper `0x5039a070` 只把停点换成 E32USER-CBase 44，因此下一项是 **DProcess/DObject vtable 的符号级 ABI map**，不是继续猜单个函数。验收：`tools/test_round25.sh`；`test_round24` 与旧测试保持通过。 |
 
 ### 可复现命令
 
@@ -269,6 +270,19 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 tools/test_round24.sh
+
+# round 25: real per-thread CTrapCleanup graph, descriptor Copy, FindByName,
+# User::Alloc and TBufBase8; 125,864 insns, DProcess close-vtable frontier
+NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
+  NK_SWI_COMPLETE=0x4d NK_IMPORTMAP=config/imports-r25-6600.txt \
+  NK_RECOVER=0 NK_CALL_INFER=1 NK_BUDGET=3000000 NK_B7E=1 NK_EXT_STUB=1 \
+  NK_TRAPCLEAN=1 NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_ALLOC_LOG=0 \
+  NK_ALLOC_BASE=0x80600000 NK_ALLOC_END=0x80a00000 \
+  NK_HLE_HEAP=0x80700000 NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_WATCH=0x5039e328 NK_WATCH_HITS=1 NK_WATCH_LOG=0 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+tools/test_round25.sh
 ```
 
 ---
@@ -616,6 +630,61 @@ ROM EUser 的 export table 却是另一个 `.def` revision，二者在多个区�
    因此下一轮应实现最小的 trap frame 保存/恢复，而不是继续用 no-op stub。
    验收：`tools/test_round24.sh`；`test_round23` 与旧
    `test_b7e/test_rtc/test_imports/test_interp` 保持通过。
+
+#### B13 第 25 轮：真实 CTrapCleanup 图；进程对象构造；vtable ABI frontier
+
+第 24 轮的 `USER-CBase 69` 确实是缺失的 user-side 启动状态，但
+**no-op handler 不是答案**：`TCleanupTrapHandler` 的 `Trap/UnTrap/Leave`
+必须真正操作 `CCleanup` 的 level marker 和清理项。round 25 先在 harness
+里构造与 EUser 完全同构的对象：
+
+- `TCleanupTrapHandler`：`[+0]=0x503b3518`（EUser vtable，第 +8/+0xc/+0x10
+  项是 `Trap 0x50383c38`、`UnTrap 0x50383c40`、`Leave 0x50383c48`），
+  `[+4]=CCleanup*`；
+- `CCleanup`：`[+0]=0x503b36a4`，`+4/+8/+0xc = iBase/iTop/iNext`；
+- 一个 `TCleanupStackItem` level marker `{operation=0, levelCount=1}`；
+- `SThread::iTrapHandler` 在 `+0x3c`，`SThread::iFrame` 在 `+0x38`（初始
+  为 0；真正的 TRAP frame 必须由 guest 的 `TTrap::Trap` 建立）。
+
+每个被 kernel 发布到 `[0x800017d4]` 的 thread 都会分配一套独立槽位，所以
+后续 thread switch 不会共用 cleanup stack。`NK_TRAPCLEAN=1` 是显式的
+bring-up 开关；它模拟的是被 E32-entry boot 跳过的
+`CTrapCleanup::New()` + 初始 TRAP level，而不是绕过 leave 语义。
+
+越过 PushL 后，调用点继续暴露 4 个 EUser slot 错位；它们都由参数形状
+唯一确定：
+
+1. `0x5032b4d0`：`(dest TDes16*, src TDesC16*)` →
+   `TDes16::Copy(TDesC16 const&)`。slot `0x503b42c8` 的 ROM 值是
+   `HBufC16::NewLC(int)`，把 dest 指针当 length，panic USER 18。
+   正确实现是 ROM idx 247 的 `0x50388408`。
+2. `0x5032b534`：`(CObjectCon*, TInt&, const TDesC16&, TBuf<128>&)` →
+   `CObjectCon::FindByName`。slot `0x503b3e28` 的 ROM 值是 descriptor
+   format 函数，会把 CObjectCon 当 descriptor（USER 7）。正确实现在
+   `0x50385650`；旁边的 `0x50385754` 是 `FindByFullName`（TBuf<256>）。
+3. `0x5031750c`：`DProcess::New` 以 `r0=0xdc` 调 slot `0x503b379c`（idx 2）。
+   ROM idx 2 是三 descriptor parser `0x5038ee04`，返回 0，于是初始
+   process 指针为 0，`0x5032b7c8` 取 null vtable。正确实现是
+   `User::Alloc` `0x503988f0`（仍经过 harness 的 `RHeap::Alloc` hook）。
+4. `0x5032b54c`：`DProcess` 基构造以 `(this+0x44, maxLength=8)` 调 slot
+   `0x503b4bec`（idx 1302）构造 8 字节 `TBuf8`。ROM idx 1302 是 20 字节
+   对象构造，后续 leave USER 23（ETDes8Overflow）。正确实现是
+   `TBufBase8(int)` `0x50388b24`（与 `TBufBase16(int)` `0x50388254` 同构）。
+
+结果：初始 DProcess `0x806008b8` 首次真正由 `User::Alloc` 分配并构造，
+运行 **125,864 条**，0 undefined / 0 unbound IAT / 0 recoveries。随后
+`0x5032b7d8` 通过 DProcess vtable `+0xc` 关闭新 process，kernel import
+slot `0x503b4410` 指向 EUser idx 799；该 ROM 在 idx 799 是 object-close
+panic helper `0x5039e328`，所以停在 **KERN-NO-SESSION 52**。
+把该 slot 强行指到 `RHandleBase` close wrapper `0x5039a070` 只把停点换成
+**E32USER-CBase 44**，说明这不是单个函数猜错，而是 **DProcess/DObject
+vtable 的符号级 ABI map**：同一张 vtable 里 `+0xc`、`+0x10`、`+0x18`、
+`+0x20` 都指向不同 EUser slot，必须按 kernel `.def` 的符号顺序重建，而
+不是按 ROM export index 直接使用。
+
+验收：`tools/test_round25.sh`（30 个 override、每 thread 的 trap 图、
+4 个 rebind、process 构造、KERN-NO-SESSION 52 watch）；`test_round24`、
+`test_imports`、`test_interp` 保持通过。
 
 #### B1 第 16 轮：B1g/B5 关闭 —— 问题是 page header，不是 function order
 

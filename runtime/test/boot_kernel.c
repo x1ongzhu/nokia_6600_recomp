@@ -112,6 +112,12 @@
  *   NK_EXT_STUB=1           give an extension image with no export table a
  *                           synthetic export 1 (HAL-like object); needed by
  *                           the nested rtc.dll image (round 22)
+ *   NK_TRAPCLEAN=1          with NK_B7E: build a real CTrapCleanup graph per
+ *                           published thread (TCleanupTrapHandler vtable ->
+ *                           EUser Trap/UnTrap/Leave, CCleanup + one level
+ *                           marker) and publish it at thread+0x3c.  This is
+ *                           the user-side startup that the direct E32 entry
+ *                           skips; without it CleanupStack::PushL panics 69.
  *   NK_BANKED=1             enable the banked r13/r14, FIQ r8-r12 and SPSR
  *                           model; the harness presets per-mode stacks
  *   NK_BANK_LOG=1           log every banked CPSR mode switch
@@ -344,10 +350,30 @@ static void install_extension_stub(nk_cpu_t* c, nk_interp_t* ip) {
 #define B7E_ONE_STUB    0xffff0500u   /* mov r0,#1; bx lr                  */
 #define B7E_VT_ENTRIES  64
 
+/* Round 25: the user-side runtime normally installs a CTrapCleanup before it
+ * calls any code that can leave.  Booting the kernel E32 entry directly skips
+ * that startup, so EUser's CleanupStack::PushL panics with USER-CBase 69
+ * (EClnNoTrapHandlerInstalled).  Build the real objects instead of a no-op
+ * handler: a TCleanupTrapHandler whose vtable entries are EUser's own
+ * TCleanupTrapHandler::Trap/UnTrap/Leave, and a CCleanup with one level
+ * marker.  The vtable addresses are read from the packed image
+ * (0x503b3518 -> Trap 0x50383c38, UnTrap 0x50383c40, Leave 0x50383c48). */
+#define B7E_TRAP_BASE   0x80004100u   /* per-thread trap/cleanup slots     */
+#define B7E_TRAP_STRIDE 0x100u
+#define B7E_TRAP_SLOTS  4
+#define B7E_TRAPH_OFF   0x00u         /* TCleanupTrapHandler               */
+#define B7E_CLEAN_OFF   0x40u         /* CCleanup                          */
+#define B7E_CLBASE_OFF  0x80u         /* TCleanupStackItem[8]              */
+#define B7E_CLTOP_OFF   0xc0u
+#define B7E_TRAP_VT     0x503b3518u
+#define B7E_CLEAN_VT    0x503b36a4u
+
 static int      b7e_enabled;
+static int      b7e_trapclean;
 static int      b7e_installs;
 static uint32_t b7e_heap_cur, b7e_heap_end;
 static uint32_t b7e_current_thread;
+static uint32_t b7e_trap_owner[B7E_TRAP_SLOTS];
 
 static void b7e_fill_vtable(nk_cpu_t* c, uint32_t vt, uint32_t stub) {
     for (int i = 0; i < B7E_VT_ENTRIES; i++)
@@ -374,6 +400,27 @@ static void b7e_process_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
                value, B7E_OBJIDX);
 }
 
+/* Build one real CTrapCleanup graph for a thread.  The startup that normally
+ * calls CTrapCleanup::New() before user code is skipped by the direct E32
+ * entry, so CleanupStack::PushL sees iTrapHandler == NULL and panics 69.
+ * The handler's vtable is EUser's own TCleanupTrapHandler vtable, so Trap/
+ * UnTrap/Leave run the real CCleanup level/pop code.  One level marker is
+ * present because the skipped startup enters the initial TRAP before it calls
+ * any code that can leave.  Slots are per thread: every published thread gets
+ * its own handler and cleanup stack. */
+static uint32_t b7e_trap_slot(uint32_t t) {
+    for (int i = 0; i < B7E_TRAP_SLOTS; i++)
+        if (b7e_trap_owner[i] == t)
+            return B7E_TRAP_BASE + (uint32_t)i * B7E_TRAP_STRIDE;
+    for (int i = 0; i < B7E_TRAP_SLOTS; i++)
+        if (b7e_trap_owner[i] == 0) {
+            uint32_t base = B7E_TRAP_BASE + (uint32_t)i * B7E_TRAP_STRIDE;
+            b7e_trap_owner[i] = t;
+            return base;
+        }
+    return 0;
+}
+
 static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     (void)addr;
     if (!b7e_enabled) return;
@@ -393,6 +440,33 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     nk_w32(c, t + 0x18, B7E_PROCESS);       /* thread -> process       */
     nk_w32(c, t + 0x5c, B7E_TLS);           /* thread-local vtable obj */
     nk_w32(c, t + 0x64, B7E_OBJIDX);        /* 0x40000000 branch       */
+    if (b7e_trapclean) {
+        uint32_t base = b7e_trap_slot(t);
+        if (base) {
+            uint32_t handler = base + B7E_TRAPH_OFF;
+            uint32_t clean = base + B7E_CLEAN_OFF;
+            uint32_t clbase = base + B7E_CLBASE_OFF;
+            uint32_t cltop = base + B7E_CLTOP_OFF;
+            /* TCleanupTrapHandler: vptr + iCleanup. */
+            nk_w32(c, handler + 0x00, B7E_TRAP_VT);
+            nk_w32(c, handler + 0x04, clean);
+            /* CCleanup: vptr + iBase/iTop/iNext. */
+            nk_w32(c, clean + 0x00, B7E_CLEAN_VT);
+            nk_w32(c, clean + 0x04, clbase);
+            nk_w32(c, clean + 0x08, cltop);
+            nk_w32(c, clean + 0x0c, clbase + 8);
+            /* One TRAP level is already active: {operation=0, count=1}. */
+            nk_w32(c, clbase + 0x00, 0);
+            nk_w32(c, clbase + 0x04, 1);
+            nk_w32(c, t + 0x3c, handler);   /* SThread::iTrapHandler   */
+            nk_w32(c, t + 0x38, 0);         /* SThread::iFrame         */
+            if (b7e_installs <= 4)
+                printf("B7e: thread %#010x trap handler %#010x, cleanup %#010x\n",
+                       t, handler, clean);
+        } else if (b7e_installs <= 4) {
+            printf("B7e: no free trap/cleanup slot for thread %#010x\n", t);
+        }
+    }
     /* Watch the process field for the kernel's later, real DProcess. */
     nk_dbg_watch_write3(t + 0x18, b7e_process_hook);
     /* The handle path treats the result as a CObject: it needs a vtable at
@@ -407,6 +481,7 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
 static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
                         uint32_t heap_base, uint32_t heap_size) {
     if (heap_size < 0x4000u) heap_size = 0x4000u;
+    b7e_trapclean = (int)env_ulong("NK_TRAPCLEAN", 0);
     /* RHeap::Alloc treats word 0 of the heap object as a base added to the
      * allocator's result, and its caller rejects results >= 0x50000000.
      * The allocator therefore returns an *offset*; the bump cursor is

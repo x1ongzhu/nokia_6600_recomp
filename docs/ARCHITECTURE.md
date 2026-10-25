@@ -86,6 +86,19 @@ overwrites during startup; `RHeap::Alloc` (`0x50380270`) then sees a null heap.
 Rounding out the ROMFS: the 586-entry directory below the kernel is
 `\System\Libs` (the ROM header's boot image table), not Programs.
 
+Round 25 adds the **user-side trap/cleanup state** the direct E32 entry
+skips.  `NK_TRAPCLEAN=1` allocates a real `TCleanupTrapHandler` whose vtable
+is EUser's own (`0x503b3518`, `Trap/UnTrap/Leave` at `0x50383c38/40/48`), a
+`CCleanup` (`iBase/iTop/iNext`), eight cleanup items and one TRAP level
+marker, and publishes the handler at `SThread::iTrapHandler` (`+0x3c`) for
+each thread.  `CleanupStack::PushL` therefore runs the real level/pop code.
+It also pins four call-site ABI repairs: `TDes16::Copy(TDesC16 const&)`,
+`CObjectCon::FindByName`, `User::Alloc` for `DProcess::New`, and
+`TBufBase8(int)` for the 8-byte process name.  The initial `DProcess` now
+exists and is constructed; the next frontier is the **DProcess/DObject vtable
+ABI** (its `+0xc` slot points at a different EUser ordinal than this ROM's
+export order), not a missing CPU state.
+
 The flash is **paged** as `0x20ec`-byte records: a **`0xec`-byte page header**
 (first six bytes `20 00 00 00 dc 23`) followed by a **`0x2000`-byte payload**.
 `recompiler/pagestream.py` removes the headers and makes the packed records

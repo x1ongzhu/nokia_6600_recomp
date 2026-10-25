@@ -1836,3 +1836,41 @@ SWI 0xc00076 at 0x50392bb0 -> Kernel::Panic (0x5032557c)
 with it; a null object here is the direct source of the "KERN-NO-SESSION"
 panic.  The next round should model that service (and the file open/read path)
 rather than treating the panic as an import or stack problem.
+
+## Round 25 (2026-10-25): real CTrapCleanup, process construction, vtable ABI
+
+Round 24's `USER-CBase 69` is the user-side startup that the direct E32 entry
+skips.  Round 25 does not paper over it with a no-op handler: `NK_TRAPCLEAN=1`
+builds, per published thread, a real `TCleanupTrapHandler` whose vtable is
+EUser's own `0x503b3518` (`Trap/UnTrap/Leave` = `0x50383c38/40/48`), a
+`CCleanup` (`0x503b36a4`, `iBase/iTop/iNext`), eight `TCleanupStackItem`s and
+one TRAP level marker.  The handler is published at `SThread::iTrapHandler`
+(`+0x3c`); `iFrame` (`+0x38`) stays zero until a guest `TTrap::Trap` pushes a
+frame.  `CleanupStack::PushL` now executes the real level/pop code.
+
+Four more call-site ABI mismatches surfaced and are pinned by argument shape:
+
+| slot | kernel call | ROM value | real implementation |
+|---|---|---|---|
+| `0x503b42c8` | `(dest TDes16*, src TDesC16*)` | `HBufC16::NewLC(int)` | `TDes16::Copy(TDesC16 const&)` `0x50388408` |
+| `0x503b3e28` | `(CObjectCon*, TInt&, name, TBuf<128>&)` | descriptor format | `CObjectCon::FindByName` `0x50385650` |
+| `0x503b379c` | `DProcess::New` size `0xdc` | 3-descriptor parser, returns 0 | `User::Alloc` `0x503988f0` |
+| `0x503b4bec` | `(this+0x44, maxLength=8)` | 20-byte object ctor | `TBufBase8(int)` `0x50388b24` |
+
+The initial `DProcess` `0x806008b8` is now really allocated and constructed.
+The run reaches **125,864 instructions, 0 undefined, 0 unbound IAT, 0
+recoveries, 22 call fixups** (30 overrides in
+`config/imports-r25-6600.txt`).  It stops while closing that process through
+DProcess vtable `+0xc`: kernel import slot `0x503b4410` resolves to EUser index
+799, which this ROM exports as the object-close panic helper `0x5039e328`, so
+the stop is **KERN-NO-SESSION 52**.  Rebinding that slot to the `RHandleBase`
+close wrapper only moves the stop to **E32USER-CBase 44**.
+
+The next task is therefore a **symbol-level DProcess/DObject vtable ABI map**.
+Several slots in one vtable (`+0xc`, `+0x10`, `+0x18`, `+0x20`) target
+different EUser ordinals whose ROM export indices do not match the kernel's
+`.def`; using ROM index 799 directly is wrong even though the slot address is
+valid.  The cleanup handler and level marker are real; only the initial
+`iFrame`/leave context still needs the scheduler or mask-ROM startup TRAP.
+
+Acceptance: `tools/test_round25.sh`.
