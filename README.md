@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 105)
+## Status (2026-10-27, round 106)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -866,6 +866,20 @@ works:
   the application's ordinal base is not uniform, so a per-slot map is needed.
   `tools/test_round105.sh` pins the three measurements.
 
+- [x] **Correction: the disputed call passes three arguments** (round 106):
+  watching the PC directly gives `pc=0x503bfcd0 r0=0x51035540 r1=0x80100c0c
+  r2=0x9 r3=0` - three arguments, and the grow wrapper `0x503988a8` forwards
+  exactly those as `(heap, a0, a1, a2)`. The round-103/104 "one argument vs
+  three" conclusion came from starting the disassembly at the wrong halfword
+  and is withdrawn. `tools/app_import_search.sh` (new, with crash-aware
+  scoring) confirms there is no easy win from shifting: the baseline with ROM
+  values is Thumb 1,380 and exits cleanly, while `idx=12 -3` / `idx=12 -4`
+  reach 1,383 / 1,447 but both end in a null-call crash. What remains is the
+  clean Leave with KErrNoMemory inside the descriptor grow, which is fed two
+  code/data pointers as `(maxLen, delta)`:
+  `heap=0x80905ec4 ptr=0x510355e0 a1=0x503bfcf3 a2=0x503c7148`.
+  `tools/test_round106.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -1047,7 +1061,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round102.sh` | the application thread runs on the kernel's real RHeap |
 | `tools/test_round103.sh` | app-time import rebinds; the app/ROM EUser mismatch is broader than one slot |
 | `tools/test_round104.sh` | first mapping of the EUser table shift (slot 0x503b37c4 -> export 9) |
-| `tools/test_round105.sh` | **current acceptance**: the shift is real but not a uniform rotation; a per-slot map is required |
+| `tools/test_round105.sh` | the shift is real but not a uniform rotation |
+| `tools/test_round106.sh` | **current acceptance**: correction - the disputed call passes three arguments; `tools/app_import_search.sh` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

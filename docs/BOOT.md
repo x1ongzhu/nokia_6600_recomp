@@ -1270,3 +1270,23 @@ export 20/23/44 的预算自旋，Thumb 1,281–1,450），说明不匹配比单
 
 结论：偏移存在，但 app 序号基准不一致，必须**逐槽映射**。
 验收 `tools/test_round105.sh`。
+
+### 2.59 round 106：更正 —— 那个调用是三参数
+
+直接 watch PC 的权威数据：
+
+```
+pc=0x503bfcd0  r0=0x51035540  r1=0x80100c0c  r2=0x9  r3=0
+```
+
+**三个参数都设了**，增长包装 `0x503988a8` 正是把
+`(heap, a0, a1, a2)` 转发下去。所以 round 103/104 的"1 参数 vs 3 参数"
+结论**撤回**（源于反汇编对齐错误）。
+
+逐槽搜索结果：baseline（ROM 原值）Thumb 1380 **干净**；`idx=12 -3/-4`
+分别 Thumb 1383/1447 但都是 **null call 崩溃**。说明这组候选里 ROM 原值
+最好。真正剩下的缺陷是干净地以 `KErrNoMemory` Leave：增长函数被喂了
+两个代码/数据指针当 `(maxLen, delta)`。
+
+新增 `tools/app_import_search.sh`（逐槽搜索 + 崩溃感知评分）。
+验收 `tools/test_round106.sh`。

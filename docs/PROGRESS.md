@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 105）
+最后更新：2026-10-27（round 106）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -910,6 +910,30 @@
     → export 9），但 **app 的序号基准不一致**，所以必须做**逐槽映射**，
     而不是整表平移。
   - 验收 `tools/test_round105.sh`。
+
+- **更正：那个调用其实是三参数**（round 106）：**撤回 round 103/104 的
+  参数个数结论**。
+  - 直接 watch PC 得到权威数据：
+    ```
+    pc=0x503bfcd0  r0=0x51035540  r1=0x80100c0c  r2=0x9  r3=0
+    ```
+    **三个参数都设了**（缓冲区、一个固定全局、长度 9），而增长包装
+    `0x503988a8` 正是把它们当成 `(heap, a0, a1, a2)` 转发。所以这里
+    **没有**"1 参数 vs 3 参数"的错位 —— 之前的结论来自反汇编起点错位
+    半个字（对齐错误）。
+  - 逐槽搜索工具的结论也支持这一点：
+    ```
+    baseline（ROM 原值）        Thumb 1380  returned（干净）
+    idx=12 -3 -> 0x5037fca0     Thumb 1383  null call（崩溃）
+    idx=12 -4 -> 0x503a2bb4     Thumb 1447  null call（崩溃）
+    ```
+    任何"Thumb 变多"的候选都把**干净退出**变成**崩溃**，说明这组候选里
+    ROM 原值已经是最好的。
+  - 因此真正剩下的缺陷是**干净地以 `KErrNoMemory` Leave**：增长函数被
+    喂了两个代码/数据指针当作 `(maxLen, delta)`
+    （`heap=0x80905ec4 ptr=0x510355e0 a1=0x503bfcf3 a2=0x503c7148`）。
+  - 新增可复用工具 `tools/app_import_search.sh`（逐槽搜索 + 崩溃感知评分）。
+  - 验收 `tools/test_round106.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

@@ -1081,3 +1081,11 @@ app/ROM 的 EUser 不匹配比单槽更广。验收 `tools/test_round103.sh`。
 在 236 个 kernel 槽上成立。套到 app 时 `rot=3` 让 EFile 带 NULL `this`
 走到 `0x503c2adc`；`rot=1/2/4` 各落到不同位置。偏移存在但基准不一致，
 必须逐槽映射。验收 `tools/test_round105.sh`。
+
+### round 106：更正 —— 那个调用是三参数
+
+watch `0x503bfcd0` 得 `r0=0x51035540 r1=0x80100c0c r2=0x9`，**三个参数
+都设了**；round 103/104 的"1 参数"结论撤回（反汇编写错对齐）。逐槽搜索
+显示 ROM 原值最干净（1380，干净退出），任何"变长"候选都是崩溃。剩余
+缺陷是干净地以 `KErrNoMemory` Leave。新增 `tools/app_import_search.sh`。
+验收 `tools/test_round106.sh`。
