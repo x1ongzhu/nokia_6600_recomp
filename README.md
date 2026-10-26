@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 71)
+## Status (2026-10-26, round 72)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -84,7 +84,8 @@ removing the null-descriptor `0xe59ff028` writes. Round 68 proves the direct
 SplashScreen entry path only initializes and never draws, so the splash driver
 must come from EStart or the kernel process loader. Round 69 binds EStart's
 first unresolved import; round 70 adds wait completion; round 71 rebinds the
-global CBase slot and advances EStart past the zero-vtable object. What works:
+global CBase slot and advances EStart past the zero-vtable object; round 72
+pins the app slot/export offset. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -492,6 +493,12 @@ global CBase slot and advances EStart past the zero-vtable object. What works:
   both rebinds; `config/imports-estart-nocbase-6600.txt` preserves the
   round-70 path. `tools/test_round71.sh` pins the new frontier.
 
+- [x] **App import slot / EUser export offset** (round 72): slot
+  `0x503b4338` holds EUser export 745 (`operator new`, `0x503963dc`), but
+  the app expects export 747 (`CBase` constructor, `0x50383c84`) — a
+  two-entry offset. This is why both SplashScreen and EStart need the same
+  rebind. `tools/test_round72.sh` pins the mapping.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -639,7 +646,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round68.sh` | direct SplashScreen entry only initializes; EStart route opens at slot `0x503b6b38` |
 | `tools/test_round69.sh` | EStart import bind; full 200k budget; stops in SVC/pre-handler at `0x50314f68` |
 | `tools/test_round70.sh` | EStart wait HLE; 12,136 insns; zero-vtable object at `0x80600000` (historical map) |
-| `tools/test_round71.sh` | **current acceptance**: EStart CBase rebind; 13,162 insns; bad virtual dispatch at `0x00a04d08` |
+| `tools/test_round71.sh` | EStart CBase rebind; 13,162 insns; bad virtual dispatch at `0x00a04d08` |
+| `tools/test_round72.sh` | **current acceptance**: app slot `0x503b4338` = export 745, app expects export 747 (2-entry offset) |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -635,6 +635,19 @@ vtable `0x503b359c` 不是 EStart 真实 class vtable。
 `config/imports-estart-nocbase-6600.txt` 保留 round-70 历史路径。
 验收：`tools/test_round71.sh`。
 
+### round 72：app import slot / EUser export 的 2-entry offset
+
+slot `0x503b4338` 并不是 EUser export 745：
+
+```
+slot 0x503b4338 静态值 = export 745 = 0x503963dc  (operator new)
+app 期望               = export 747 = 0x50383c84  (CBase constructor)
+```
+
+两者相差 2 个 entry。这解释了为什么 ROM slot 里是 operator new、而
+SplashScreen 和 EStart 都需要把该 slot 重绑到 `0x50383c84`。验收：
+`tools/test_round72.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
