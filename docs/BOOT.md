@@ -1196,3 +1196,16 @@ payload（当时 `alloc_cur` 仅 ~`0x80600830`，该地址在其**之上**），
 `NK_ALLOC_CLAMP=<n>`：超大请求改分配 n 字节而非失败。EFile 从 1,322 →
 1,447 条 Thumb，拒绝归零；新 frontier 是对象 `0x80100c38` 的空虚拟调用
 （`[obj+8] → [+8] == 0`，`r2 = r6 = 0x2f`）。验收 `tools/test_round100.sh`。
+
+### 2.54 round 101：中和 guest 堆的内务代码
+
+round 100 的空虚拟调用位于 `0x5039c954` = **RHeap 空闲链表合并**：锁
+`[heap]+0x1c`、遍历 `[heap]+0x2c`、经 `[[heap+8]+8]` 回调。模型从不
+构造真实 `RHeap`，故任何碰"堆对象"的 guest 路径都在走垃圾。
+dump `0x80100c00..0x80100c80` 显示该对象除 `+0x0c`/`+0x10` 两个数据
+指针与 `+0x30`/`+0x34` 两个 `0xffff8001` handle 外全为 0。
+
+`NK_STUB_PC=<hex,...>`：列出的 guest 地址直接返回 0。用它中和
+`0x5039c954` 后，EFile **用满 900k 预算**（Thumb 1,447 → 1,601），新
+frontier 是 `0x503a2660..0x503a2674` 的 TDblQue 遍历，链表头无效
+（`r0=8`、`r3=0x2f`）。验收 `tools/test_round101.sh`。

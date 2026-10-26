@@ -175,6 +175,12 @@ typedef struct nk_interp {
      * entering the kernel service.  0 disables it. */
     uint32_t swi_ret_idx;
     uint32_t swi_ret_value;
+    /* Bring-up stubs: entering one of these addresses returns 0 to the
+     * caller.  Used for guest subsystems the harness does not model (e.g.
+     * RHeap housekeeping that expects a real heap object). */
+    uint32_t stub_pc[16];
+    int      stub_n;
+    unsigned long stub_hits;
     /* Round 33: a scheduler can intercept an executive call before the
      * generic dispatch.  The hook sees the live CPU state and the SWI
      * immediate; returning 1 means it installed a new context (PC/CPSR) and

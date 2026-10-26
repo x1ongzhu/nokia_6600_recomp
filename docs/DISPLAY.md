@@ -1041,3 +1041,11 @@ kernel 变体 `0x5038e4b4` 读到 count=0 会安全返回。故新增
 操作垃圾容量。`NK_ALLOC_CLAMP=<n>` 把超大请求改成分配 n 字节：EFile
 1,322 → 1,447 条 Thumb，拒绝归零；新 frontier 是 `0x80100c38` 上的空
 虚拟调用。验收 `tools/test_round100.sh`。
+
+### round 101：中和 guest 堆内务代码
+
+空虚拟调用位于 `0x5039c954`（RHeap 空闲链表合并），它需要真实堆对象。
+新增 `NK_STUB_PC=<hex,...>` 让指定地址直接返回 0；中和后 EFile 用满
+900k 预算（Thumb 1,447 → 1,601），新 frontier 是
+`0x503a2660..0x503a2674` 的 TDblQue 遍历（头无效，`r0=8`、`r3=0x2f`）。
+验收 `tools/test_round101.sh`。

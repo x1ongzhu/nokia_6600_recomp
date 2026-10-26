@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 100)
+## Status (2026-10-27, round 101)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -796,6 +796,21 @@ works:
   and the next defect is a null virtual call on `0x80100c38`
   (`[obj+8] -> [+8] == 0`, `r2=r6=0x2f`). `tools/test_round100.sh` pins it.
 
+- [x] **Neutralise the guest heap housekeeping** (round 101): the null virtual
+  call is inside `0x5039c954`, RHeap free-list coalescing. It locks
+  `[heap]+0x1c`, walks the list at `[heap]+0x2c` and calls back through
+  `[[heap+8]+8]`; the harness never builds a real RHeap, so any guest path that
+  touches "the heap object" walks garbage. Dumping `0x80100c00..0x80100c80`
+  shows the object is zero apart from two data pointers at `+0x0c`/`+0x10`
+  (`0x80601b10`, `0x80601b68` - the descriptors from the round-99 grow traces)
+  and two kernel handles `0xffff8001` at `+0x30`/`+0x34`. The new
+  `NK_STUB_PC=<hex,...>` makes a listed guest address return 0, which
+  neutralises unmodelled subsystems: EFile then uses the whole 900,000
+  instruction budget (Thumb 1,447 -> 1,601) instead of stopping on the null
+  call, and the next frontier is a TDblQue walk with an invalid head
+  (`r0=8`, `r3=0x2f`) at `0x503a2660..0x503a2674`.
+  `tools/test_round101.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -972,7 +987,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round97.sh` | application heap is HLE-only |
 | `tools/test_round98.sh` | per-thread trap frame and heap pointer |
 | `tools/test_round99.sh` | handle-lookup slot keeps the kernel-time variant |
-| `tools/test_round100.sh` | **current acceptance**: oversized allocation traced and clamped; next frontier is a null virtual call on `0x80100c38` |
+| `tools/test_round100.sh` | oversized allocation traced and clamped |
+| `tools/test_round101.sh` | **current acceptance**: `NK_STUB_PC` neutralises guest RHeap housekeeping; EFile uses the full budget |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

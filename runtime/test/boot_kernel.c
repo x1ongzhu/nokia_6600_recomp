@@ -2692,6 +2692,21 @@ int main(int argc, char** argv) {
     ip.swi_log = (int)env_ulong("NK_SWI_LOG", 16);
     ip.banked = need_banks;
     {
+        const char* st = getenv("NK_STUB_PC");
+        if (st) {
+            const char* p = st;
+            while (*p && ip.stub_n < 16) {
+                char* end = NULL;
+                unsigned long v = strtoul(p, &end, 0);
+                if (end == p) break;
+                ip.stub_pc[ip.stub_n++] = (uint32_t)v & ~1u;
+                p = end;
+                while (*p == ',' || *p == ' ' || *p == '\t') p++;
+            }
+            printf("stub pc: %d address(es) return 0\n", ip.stub_n);
+        }
+    }
+    {
         const char* sr = getenv("NK_SWI_RET");
         if (sr) {
             char* end = NULL;

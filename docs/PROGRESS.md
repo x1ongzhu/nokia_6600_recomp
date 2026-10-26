@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 100）
+最后更新：2026-10-27（round 101）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -807,6 +807,22 @@
     `HLE alloc rejected` 归零；新 frontier 是对象 `0x80100c38` 上的
     **空虚拟调用**（`[obj+8] → [+8] == 0`），`r2 = r6 = 0x2f`。
   - 验收 `tools/test_round100.sh`。
+
+- **中和 guest 堆的内务代码**（round 101）：
+  - round 100 的空虚拟调用定位到函数 **`0x5039c954` = RHeap 空闲链表
+    合并（coalescing）**：它锁 `[heap]+0x1c`、遍历 `[heap]+0x2c` 的
+    链表、并通过 `[[heap+8]+8]` 回调。我们的模型从不构造真实 `RHeap`，
+    所以任何碰"堆对象"的 guest 路径都在走垃圾。
+  - dump `0x80100c00..0x80100c80`：对象除 `+0x0c`/`+0x10` 两个数据
+    指针（`0x80601b10`、`0x80601b68` —— 正是 round 99 增长轨迹里的
+    两个描述符）和 `+0x30`/`+0x34` 两个 kernel handle `0xffff8001`
+    之外全为 0。
+  - 新增 **`NK_STUB_PC=<hex,...>`**：列出的 guest 地址直接返回 0 给
+    调用者，用于在 bring-up 期中和未建模的子系统。
+  - 效果：EFile **用满 900k 预算**（不再停在空虚拟调用），Thumb
+    1,447 → **1,601**；新 frontier 是 `0x503a2660..0x503a2674` 的
+    **TDblQue 遍历**，链表头无效（`r0=8`、`r3=0x2f`）。
+  - 验收 `tools/test_round101.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

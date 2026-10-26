@@ -1940,6 +1940,22 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
             ip->pc_hook4(c, ip, c->r[15]);
             if (c->r[15] != before) continue;
         }
+        if (ip->stub_n) {
+            uint32_t tpc = c->r[15] & ~1u;
+            int hit = 0;
+            for (int si = 0; si < ip->stub_n; si++)
+                if (ip->stub_pc[si] == tpc) { hit = 1; break; }
+            if (hit) {
+                c->r[0] = 0;
+                uint32_t lr = c->r[14];
+                int new_t = (lr & 1u) ? 1 : 0;
+                int restored = pop_call(ip, lr & ~1u, &new_t);
+                set_thumb(c, restored ? new_t : (int)(lr & 1u));
+                c->r[15] = lr & ~1u;
+                ip->stub_hits++;
+                continue;
+            }
+        }
         if (spin_tick(ip, c->r[15])) {
             if (recover_call(ip, c, NK_STOP_SPIN)) continue;
             ip->st.stop_reason = NK_STOP_SPIN;
