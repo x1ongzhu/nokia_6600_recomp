@@ -746,6 +746,22 @@ framebuffer: 0 non-zero bytes
 scheduler/server 路径已通，新 blocker 是 server 的 copy
 length/destination。验收：`tools/test_round79.sh`。
 
+### round 80：Mem::Copy clamp 让 server 越过 wild copy
+
+新增 `NK_MEMCOPY_CLAMP=1`：在 Mem::Copy `0x5038cfe0` 把
+length > 0x100000 或 src/dst 在 `0x50000000..0x80a00000` 之外的
+copy clamp 成 0。server 不再陷入 200k MMIO storm，而是推进到
+**26,652 条 + 3,441 次 MMIO 读 / 22,928 次写**，停在新的 null call：
+
+```
+lr=0x503da6d5
+r3=0xe59ff028
+framebuffer: 0 non-zero bytes
+```
+
+新 frontier 是该 server import，而不是 copy loop。验收：
+`tools/test_round80.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -808,7 +824,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 查 EStart server 的 wild copy：round 79 已跑满 200k，当前卡在
-   `0x5038d724` 的 LDMDB/STMDB loop（destination
-   `0x65d8b834`/`0x4b6d61f8`）。先修 copy length/destination，再看
-   server 是否开始绘制。
+8. 补 EStart server 的新 import：round 80 已用 Mem::Copy clamp 越过
+   wild copy，当前停在 `lr=0x503da6d5`（`r3=0xe59ff028`）。先让
+   server 继续运行，再看它是否开始绘制。

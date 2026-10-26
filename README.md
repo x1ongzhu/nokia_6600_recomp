@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 79)
+## Status (2026-10-26, round 80)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -89,8 +89,8 @@ pins the app slot/export offset; round 73 shows the next EStart blocker is the
 service-start handshake/wait; round 74 fixes the nested SVC return; round 75 shows the wait needs a real
 started thread; round 76 rules out a DThread-shaped clone; round 77 rules
 out the SVC model; round 78 gets a fake scheduler thread into EStart's server
-entry; round 79 adds auto-complete so the server runs the full 200k budget.
-What works:
+entry; round 79 adds auto-complete so the server runs; round 80 clamps the
+wild Mem::Copy and advances it past the MMIO storm. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -558,6 +558,14 @@ What works:
   and 642,561 writes. Framebuffer remains untouched.
   `tools/test_round79.sh` pins the result.
 
+- [x] **Mem::Copy clamp advances the server** (round 80):
+  `NK_MEMCOPY_CLAMP=1` zeros Mem::Copy calls with length > 0x100000 or
+  src/dst outside `0x50000000..0x80a00000`. The server advances from the
+  200k MMIO storm to 26,652 instructions, 3,441 MMIO reads and 22,928
+  writes, then stops on a new null call at `lr=0x503da6d5`
+  (`r3=0xe59ff028`). Framebuffer remains untouched.
+  `tools/test_round80.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -713,7 +721,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round76.sh` | DThread clone still leaves the wait at KRequestPending; need request/server completion |
 | `tools/test_round77.sh` | direct dispatch hits the same EStart handshake; SVC model is not the blocker |
 | `tools/test_round78.sh` | fake scheduler thread reaches EStart server entry; null call at `0x503db18f` |
-| `tools/test_round79.sh` | **current acceptance**: auto-complete runs the EStart server 200k; wild copy at `0x5038d724` |
+| `tools/test_round79.sh` | auto-complete runs the EStart server 200k; wild copy at `0x5038d724` |
+| `tools/test_round80.sh` | **current acceptance**: Mem::Copy clamp advances the server to `0x503da6d5`; new import null call |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -187,6 +187,10 @@
  *   NK_SCHED_R0=0x...       initial r0 for that fake thread (round 78).
  *   NK_SCHED_AUTOCOMPLETE=1  after a switch, complete the blocked thread's
  *                           status and make it runnable again (round 79).
+ *   NK_MEMCOPY_CLAMP=1      at Mem::Copy 0x5038cfe0, zero copies whose
+ *                           length > 0x100000 or src/dst is outside
+ *                           0x50000000..0x80a00000 (round 80; uses pc_hook,
+ *                           so NK_TIMERQ must be off).
  *   NK_E32_SECTIONS=1       with --e32: place data/exports/dllref at their
  *                           runtime addresses (finds the packed export run)
  *   NK_E32_HDR=0x64         serialized EKA1 image header size (code offset)
@@ -656,6 +660,20 @@ static int timerq_nested_call(nk_cpu_t* c, nk_interp_t* parent,
     nk_interp_run(c, &sub);
     parent->alloc_cur = sub.alloc_cur;
     return (c->r[15] & ~1u) == (ret & ~1u);
+}
+
+/* Round 80: the EStart server reaches Mem::Copy with a corrupted length
+ * (0xe59ff028) and a destination outside RAM, which turns into a 600k-access
+ * MMIO storm.  Clamp obviously-wild copies to zero so the server can return
+ * to its caller and expose the next handshake step. */
+static void memcopy_clamp_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
+    (void)ip; (void)pc;
+    uint32_t dst = c->r[0], src = c->r[1], len = c->r[2];
+    int invalid = (dst < 0x50000000u || dst >= 0x80a00000u ||
+                   src < 0x50000000u || src >= 0x80a00000u);
+    if (len > 0x100000u || invalid) {
+        c->r[2] = 0;
+    }
 }
 
 static void timerq_pc_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
@@ -2496,7 +2514,12 @@ int main(int argc, char** argv) {
      * instruction after the first timer IRQ wakes Kern::Init1.  The default
      * mode calls the kernel's own constructor (export 451); NK_TIMERQ_MODE=
      * stub falls back to a zero-return vtable. */
-    if (env_ulong("NK_TIMERQ", 0)) {
+    if (env_ulong("NK_MEMCOPY_CLAMP", 0)) {
+        ip.pc_hook_addr = 0x5038cfe0u;
+        ip.pc_hook = memcopy_clamp_hook;
+        printf("memcopy clamp: wild copies at 0x5038cfe0 are zeroed\n");
+    }
+    if (env_ulong("NK_TIMERQ", 0) && !ip.pc_hook) {
         ip.pc_hook_addr = 0x5031ef40u;
         ip.pc_hook = timerq_pc_hook;
         printf("timerq: will inject [0x80001c34] before %#010x\n",

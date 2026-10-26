@@ -683,6 +683,14 @@ framebuffer 仍 0 像素。验收 `tools/test_round78.sh`。
 `0x65d8b834`/`0x4b6d61f8`），期间 646,007 次 MMIO 读 / 642,561 次
 写。framebuffer 仍 0 像素。验收 `tools/test_round79.sh`。
 
+### 2.33 round 80：Mem::Copy clamp 越过 wild copy
+
+`NK_MEMCOPY_CLAMP=1` 在 Mem::Copy `0x5038cfe0` 把 length > 0x100000
+或 src/dst 越界的 copy clamp 成 0。server 从 200k MMIO storm 推进到
+**26,652 条 + 3,441 次 MMIO 读 / 22,928 次写**，停在
+`lr=0x503da6d5` 的 null call（`r3=0xe59ff028`）。framebuffer 仍
+0 像素。验收 `tools/test_round80.sh`。
+
 ---
 
 ## 3. EUser 导入映射
