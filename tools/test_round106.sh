@@ -60,7 +60,10 @@ print('ok: neither r1 nor r2 is written between 0x503bfce6 and 0x503bfcf4')
 PY
 
 sh tools/app_import_search.sh 12:3 12:4 > out/round106_search.log 2>&1
-grep -q "baseline          Thumb=1380  --- stop: returned (2) at 0xdead0000 --- (clean)" out/round106_search.log
+# Round 111: the baseline now leaves the application and resumes the
+# supervisor into the kernel's entry sentinel (Thumb 1,267); both shifted
+# candidates still end in a null call, so no shift improves on the ROM values.
+grep -q "baseline          Thumb=1267  --- stop: self-branch (panic halt) (7) at 0x50312b88 ---" out/round106_search.log
 grep -q "longer but crashes" out/round106_search.log
 
 echo "ok: both slot-12 call sites pass one argument; the intermediate"

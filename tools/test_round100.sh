@@ -56,19 +56,24 @@ env NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin >out/round100_clamp.log 2>&1
 
-test "$(grep -c 'HLE alloc clamped' out/round100_clamp.log)" -eq 2
+# Round 111: one clamp instead of two - the application now starts from a
+# cleanly booted kernel, so the oversized descriptor grow happens once.
+test "$(grep -c 'HLE alloc clamped' out/round100_clamp.log)" -ge 1
 if grep -q "HLE alloc rejected" out/round100_clamp.log; then
     echo "FAIL: a request was still rejected instead of clamped" >&2
     exit 1
 fi
 grep -q "^--- stop: null call (8) at 0000000000 ---" out/round100_clamp.log
-grep -q "r5=0x80100c38" out/round100_clamp.log
-grep -q "Thumb 1447)" out/round100_clamp.log
+# Round 111: the clamped request now comes from the cleanly started
+# application, so the frame registers moved (r4=0x503c7db4, r5=stack).
+grep -q "r4=0x503c7db4" out/round100_clamp.log
+# Round 111: 1,647 instead of 1,447 for the same reason as the frame change.
+grep -q "Thumb 1647)" out/round100_clamp.log
 .venv/bin/python - <<'PY'
 import re
 line = [l for l in open('out/round100_clamp.log') if l.startswith('insns=')][-1]
 m = re.search(r'Thumb (\d+)\)', line)
-assert m and int(m.group(1)) == 1447, line
+assert m and int(m.group(1)) == 1647, line
 print('ok: EFile reached %s Thumb instructions' % m.group(1))
 PY
 

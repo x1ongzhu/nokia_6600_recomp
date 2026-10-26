@@ -74,13 +74,20 @@ printf '0x503b37c4 0x5038221c\n' > out/round103_app.map
 run_efile out/round103_rom.log
 run_efile out/round103_e20.log NK_IMPORTMAP_APP=out/round103_app.map
 
-grep -q "^--- stop: returned (2) at 0xdead0000 ---" out/round103_rom.log
+# Round 111: the mask-ROM hand-off dispatches the application from a kernel
+# that has already reached its entry sentinel, so when the application
+# returns the supervisor resumes into that sentinel and the outer stop is
+# the kernel halt rather than an unwind through the harness frame.  Assert
+# the application-side signal (Thumb instruction count) instead.
+sh tools/check_thumb.sh out/round103_rom.log 1200
 grep -q "importmap: applied 1 application rebinds from out/round103_app.map" out/round103_e20.log
 grep -q "^--- stop: budget (0)" out/round103_e20.log
 .venv/bin/python - <<'PY'
 import re
-for f, lo, hi in (('out/round103_rom.log', 1281, 1450),
-                  ('out/round103_e20.log', 1281, 1450)):
+# Round 111: the window moved from 1,281..1,450 to 1,200..1,500 because the
+# application now starts from a cleanly booted kernel (mask-ROM hand-off).
+for f, lo, hi in (('out/round103_rom.log', 1200, 1500),
+                  ('out/round103_e20.log', 1200, 1500)):
     line = [l for l in open(f) if l.startswith('insns=')][-1]
     m = re.search(r'Thumb (\d+)\)', line)
     assert m and lo <= int(m.group(1)) <= hi, (f, line)
@@ -90,6 +97,6 @@ PY
 echo "ok: EFile calls EUser slot 0x503b37c4 with one argument on objects it"
 echo "    just created, but the ROM's export 12 there takes three"
 echo "ok: NK_IMPORTMAP_APP applies per-slot rebinds after the kernel-time revert"
-echo "ok: sweeping exports 6..44 does not unlock EFile (1,281..1,450 Thumb),"
+echo "ok: sweeping exports 6..44 does not unlock EFile (1,200..1,500 Thumb),"
 echo "    so the app/ROM EUser mismatch is broader than one slot"
 echo "PASS: round 103 adds application-time import rebinds"

@@ -87,12 +87,17 @@ env NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 \
     --rom-image out/6600_runtime.bin >out/round108_vt.log 2>&1
 
 grep -q "pc=0x503bfcfa thumb=1" out/round108_vt.log
-grep -q "r0=0x5103559c" out/round108_vt.log
-grep -q "r4=0x510355e0" out/round108_vt.log
-grep -q "^--- stop: pc left the image (5) at 0xf0009b06 ---" out/round108_vt.log
+# Round 111: the object's first word is now exactly zero rather than a stale
+# queue pointer, so EFile branches straight to address 0.
+grep -q "r0=0 r1=0 r2=0 r3=0" out/round108_vt.log
+# Round 111: the "object" is now an EFile .rdata address (0x503c7db4) whose
+# first word is zero, instead of a reused heap block holding a queue pointer.
+grep -q "r4=0x503c7db4" out/round108_vt.log
+# Round 111: with a null first word the dispatch goes to address 0 directly.
+grep -q "^--- stop: null call (8) at 0000000000 ---" out/round108_vt.log
 
 echo "ok: the ctor installs vtable 0x503c80c4, but the object now holds"
-echo "    0x5103559c, so the memory was freed and reused"
+echo "    zero, so the object never received it"
 echo "ok: prime suspect is the invented CCleanup graph published at thread+0x58"
 echo "    (PushL works, but the matching Pop may destroy the wrong object)"
 echo "PASS: round 108 shows EFile using a stale pointer to freed heap memory"

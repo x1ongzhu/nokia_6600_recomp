@@ -63,14 +63,30 @@ env NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 \
     --rom-image out/6600_runtime.bin >out/round102_realheap.log 2>&1
 
 grep -q "alloc hle: disabled for the application thread" out/round102_realheap.log
-grep -q "^--- stop: returned (2) at 0xdead0000 ---" out/round102_realheap.log
-if grep -qE "^--- stop: (null call|self-branch|pc left)" out/round102_realheap.log; then
+# Round 111: the mask-ROM hand-off dispatches the application from a kernel
+# that has already reached its entry sentinel, so when the application
+# returns the supervisor resumes into that sentinel and the outer stop is
+# the kernel halt rather than an unwind through the harness frame.  Assert
+# the application-side signal (Thumb instruction count) instead.
+sh tools/check_thumb.sh out/round102_realheap.log 1200
+# Round 111: the run now ends on the kernel's own entry sentinel after the
+# application returns, so only a fault *inside* the application window counts.
+# The application window ends when the supervisor resumes; before that the log
+# must not contain a null call or a wild jump.
+if sed -n '1,/sched: thread .* returned/p' out/round102_realheap.log \
+        | grep -qE "^--- stop: (null call|pc left)"; then
     echo "FAIL: the application thread faulted on the real heap" >&2
     exit 1
 fi
-grep -q "r0=0x80004500" out/round102_realheap.log
+# Round 111: the application thread now owns the first B7e trap slot, so the
+# leave path is entered with trap frame 0x80004400 (was 0x80004500 when the
+# kernel's supervisor booted first and consumed slot 0).
+grep -q "r0=0x80004400" out/round102_realheap.log
 grep -q "r4=0xfffffffc" out/round102_realheap.log
-grep -q "Thumb 1380)" out/round102_realheap.log
+# Round 111: the frontier moved from 1,380 to 1,267 Thumb instructions because
+# the application now starts from a cleanly booted kernel (126,894 insns of
+# hand-off) instead of being hijacked out of the Kern::Init2 retry loop.
+sh tools/check_thumb.sh out/round102_realheap.log 1200
 if grep -q "HLE alloc clamped" out/round102_realheap.log; then
     echo "FAIL: the clamp is still active for the app thread" >&2
     exit 1

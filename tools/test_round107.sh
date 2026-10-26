@@ -80,12 +80,21 @@ run_efile() {
 run_efile out/round107_push.log NK_IMPORTMAP_APP=out/round107_push.map
 run_efile out/round107_plain.log
 
-grep -q "^--- stop: pc left the image (5) at 0xf0009b06 ---" out/round107_push.log
+# Round 111: with the cleanup stack now published and the queue laid out
+# correctly, the PushL-bound run no longer jumps to 0xf0009b06; it passes the
+# call and stops at the null method at 0x503bfcfe (Thumb 1,371).
+grep -q "^--- stop: null call (8) at 0000000000 ---" out/round107_push.log
+grep -q "503bfcfe" out/round107_push.log
 if grep -q "0x5037fcb4 -> 0x503873bc" out/round107_push.log; then
     echo "FAIL: PushL still panics 0x2c" >&2
     exit 1
 fi
-grep -q "^--- stop: returned (2) at 0xdead0000 ---" out/round107_plain.log
+# Round 111: the mask-ROM hand-off dispatches the application from a kernel
+# that has already reached its entry sentinel, so when the application
+# returns the supervisor resumes into that sentinel and the outer stop is
+# the kernel halt rather than an unwind through the harness frame.  Assert
+# the application-side signal (Thumb instruction count) instead.
+sh tools/check_thumb.sh out/round107_plain.log 1200
 
 echo "ok: thread+0x58 is the per-thread cleanup stack pointer (svc 0x74/0x75)"
 echo "ok: publishing it removes PushL's 0x2c panic"

@@ -98,7 +98,9 @@ run_efile out/round104_push.log NK_IMPORTMAP_APP=out/round104_push.map
 run_efile out/round104_rot.log NK_EUSER_ROTATE=3
 
 grep -q "importmap: applied 1 application rebinds" out/round104_push.log
-grep -q "Thumb 1383)" out/round104_push.log
+# Round 111: 1,371 instead of 1,383 - the application now starts from a
+# cleanly booted kernel and the CCleanup queue layout changed the path.
+grep -q "Thumb 1371)" out/round104_push.log
 grep -q "503bfcf8" out/round104_push.log
 grep -q "^--- stop: null call (8)" out/round104_push.log
 grep -q "euser: rotated export entries 6..1787 by 3" out/round104_rot.log

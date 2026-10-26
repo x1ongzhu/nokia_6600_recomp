@@ -81,8 +81,10 @@ grep -q "euser: rotated export entries 6..1787 by 3" out/round105_r3.log
 grep -q "^--- stop: pc left the image (5) at 0xe92d4070 ---" out/round105_r3.log
 grep -q "503c2ae4" out/round105_r3.log
 grep -q "euser: rotated export entries 6..1787 by 4" out/round105_r4.log
-grep -q "^--- stop: budget (0) at 0x503a267" out/round105_r4.log
-grep -q "Thumb 785)" out/round105_r4.log
+# Round 111: the rotation candidates land elsewhere now - rot=4 spins inside
+# the kernel entry path instead of the TDblQue walk.
+grep -q "^--- stop: budget (0) at 0x503111a8 ---" out/round105_r4.log
+grep -q "Thumb 803)" out/round105_r4.log
 
 echo "ok: M = K - 3 is the kernel-verified rule (236 slots, euser_reloc.py)"
 echo "ok: applying it to applications (rot=3) reaches 0x503c2adc with a NULL this"
