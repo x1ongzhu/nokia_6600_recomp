@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 51）
+最后更新：2026-10-26（round 52）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -256,6 +256,12 @@
   （`NK_CALL_INFER=1`）。修正后 EwSrv 进入 prologue，但下一个 veneer
   `0x506c1dba` 的 literal 是代码/padding，不是 slot，属于
   packed/relocated veneer literal 问题。
+
+- **EwSrv IAT vs unrelocated literal**（round 52）：IAT
+  `0x506c9290` 有已解析地址（`0x506980e5/0x506a815c/0x503c9485`），
+  但 veneer `0x506c1dba` 加载 `0x40b846c0`（代码/padding），不是 IAT
+  slot。IAT 正常，问题在 app code 的 literal pool 没有被 flat image
+  loader 重定位。这是 window-server bring-up 的 loader frontier。
 
 ### 未完成
 

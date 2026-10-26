@@ -256,8 +256,21 @@ round 51 进一步修正了 EwSrv 的入口：call `0x506a821a` 编码的是
 `0x506c1dba` 的 literal 是代码/padding，不是 slot——这是
 **packed/relocated veneer literal** 问题，不是单个缺失 import。
 
-下一步是修 EwSrv 的 packed veneer/literal pool，或 HLE
-window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
+round 52 进一步确认：EwSrv 的 **IAT 是好的**。`0x506c9290` 处的表
+包含已解析的 Thumb 地址：
+
+```
+0x506c9294 0x506980e5
+0x506c9298 0x506a815c
+0x506c929c 0x503c9485
+```
+
+但 veneer `0x506c1dba` 加载的是 `0x40b846c0`（代码/padding），不是
+IAT slot。也就是说，**app code 的 literal pool 没有被 flat image loader
+重定位**。这是 EwSrv/window-server bring-up 的具体 loader frontier。
+
+下一步是给 flat image 的 ROMFS app 加 literal-pool/relocation 处理，
+或 HLE window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 
 另外，direct 路径对 `0x600000` 的 400 KB+ 写入不是 framebuffer，而是
 一次**长度错误的数据 copy**；`NK_MAP_APP_LOW=1` 把

@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 51)
+## Status (2026-10-26, round 52)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -292,6 +292,13 @@ stable executive loop. What works:
   slot — a packed/relocated veneer-literal problem, not a single missing
   import. `NK_FIX_4A78` now fills the whole missing-DLL page.
 
+- [x] **EwSrv IAT vs unrelocated literal** (round 52): the IAT at
+  `0x506c9290` holds resolved Thumb addresses (`0x506980e5`, `0x506a815c`,
+  `0x503c9485`, ...), but the veneer at `0x506c1dba` loads `0x40b846c0`
+  (code/padding), not an IAT slot. The IAT is fine; the app code's literal
+  pool is unrelocated by the flat-image loader. This is the concrete loader
+  frontier for EwSrv/window-server bring-up.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -421,7 +428,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round48.sh` | wait-completion exposes a wild descriptor copy; direct EwSrv null-calls at `0x506c0b15` |
 | `tools/test_round49.sh` | splash MBM header, no MBM load in RAM, EwSrv bad veneer literal `0x4a7846c0` |
 | `tools/test_round50.sh` | EwSrv passes its first missing-DLL call via a mapped zero-return stub |
-| `tools/test_round51.sh` | **current acceptance**: EwSrv callmap redirect to its real prologue, then the packed-veneer literal frontier |
+| `tools/test_round51.sh` | EwSrv callmap redirect to its real prologue, then the packed-veneer literal frontier |
+| `tools/test_round52.sh` | **current acceptance**: EwSrv IAT is resolved but the veneer literal at `0x506c1dba` is padding (`0x40b846c0`) |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
