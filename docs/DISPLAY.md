@@ -146,6 +146,21 @@ pre-handler `[0x80000f34]`；direct E32 entry 下它是 0，所以
 所以 round 41 的 “1.5M 真实 SVC” 结论需要修正：它是 no-op SWI 运行。
 真实 SVC 模型已经加入，但还没接到完整的 user thread/executive 上下文。
 
+round 45 修了三处 boot state，real-SVC 路径现在能稳定跑满 2M 预算：
+
+- USR bank 的 SP 初始化为 app 的 `NK_SP`（`0x80580000`），且
+  `stack_in_ram()` 跟随实际映射的 6 MiB bank；SVC 返回不再把 app 栈
+  换成 preset `0x80240000`。
+- B7e current-thread hook 在初始 fake thread 发布**之前**安装，fake
+  thread 也有 `+0x18/+0x5c/+0x64`。
+- kernel DFC queue `0x80001c28` 初始化为空，第一条 SVC 的 DFC
+  processor 不再调用垃圾 entry。
+
+结果：direct FbServ + real SVC 跑满 **2,000,000 条**，停在
+`0xffff0008` / `0x5039865c` 的 EUser `WaitForAnyRequest` 循环，
+0 fault。direct-SWI 路径也到 500k 预算，但出现 `0x600000` 的
+wild clear，是它自己的新 frontier。
+
 round 44 进一步定位：FbServ 的第一条系统调用是
 `0x50392b88 ef00006c`（`svc #0x6c`）。kernel handler 用 bit 23 区分
 user/kernel；flat image 把 app 的 import 绑到 kernel-side EUser stub，

@@ -278,6 +278,7 @@ int         nk_interp_run(nk_cpu_t* c, nk_interp_t* ip);
 /* Initialise one ARM mode bank (USR/FIQ/IRQ/SVC/ABT/UND).  Used by the
  * boot harness to provide the mode stacks a mask-ROM startup would set up. */
 void        nk_bank_init(nk_cpu_t* c, uint32_t mode, uint32_t sp, uint32_t lr);
+void        nk_set_stack_ram_top(uint32_t top);
 int         nk_interp_call(nk_cpu_t* c, uint32_t target);
 /* Add a call-site fixup (used by the boot harness to load config/callmap-*.txt). */
 int         nk_callmap_add(nk_interp_t* ip, uint32_t call_pc, uint32_t target,

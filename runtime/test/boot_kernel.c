@@ -1791,6 +1791,7 @@ int main(int argc, char** argv) {
     uint32_t ram_size = NK_RAM_SIZE +
         (uint32_t)env_ulong("NK_RAM_EXTRA", 0);
     if (nk_alloc_ram(&cpu, NK_RAM_BASE, ram_size) != 0) return 1;
+    nk_set_stack_ram_top(NK_RAM_BASE + ram_size);
     /* The EKA1 kernel entry runs before the MMU remaps RAM to 0x80000000;
      * its early literal pools contain physical data offsets (0x0004_6564,
      * 0x0004_6fca), so the bootstrap view needs RAM at 0x00000000 too. */
@@ -2022,8 +2023,17 @@ int main(int argc, char** argv) {
         uint32_t size = (uint32_t)env_ulong("NK_B7E_SIZE", 0x400000u);
         b7e_enabled = 1;
         b7e_install(&cpu, &ip, base, size);
-        nk_w32(&cpu, 0x800017d4u, B7E_THREAD);
-        nk_dbg_watch_write(0x800017d4u, b7e_thread_hook);
+        /* Install the hook before the initial publish so the fake current
+         * thread also gets +0x18/+0x5c/+0x64; otherwise the first executive
+         * call reads a null request semaphore.  NK_B7E_LATE_HOOK=1 keeps the
+         * historical (buggy) order for the round-39/40 controls. */
+        if (env_ulong("NK_B7E_LATE_HOOK", 0)) {
+            nk_w32(&cpu, 0x800017d4u, B7E_THREAD);
+            nk_dbg_watch_write(0x800017d4u, b7e_thread_hook);
+        } else {
+            nk_dbg_watch_write(0x800017d4u, b7e_thread_hook);
+            nk_w32(&cpu, 0x800017d4u, B7E_THREAD);
+        }
         if (b7e_live)
             nk_dbg_watch_write4(0x80000408u, b7e_alias_hook);
         printf("B7e: watching [%#010x] for current-thread updates\n",
@@ -2186,6 +2196,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* Direct user-mode entry: the USR bank must start at the app's NK_SP,
+     * not at the harness's fixed per-mode top.  Otherwise the first SVC
+     * return to USR mode restores the wrong SP and loses the app frame. */
+    if ((cpu.cpsr & 0x1fu) == 0x10u) {
+        nk_bank_init(&cpu, NK_MODE_USR, cpu.r[13], cpu.r[14]);
+        printf("app USR stack: %#010x\n", cpu.r[13]);
+    }
+
     ip.budget = (long)env_ulong("NK_BUDGET", 2000000);
     ip.infer_mode = (int)env_ulong("NK_INFER", 1);
     ip.infer_calls = (int)env_ulong("NK_CALL_INFER", 0);
@@ -2342,6 +2360,13 @@ int main(int argc, char** argv) {
             }
         }
         printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
+    }
+    if (env_ulong("NK_DFC_EMPTY", 0)) {
+        /* Direct app entry: the kernel's DFC queue at [0x80001c28] has not
+         * been initialised by Kern::Init1.  Make it an empty TDblQue so the
+         * first SVC's DFC processor returns instead of calling garbage. */
+        nk_w32(&cpu, 0x80001c28u, 0x80001c28u);
+        printf("dfc queue: empty at 0x80001c28\n");
     }
     install_svc_hook(&cpu, &ip);
     printf("run: sp=%#010x cpsr=%#010x budget=%ld infer=%d call-infer=%d policy=%d\n",

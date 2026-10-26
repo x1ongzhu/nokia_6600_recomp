@@ -50,8 +50,16 @@ static int mode_idx(uint32_t cpsr) {
     }
 }
 
+/* The harness may map more than the 3 MiB kernel window (NK_RAM_EXTRA).  The
+ * banked-stack predicate must follow the actually mapped top, otherwise an
+ * app stack above 0x80300000 is treated as invalid and the USR bank keeps its
+ * preset entry SP instead of the interrupted frame. */
+static uint32_t g_stack_ram_top = NK_RAM_BASE + NK_RAM_SIZE;
+
+void nk_set_stack_ram_top(uint32_t top) { g_stack_ram_top = top; }
+
 static int stack_in_ram(uint32_t sp) {
-    return sp >= NK_RAM_BASE && sp < NK_RAM_BASE + NK_RAM_SIZE;
+    return sp >= NK_RAM_BASE && sp < g_stack_ram_top;
 }
 
 static void bank_save(nk_cpu_t* c) {
@@ -142,7 +150,10 @@ void nk_bank_init(nk_cpu_t* c, uint32_t mode, uint32_t sp, uint32_t lr) {
 static void exception_enter(nk_cpu_t* c, uint32_t mode, uint32_t vector,
                             uint32_t lr, uint32_t spsr) {
     int newi = mode_idx(mode);
+    if (g_bank_log) fprintf(stderr, "[exc] enter oldmode=%#x sp=%#010x usr=%#010x svc=%#010x\n",
+                            c->cpsr & 0x1fu, c->r[13], c->bank[0].sp, c->bank[3].sp);
     bank_save(c);
+    if (g_bank_log) fprintf(stderr, "[exc] saved usr=%#010x svc=%#010x\n", c->bank[0].sp, c->bank[3].sp);
     c->bank[newi].spsr = spsr;
     c->bank[newi].spsr_valid = 1;
     c->bank[newi].lr = lr;

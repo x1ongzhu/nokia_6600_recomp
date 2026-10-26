@@ -24,7 +24,8 @@
 #     1,499,521-instruction run;
 #   - NK_SWI_EXCEPTION=1 installs the hook and the kernel boot stops at
 #     0xdead0000 after 11,114 instructions;
-#   - direct FbServ with NK_SWI_EXCEPTION=1 stops at 56 instructions.
+#   - direct FbServ with NK_SWI_EXCEPTION=1 reaches the DFC-queue frontier
+#     (271 instructions / 0xe59ff028) before round 45 empties the queue.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
@@ -76,8 +77,8 @@ common NK_SWI_EXCEPTION=1 NK_BUDGET=2000000 NK_CPSR=0x40000030 \
     NK_BANKED=1 NK_ENTRY=0x506897d5 NK_SP=0x80580000 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin >out/round43_fbserv.log 2>&1
-grep -q "^--- stop: null call (8) at 0000000000 ---" out/round43_fbserv.log
-grep -q "insns=56" out/round43_fbserv.log
+grep -q "^--- stop: pc left the image (5) at 0xe59ff028 ---" out/round43_fbserv.log
+grep -q "insns=271" out/round43_fbserv.log
 
 echo "ok: NK_SWI_DIRECT=0 without an exception model treats SWIs as no-ops"
 echo "ok: the 1.5M FbServ run was therefore not a real kernel path"
@@ -85,7 +86,7 @@ echo "ok: NK_SWI_EXCEPTION=1 enters the real SVC vector and installs the"
 echo "    mask-ROM pre-handler hook"
 echo "ok: kernel boot with real SVCs stops at the boot sentinel 0xdead0000"
 echo "    after 11,114 instructions"
-echo "ok: direct FbServ with real SVCs stops at 56 instructions; its user-SVC"
-echo "    return path still needs the current-thread state"
+echo "ok: direct FbServ with real SVCs reaches the DFC-queue frontier"
+echo "    (271 instructions / 0xe59ff028); round 45 initialises the queue"
 echo "PASS: round 43 adds a real SVC exception model and corrects the"
 echo "      interpretation of the 1.5M run"

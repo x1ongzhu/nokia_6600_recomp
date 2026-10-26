@@ -17,7 +17,7 @@
 #
 # Acceptance:
 #   - trace shows 0x50392b88 ef00006c;
-#   - real-SVC FbServ stops at 56 instructions with lr=0;
+#   - real-SVC FbServ reaches the DFC-queue frontier (271 / 0xe59ff028);
 #   - NK_USER_SVC=1 leaves the image at 0xe59ff028.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -58,8 +58,9 @@ grep -q "50392b88  ef00006c" out/round44_svc.log
 common NK_BUDGET=1000 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin >out/round44_stop.log 2>&1
-grep -q "insns=56" out/round44_stop.log
-grep -q "lr=0000000000" out/round44_stop.log
+grep -q "insns=271" out/round44_stop.log
+grep -q "pc left the image (5) at 0xe59ff028" out/round44_stop.log
+grep -q "lr=0x50315acc" out/round44_stop.log
 
 common NK_BUDGET=1000 NK_USER_SVC=1 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
@@ -69,7 +70,7 @@ grep -q "pc left the image (5) at 0xe59ff028" out/round44_marker.log
 
 echo "ok: FbServ's first SVC is 0x50392b88 ef00006c (svc #0x6c)"
 echo "ok: the handler's bit-23 selector takes the kernel path and the app"
-echo "    stops at 56 instructions"
+echo "    stops at 271 instructions / 0xe59ff028 (DFC queue)"
 echo "ok: setting bit 23 on the EUser stub table is not sufficient; the"
 echo "    handler jumps to 0xe59ff028 from its dispatch table"
 echo "PASS: round 44 pins the user/kernel SVC loader frontier"

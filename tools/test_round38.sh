@@ -52,17 +52,16 @@ env NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
 
 grep -q "entry override: 0x506897d5 (Thumb)" out/round38_fbserv.log
 grep -q "cpsr override: 0x40000073 (Thumb entry)" out/round38_fbserv.log
-grep -q "^--- stop: pc left the image (5) at 0x068a0688 ---" \
+grep -q "^--- stop: budget (0) at 0x5038d658 ---" \
     out/round38_fbserv.log
-grep -q "lr=0x5068a57f" out/round38_fbserv.log
-grep -q "insns=3612" out/round38_fbserv.log
+grep -q "insns=500000" out/round38_fbserv.log
 grep -q "undefined=0" out/round38_fbserv.log
 grep -q "unbound IAT=0" out/round38_fbserv.log
-grep -q "5068a572" out/round38_fbserv.log
+grep -q "recoveries=0" out/round38_fbserv.log
 
 echo "ok: a Thumb NK_ENTRY keeps CPSR.T even when NK_CPSR omits it"
-echo "ok: FbServ starts at 0x506897d5 and runs 3,612 instructions in Thumb"
-echo "ok: it reaches 0x5068a572, the object vtable call site"
-echo "ok: the next blocker is the uninitialized object vtable 0x50680000"
-echo "    ([vtable+8]=0x068a0689), so PC escapes to 0x068a0688"
-echo "PASS: round 38 opens a direct FbServ route past the kernel deadlock"
+echo "ok: FbServ starts at 0x506897d5 and runs the full 500,000-insn budget"
+echo "ok: the early vtable escape is gone after the B7e hook-order fix"
+echo "ok: the new direct-path frontier is a wild 0x600000 clear (budget stop"
+echo "    at 0x5038d658); the real-SVC path is the next acceptance test"
+echo "PASS: round 38 direct FbServ now reaches the 500k budget"

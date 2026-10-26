@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 44)
+## Status (2026-10-26, round 45)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -228,6 +228,16 @@ stable executive loop. What works:
   The user path expects a different table/entry format, so this is the next
   loader/ABI frontier.
 
+- [x] **Stable real-SVC FbServ** (round 45): three boot-state fixes make
+  direct FbServ + real SVCs stable for the full 2,000,000-instruction budget:
+  the USR bank starts at the app's `NK_SP` and the stack predicate follows
+  the mapped 6 MiB bank; the B7e current-thread hook is installed before the
+  initial fake thread is published (so `+0x18/+0x5c/+0x64` exist); and the
+  kernel DFC queue `0x80001c28` starts empty.  FbServ now waits in
+  `WaitForAnyRequest` at `0xffff0008` / `0x5039865c` instead of faulting.
+  The direct `NK_SWI_DIRECT` path also reaches the 500k budget, with a wild
+  `0x600000` clear as its new frontier.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -344,13 +354,14 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round35.sh` | hand-off returns before preemption, supervisor runs to 464k, Init3 deadlock pinned to the handle-`0x32`/DFC path |
 | `tools/test_round36.sh` | MMIO write PC/LR provenance; `0x41000000`/`0x41080000` is the boot-region table, not the LCD framebuffer |
 | `tools/test_round37.sh` | static display-chain inventory (`FbServ.exe`, `FbsCli.dll`, `BitGdi.dll`, `ecust.dll` hardware constants) |
-| `tools/test_round38.sh` | direct Thumb FbServ startup, 3,612 instructions, uninitialized-vtable blocker at `0x5068a572` |
+| `tools/test_round38.sh` | direct Thumb FbServ startup; now reaches the 500k budget after the boot-state fixes |
 | `tools/test_round39.sh` | exact FbServ vtable write/overwrite sequence; byte/halfword write watches |
 | `tools/test_round40.sh` | FbServ descriptor/object overlap call chain and 20-byte allocation |
 | `tools/test_round41.sh` | FbServ on the real banked SVC path, 1,499,521 instructions, EUser wait chain |
 | `tools/test_round42.sh` | the 1.5M blocker is a post-executive stack/context switch, not the vtable or wait SWIs |
 | `tools/test_round43.sh` | real SVC exception model; the 1.5M FbServ run was no-op SWIs, not a kernel path |
-| `tools/test_round44.sh` | **current acceptance**: FbServ's first `svc #0x6c`, user/kernel bit-23 selector, and the dispatch-table frontier |
+| `tools/test_round44.sh` | FbServ's first `svc #0x6c`, user/kernel bit-23 selector, and the dispatch-table frontier |
+| `tools/test_round45.sh` | **current acceptance**: stable real-SVC FbServ, full 2M budget in the EUser wait loop |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

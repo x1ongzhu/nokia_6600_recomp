@@ -451,6 +451,25 @@ frontier。
 
 ---
 
+### 2.15 round 45：app 路径的 USR 栈、B7e 顺序与 DFC queue
+
+直接运行 FbServ 时，三处 boot state 必须补齐：
+
+1. **USR bank SP**：初始化为 app 的 `NK_SP`（`0x80580000`），且
+   `stack_in_ram()` 使用 harness 实际映射的 RAM top（`NK_RAM_EXTRA`），
+   否则 SVC 返回会把 app 栈换成 preset `0x80240000`。
+2. **B7e hook 顺序**：先安装 `[0x800017d4]` 的 watch，再发布初始 fake
+   thread，否则 fake thread 没有 `+0x18/+0x5c/+0x64`，第一个 executive
+   call 读到 null request semaphore。
+3. **DFC queue**：`[0x80001c28]` 初始化为空 TDblQue（`NK_DFC_EMPTY=1`），
+   否则第一条 SVC 的 DFC processor 会调用垃圾 entry。
+
+结果：direct FbServ + real SVC 跑满 **2,000,000 条**，停在
+`0xffff0008` / `0x5039865c` 的 `WaitForAnyRequest` 循环，0 fault。
+direct-SWI 路径也到 500k 预算，但出现 `0x600000` wild clear。
+
+---
+
 ## 3. EUser 导入映射
 
 EKA1 import stub：
