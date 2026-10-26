@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 78)
+## Status (2026-10-26, round 79)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -89,7 +89,8 @@ pins the app slot/export offset; round 73 shows the next EStart blocker is the
 service-start handshake/wait; round 74 fixes the nested SVC return; round 75 shows the wait needs a real
 started thread; round 76 rules out a DThread-shaped clone; round 77 rules
 out the SVC model; round 78 gets a fake scheduler thread into EStart's server
-entry. What works:
+entry; round 79 adds auto-complete so the server runs the full 200k budget.
+What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -548,6 +549,15 @@ entry. What works:
   next import/argument frontier. Framebuffer remains untouched.
   `tools/test_round78.sh` pins the result.
 
+- [x] **Scheduler auto-complete runs the EStart server** (round 79):
+  `NK_SCHED_AUTOCOMPLETE=1` completes the blocked thread's status after a
+  switch. With the server body entry `0x503da675` and
+  `NK_SCHED_R0=0x8057ffc8`, the EStart server runs the full 200,000
+  instructions and ends in the `0x5038d724` LDMDB/STMDB copy loop with a
+  wild destination (`0x65d8b834`/`0x4b6d61f8`), doing 646,007 MMIO reads
+  and 642,561 writes. Framebuffer remains untouched.
+  `tools/test_round79.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -702,7 +712,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round75.sh` | exiting the wait retries StartThread handle `0x32`; real thread/server needed |
 | `tools/test_round76.sh` | DThread clone still leaves the wait at KRequestPending; need request/server completion |
 | `tools/test_round77.sh` | direct dispatch hits the same EStart handshake; SVC model is not the blocker |
-| `tools/test_round78.sh` | **current acceptance**: fake scheduler thread reaches EStart server entry; null call at `0x503db18f` |
+| `tools/test_round78.sh` | fake scheduler thread reaches EStart server entry; null call at `0x503db18f` |
+| `tools/test_round79.sh` | **current acceptance**: auto-complete runs the EStart server 200k; wild copy at `0x5038d724` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

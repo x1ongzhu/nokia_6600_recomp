@@ -674,6 +674,15 @@ entry。entry 跑约 100 条后在 `lr=0x503db18f` null-call（经由
 `0x503db454 -> slot 0x503b3d14 -> 0x503a2960`，pc=0）。
 framebuffer 仍 0 像素。验收 `tools/test_round78.sh`。
 
+### 2.32 round 79：scheduler auto-complete 让 EStart server 跑满 200k
+
+`NK_SCHED_AUTOCOMPLETE=1` 在切线程后完成 blocked thread 的 status
+并重新标 runnable。server body entry `0x503da675` +
+`NK_SCHED_R0=0x8057ffc8` 下，EStart server 跑满 200,000 条，最终停在
+`0x5038d724` 的 LDMDB/STMDB copy loop（destination
+`0x65d8b834`/`0x4b6d61f8`），期间 646,007 次 MMIO 读 / 642,561 次
+写。framebuffer 仍 0 像素。验收 `tools/test_round79.sh`。
+
 ---
 
 ## 3. EUser 导入映射

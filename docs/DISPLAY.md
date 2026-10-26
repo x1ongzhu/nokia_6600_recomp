@@ -730,6 +730,22 @@ pc = 0
 新 frontier 是该 server import/argument，不是 scheduler 切换。
 framebuffer 仍 0。验收：`tools/test_round78.sh`。
 
+### round 79：scheduler auto-complete 让 EStart server 跑满 200k
+
+新增 `NK_SCHED_AUTOCOMPLETE=1`：切线程后完成 blocked thread 的
+status 并重新标 runnable。用 server body entry `0x503da675` +
+`NK_SCHED_R0=0x8057ffc8`，EStart server 在自己的线程里跑满
+200,000 条，最终停在 `0x5038d724` 的 LDMDB/STMDB copy loop：
+
+```
+destination 0x65d8b834 / 0x4b6d61f8
+mmio: 646007 reads, 642561 writes
+framebuffer: 0 non-zero bytes
+```
+
+scheduler/server 路径已通，新 blocker 是 server 的 copy
+length/destination。验收：`tools/test_round79.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -792,7 +808,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 补 EStart server 的第一个 import/argument：round 78 已用
-   `NK_SCHED_FAKE` 切进 server entry，当前在 `0x503db18f` null-call
-   （slot `0x503b3d14 -> 0x503a2960`）。先让 server 继续运行，再完成
-   wait。
+8. 查 EStart server 的 wild copy：round 79 已跑满 200k，当前卡在
+   `0x5038d724` 的 LDMDB/STMDB loop（destination
+   `0x65d8b834`/`0x4b6d61f8`）。先修 copy length/destination，再看
+   server 是否开始绘制。

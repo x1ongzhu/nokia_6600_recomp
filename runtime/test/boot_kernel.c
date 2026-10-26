@@ -185,6 +185,8 @@
  *                           point [0x80000400] at it; NK_SCHED_ENTRY is its
  *                           first PC and NK_SCHED_STACK its stack (round 78).
  *   NK_SCHED_R0=0x...       initial r0 for that fake thread (round 78).
+ *   NK_SCHED_AUTOCOMPLETE=1  after a switch, complete the blocked thread's
+ *                           status and make it runnable again (round 79).
  *   NK_E32_SECTIONS=1       with --e32: place data/exports/dllref at their
  *                           runtime addresses (finds the packed export run)
  *   NK_E32_HDR=0x64         serialized EKA1 image header size (code offset)
@@ -1054,6 +1056,17 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
 
     sched_resume(c, ip, next);
     sched_switches++;
+    if (env_ulong("NK_SCHED_AUTOCOMPLETE", 0) && cur->status) {
+        /* Round 79: the harness has no server to complete a request.  Mark
+         * the blocked thread's status complete and make it runnable again so
+         * the wait loop can make progress; the server thread then runs its
+         * next handshake step. */
+        boot_time_raw_w32(c, cur->status & ~3u, 0);
+        cur->state = 1;
+        if (sched_log-- > 0)
+            printf("sched: auto-complete status %#010x for thread %#010x\n",
+                   cur->status, cur->thread);
+    }
     if (sched_log-- > 0)
         printf("sched: switch #%u -> thread %#010x pc %#010x sp %#010x "
                "cpsr %#010x (insns=%lu)\n", sched_switches, next->thread, c->r[15],
