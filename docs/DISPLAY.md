@@ -352,7 +352,22 @@ ROM loader import fixup，不能靠猜 slot 表。
 
 ---
 
-## 5. 还缺什么
+## 5. 第一帧：白色 splash 背景（round 58）
+
+Splash MBM 的第一帧是 **176×208、4bpp、全白**（EByteRLE，首个 run
+`0xffff` -> `0xff`）。harness 现在验证了端到端 framebuffer：
+
+1. 映射 LCD controller `0x59200000` 和 framebuffer `0x59800000`；
+2. 在 guest 内存 `0x80800000` 填 `0xff`（16bpp 白）；
+3. 调用 guest EUser `Mem::Copy`（`0x5038cfe0`），
+   `dst=0x59800000, src=0x80800000, len=176*208*2`；
+4. dump `0x59800000`，前 **36,608/36,608** 像素都是 `0xffff`。
+
+渲染结果：[first_frame.png](assets/first_frame.png)（176×208 白屏）。
+这是 **splash 背景帧**，由 guest `Mem::Copy` 写入真实 LCD framebuffer；
+还不是 SplashScreen/UI 自己绘制的完整 logo 帧。
+
+## 6. 还缺什么
 
 1. **进程启动**：`FbServ.exe` 还没有被 kernel 作为进程加载。当前
    supervisor 死在 `RThread::Resume(0x32)` 的 thread-start 等待上
@@ -366,7 +381,7 @@ ROM loader import fixup，不能靠猜 slot 表。
 
 ---
 
-## 6. 下一步
+## 7. 下一步
 
 1. 修直接 FbServ 的对象初始化：跑 `.init_array`/constructors，或让
    kernel 的 process loader 正常启动 FbServ。

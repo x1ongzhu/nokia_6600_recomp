@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 57）
+最后更新：2026-10-26（round 58）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -292,6 +292,13 @@
   `0xffffffff`。零后的 6 个 entry **不是** per-import IAT slot；
   指到 `0x506c92b8` 会进入 BitGdi 后 wild-jump 到 `0x5155a0ca`，
   其他 slot null-call。需要真实 ROM loader import fixup。
+
+- **第一帧：白色 splash 背景**（round 58）：Splash MBM 第一帧是
+  176×208、4bpp、全白。harness 映射 LCD/framebuffer，guest
+  `Mem::Copy`（`0x5038cfe0`）把 `0x80800000` 的 0xff 源复制到
+  `0x59800000`，36,608/36,608 像素为 `0xffff`。渲染为
+  [first_frame.png](assets/first_frame.png)。这是 splash 背景帧，
+  由 guest 代码写入真实 LCD framebuffer；完整 logo/UI 绘制仍未完成。
 
 ### 未完成
 

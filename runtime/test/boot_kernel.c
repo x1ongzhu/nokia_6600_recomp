@@ -2371,6 +2371,15 @@ int main(int argc, char** argv) {
         }
         printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
     }
+    if (env_ulong("NK_FB_SRC", 0)) {
+        /* Fill a guest source buffer with 0xff (16bpp white) for the
+         * splash-background Mem::Copy pipeline test. */
+        if (nk_alloc_ram(&cpu, 0x80800000u, 0x20000u) == 0) {
+            for (uint32_t o = 0; o < 176u * 208u * 2u; o++)
+                nk_w8(&cpu, 0x80800000u + o, 0xff);
+            printf("FB source: 0x80800000, %u bytes of 0xff\n", 176u * 208u * 2u);
+        }
+    }
     if (env_ulong("NK_MAP_LCD", 0)) {
         /* ecust.dll's display config at 0x5033abf4 writes the LCD controller
          * base 0x59200000 and the framebuffer base 0x59800000 (base +

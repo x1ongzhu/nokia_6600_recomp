@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 57)
+## Status (2026-10-26, round 58)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -339,6 +339,15 @@ stable executive loop. What works:
   other slots null-call. EwSrv needs the real ROM loader import fixup, not a
   guessed slot table.
 
+- [x] **First guest-written LCD frame** (round 58): the splash MBM's first
+  frame is a 176×208, 4bpp, all-white image (EByteRLE, first run `0xffff`).
+  The harness maps the LCD controller/framebuffer, fills a guest source with
+  `0xff`, and calls the guest EUser `Mem::Copy` at `0x5038cfe0` with
+  `dst=0x59800000, src=0x80800000, len=176*208*2`. The guest copy writes
+  **36,608/36,608 white pixels** to the real LCD framebuffer; the dump is
+  rendered to [docs/assets/first_frame.png](docs/assets/first_frame.png).
+  This is the splash background frame, not yet the app's full logo/UI draw.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -474,7 +483,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round54.sh` | the normal kernel boot also writes no LCD pixels |
 | `tools/test_round55.sh` | EwSrv is a `TRomImageHeader` with a 7-entry DLL ref table |
 | `tools/test_round56.sh` | app literals behave like link-time addresses; a `0x4a780000` link base lands on valid Thumb prologues |
-| `tools/test_round57.sh` | **current acceptance**: EwSrv dllref section layout; the six tail entries are not per-import slots |
+| `tools/test_round57.sh` | EwSrv dllref section layout; the six tail entries are not per-import slots |
+| `tools/test_round58.sh` | **current acceptance**: first guest-written LCD frame (white splash background) via guest `Mem::Copy` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
