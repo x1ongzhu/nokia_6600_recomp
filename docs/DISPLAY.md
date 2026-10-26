@@ -980,3 +980,12 @@ hand-off，方案 3 必须由 harness 自己执行。验收
 访问 `0x40000400`/`0x40000418`，停在 kernel panic halt `0x50312b88`
 （修复前是 9 条 ARM 垃圾指令后的 null call）。下一 blocker 是该 panic。
 验收 `tools/test_round93.sh`。
+
+### round 94：EFile 越过 kernel start hand-off
+
+`NK_HANDOFF_ARM=1` 在 kernel start hand-off `0x50318398` 前重新 armed
+`[0x80001784]`，消除 PLAT fault `0x73`（原 halt 在 `0x50312b88`）。
+`NK_ALLOC_MAX`（默认 `0x100000`）把 EFile 的指针型 `ReAlloc`
+（`0x503c7168` 字节）变成干净失败。EFile 现在跑进 EUser 堆代码，并在
+`0x2c` 离开 image。另加 `pc_hook3/4`、`NK_SCHED_MODE=auto|arm|thumb`。
+验收 `tools/test_round94.sh`。

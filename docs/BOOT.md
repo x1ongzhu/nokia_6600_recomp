@@ -1082,3 +1082,25 @@ hand-off**。方案 3 要求 **harness 自己执行这个 hand-off**。
 
 这是"真进程映像跑起来"的第一个里程碑。下一 blocker 是该 panic。
 验收 `tools/test_round93.sh`。
+
+### 2.47 round 94：EFile 越过 kernel start hand-off
+
+`DThread::StartThread`（vtable+0x20 = `0x50321088`）把参数写入
+`this+0xf8`，然后跳到 kernel 的 start hand-off `0x50318398`；后者消费
+`[0x80001784]` 的 pending `TRequestStatus`。首次切换后该槽已被消费，
+于是 hand-off 抛 **PLAT fault（reason `0x73`）**，kernel 在
+`0x50312b88` halt。
+
+- `NK_HANDOFF_ARM=1`：在 hand-off 前重新 armed `[0x80001784]`，
+  消除该 fault。
+- `NK_ALLOC_MAX`（默认 `0x100000`）：EFile 曾把 `ReAlloc` 的字节数
+  传成 `0x503c7168`（自己的 rodata 表地址），原来会污染 bump heap 并
+  误报 "undefined instruction"；现在干净失败（guest 得到 null）。
+
+修复后 EFile 跑进 EUser 堆代码，跟着 null 指针在 `0x2c` 离开 image。
+
+配套：`pc_hook3`（handoff arm）、`pc_hook4`（supervisor object fix）；
+memory clamp 移到 `pc_hook2`；`NK_SCHED_MODE=auto|arm|thumb`（默认
+auto）。round 79/81–83/85–89 固定 `arm` 保留历史 frontier；round 80
+的预期更新为 Thumb 正确执行后的 19,262 条 / 返回 `0xdead0000`。
+验收 `tools/test_round94.sh`。

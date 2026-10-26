@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 93）
+最后更新：2026-10-26（round 94）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -672,6 +672,29 @@
     EFile 触发的 kernel panic（`0x50312b88`，halt 时 `r0=0x40`）。
   - 验收 `tools/test_round93.sh`；`test_round78.sh` / `test_round92.sh`
     仍 PASS。
+
+- **EFile 越过 kernel start hand-off**（round 94）：两个 harness 修复。
+  - **`NK_HANDOFF_ARM=1`**：`DThread::StartThread`（vtable+0x20 =
+    `0x50321088`）把参数存到 `this+0xf8` 后跳到 kernel 的 start
+    hand-off `0x50318398`，后者消费 `[0x80001784]` 的 pending
+    `TRequestStatus`。首次切换后该槽已被消费，于是 hand-off 抛
+    **PLAT fault（reason `0x73`）**，kernel 在 `0x50312b88` halt。
+    在 hand-off 前重新 armed 该槽即可消除该 fault。
+  - **`NK_ALLOC_MAX`（默认 `0x100000`）**：EFile 调用 `ReAlloc` 时把
+    字节数传成了 `0x503c7168`（它自己 rodata 表地址），原来会污染
+    bump heap 并被误报成 "undefined instruction"。现在这类请求
+    **干净地失败**（guest 看到 null）。
+  - 修复后 EFile 跑进 EUser 堆代码，随后跟着 null 指针在 `0x2c`
+    离开 image —— 这是新的 frontier。
+  - 附带：新增 `pc_hook3`（handoff arm）/`pc_hook4`（supervisor
+    object fix）；memcopy clamp 移到 `pc_hook2`，使 clamp + `NK_TIMERQ`
+    + supervisor fix 可以共存；新增 `NK_SCHED_MODE=auto|arm|thumb`
+    （默认 auto，按 `iEntryPoint` bit0），round 79/81–83/85–89 固定
+    为 `arm` 以保留其历史 frontier；**round 80 的预期已更新**：Thumb
+    修复后 `0x503da675` 入口按 Thumb 执行，服务器跑 19,262 条后从
+    `0x503da6ee` 的正常尾声返回到 sentinel `0xdead0000`，原来的
+    `0x503da6d5` null call 是 ARM 误解码的产物。
+  - 验收 `tools/test_round94.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

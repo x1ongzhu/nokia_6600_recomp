@@ -269,6 +269,11 @@ static uint8_t* read_file(const char* path, long* len) {
     return p;
 }
 
+static const char* env_str(const char* name, const char* def) {
+    const char* s = getenv(name);
+    return (s && *s) ? s : def;
+}
+
 static unsigned long env_ulong(const char* name, unsigned long def) {
     const char* s = getenv(name);
     return s ? strtoul(s, NULL, 0) : def;
@@ -638,6 +643,29 @@ static void install_extension_stub(nk_cpu_t* c, nk_interp_t* ip) {
  * delay, so no timer is ever armed and the idle loop spins forever with
  * "timer: off, 0 expiries".  NK_HAL_TICK=1 replaces the stub with a hook
  * that returns a monotonic tick derived from executed instructions. */
+/* Round 94: DThread::StartThread (vtable+0x20 = 0x50321088) stores the
+ * argument at this+0xf8 and tail-branches to the kernel's start hand-off at
+ * 0x50318398, which consumes the pending TRequestStatus at [0x80001784].  If
+ * that slot is 0 (already consumed) the hand-off raises a PLAT fault with
+ * reason 0x73.  NK_HANDOFF_ARM=1 re-arms the slot with a fresh pending status
+ * just before the hand-off runs. */
+#define HANDOFF_PENDING 0x80001784u
+static uint32_t g_handoff_arm_count;
+
+static void handoff_arm_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
+    (void)ip; (void)pc;
+    uint32_t cur = nk_r32(c, HANDOFF_PENDING);
+    if (cur >= 0x80000000u && cur < 0x80a00000u) return;  /* already armed */
+    uint32_t dummy = 0x80530000u;
+    if (!nk_page_ptr(c, dummy)) {
+        if (nk_alloc_ram(c, dummy, 0x1000u) == 0)
+            for (uint32_t o = 0; o < 0x1000u; o += 4) nk_w32(c, dummy + o, 0);
+    }
+    nk_w32(c, dummy, 0x80000001u);   /* KRequestPending */
+    nk_w32(c, HANDOFF_PENDING, dummy);
+    g_handoff_arm_count++;
+}
+
 static unsigned long g_tick_calls;
 
 static void hal_tick_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
@@ -797,6 +825,12 @@ static void timerq_pc_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
     nk_w32(c, 0x80001c34u, obj);
     printf("timerq: [0x80001c34] = %#010x -> vtable+0xc = %#010x\n",
            obj, nk_r32(c, nk_r32(c, obj) + 0x0c));
+    if (env_ulong("NK_HANDOFF_ARM", 0)) {
+        ip->pc_hook3_addr = 0x50318398u;
+        ip->pc_hook3 = handoff_arm_hook;
+        printf("handoff arm: re-arm [0x%08x] before the start hand-off\n",
+               HANDOFF_PENDING);
+    }
     if (env_ulong("NK_HAL_TICK", 0)) {
         /* Intercept the +0x1c getter before its zero-return body runs. */
         ip->pc_hook2_addr = 0xffff0a00u;
@@ -905,6 +939,14 @@ static void sched_load_calls(nk_interp_t* ip, sched_thread* s) {
     }
 }
 
+/* "auto" honours the entry bit, "thumb" forces Thumb, anything else forces
+ * ARM (the pre-round-93 behaviour that the legacy tests pin). */
+static int sched_mode_thumb(int entry_bit, const char* mode) {
+    if (mode[0] == 'a' && mode[1] == 'u') return entry_bit;
+    if (mode[0] == 't') return 1;
+    return 0;
+}
+
 static uint32_t sched_supervisor;
 static int      sched_need_yield;
 
@@ -912,8 +954,11 @@ static void sched_resume(nk_cpu_t* c, nk_interp_t* ip, sched_thread* s) {
     memcpy(c->r, s->r, sizeof s->r);
     c->cpsr = s->cpsr;
     c->r[15] = s->r[15] & ~1u;
-    if (s->r[15] & 1u) c->cpsr |= NK_CPSR_T;
-    else               c->cpsr &= ~NK_CPSR_T;
+    {
+        const char* sm = env_str("NK_SCHED_MODE", "auto");
+        int t = sched_mode_thumb((int)(s->r[15] & 1u), sm);
+        if (t) c->cpsr |= NK_CPSR_T; else c->cpsr &= ~NK_CPSR_T;
+    }
     sched_load_calls(ip, s);
     s->state = 2;
     nk_w32(c, SCHED_CURRENT, s->thread);
@@ -1106,8 +1151,16 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
          * resulting register state (r4=0, r5=0) sends the image into a null
          * call.  Round 93 fixes that for the fake thread and the first real
          * switch. */
-        next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u |
-                     ((next->r[15] & 1u) ? NK_CPSR_T : 0u);
+        {
+            /* NK_SCHED_MODE pins the instruction set: "auto" (default)
+             * honours iEntryPoint bit 0, "arm"/"thumb" force a mode so that
+             * pre-round-93 tests can still reproduce their historical
+             * frontier. */
+            const char* sm = env_str("NK_SCHED_MODE", "auto");
+            int t = sched_mode_thumb((int)(next->r[15] & 1u), sm);
+            next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u |
+                         (t ? NK_CPSR_T : 0u);
+        }
         /* The kernel's resume path clears the suspend bits before a thread
          * runs; the direct switch bypasses it, so clear them here. */
         nk_w32(c, next->thread + 0x20u,
@@ -2594,16 +2647,18 @@ int main(int argc, char** argv) {
      * mode calls the kernel's own constructor (export 451); NK_TIMERQ_MODE=
      * stub falls back to a zero-return vtable. */
     if (env_ulong("NK_MEMCOPY_CLAMP", 0)) {
-        ip.pc_hook_addr = 0x5038cfe0u;
-        ip.pc_hook = memcopy_clamp_hook;
+        /* pc_hook (1) is reserved for the timerq injection, so the clamp
+         * lives on hook 2. */
+        ip.pc_hook2_addr = 0x5038cfe0u;
+        ip.pc_hook2 = memcopy_clamp_hook;
         printf("memcopy clamp: wild copies at 0x5038cfe0 are zeroed\n");
     }
     if (env_ulong("NK_SUPERVISOR_OBJECT_FIX", 0)) {
-        ip.pc_hook2_addr = 0x503ce696u;
-        ip.pc_hook2 = supervisor_object_hook;
+        ip.pc_hook4_addr = 0x503ce696u;
+        ip.pc_hook4 = supervisor_object_hook;
         printf("supervisor object fix: [this+0x14] -> B7e vtable at 0x503ce696\n");
     }
-    if (env_ulong("NK_TIMERQ", 0) && !ip.pc_hook) {
+    if (env_ulong("NK_TIMERQ", 0)) {
         ip.pc_hook_addr = 0x5031ef40u;
         ip.pc_hook = timerq_pc_hook;
         printf("timerq: will inject [0x80001c34] before %#010x\n",

@@ -198,6 +198,8 @@ typedef struct nk_interp {
     uint32_t alloc_end;
     unsigned long alloc_hits;
     unsigned long realloc_hits;
+    unsigned long alloc_bogus;   /* rejected pointer-sized requests */
+    uint32_t      alloc_max;     /* per-request cap, 0 = 0x100000 */
     unsigned long free_hits;
     int      alloc_log;     /* log the first N allocations */
     /* Bring-up recovery: when a callee faults (undefined instruction, PC
@@ -256,6 +258,10 @@ typedef struct nk_interp {
     uint32_t    pc_hook_addr;
     void      (*pc_hook2)(nk_cpu_t* c, struct nk_interp* ip, uint32_t pc);
     uint32_t    pc_hook2_addr;
+    void      (*pc_hook3)(nk_cpu_t* c, struct nk_interp* ip, uint32_t pc);
+    uint32_t    pc_hook3_addr;
+    void      (*pc_hook4)(nk_cpu_t* c, struct nk_interp* ip, uint32_t pc);
+    uint32_t    pc_hook4_addr;
 
     /* Bring-up watchdog: a tight loop that keeps executing the same few
      * addresses (typically a descriptor scan with a bogus argument) is treated

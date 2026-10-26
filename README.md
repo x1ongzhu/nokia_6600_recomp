@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 93)
+## Status (2026-10-26, round 94)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -99,7 +99,8 @@ vtable/method still fails; round 88 rules out the global CBase as `this`; round 
 ABI mismatch; round 90 corrects that analysis from static evidence; round 91 maps the real
 ROM boot chain and the empty kernel object index; round 92 shows the kernel
 cannot start the next boot stage by itself; round 93 fixes thread entry-mode
-selection so a real ROM image (EFile) runs to the kernel. What works:
+selection so a real ROM image (EFile) runs to the kernel; round 94 pushes it
+through the kernel start hand-off. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -689,6 +690,20 @@ selection so a real ROM image (EFile) runs to the kernel. What works:
   halt at `0x50312b88` instead of a null call. `tools/test_round93.sh` pins
   this; rounds 78 and 92 still pass.
 
+- [x] **EFile past the kernel start hand-off** (round 94): `DThread::StartThread`
+  (vtable+0x20 = `0x50321088`) stores its argument at `this+0xf8` and jumps to
+  the kernel start hand-off `0x50318398`, which consumes the pending
+  `TRequestStatus` at `[0x80001784]`. After the first switch that slot was
+  already consumed, so the hand-off raised a PLAT fault (reason `0x73`) and
+  the kernel halted at `0x50312b88`. `NK_HANDOFF_ARM=1` re-arms the slot
+  before the hand-off and removes that fault. `NK_ALLOC_MAX` (default
+  `0x100000`) makes EFile's pointer-sized `ReAlloc` request (`0x503c7168`
+  bytes) fail cleanly instead of poisoning the bump heap; the guest then
+  follows the null result and leaves the image at `0x2c`, which is the next
+  frontier. Adds `pc_hook3`/`pc_hook4`, moves the memcopy clamp to hook 2,
+  and adds `NK_SCHED_MODE=auto|arm|thumb` (auto honours iEntryPoint bit 0).
+  `tools/test_round94.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -858,7 +873,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round90.sh` | EStart main `0x503db29c`, 0x24-byte params block, 12 EFSrv import slots; EFSrv is the blocker |
 | `tools/test_round91.sh` | ROM boot chain `ekern->EFile->EStart->Starter->SplashScreen`; kernel object index is empty |
 | `tools/test_round92.sh` | kernel idles after one timer IRQ; no process is ever created; harness must do the boot hand-off |
-| `tools/test_round93.sh` | **current acceptance**: thread entry-mode honours iEntryPoint bit 0; EFile runs 1,120 Thumb instructions into the kernel |
+| `tools/test_round93.sh` | thread entry-mode honours iEntryPoint bit 0; EFile runs into the kernel |
+| `tools/test_round94.sh` | **current acceptance**: EFile passes the kernel start hand-off and leaves the image at `0x2c` on a null heap pointer |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -56,11 +56,17 @@ env NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 \
     --rom-image out/6600_runtime.bin >out/round80_clamp.log 2>&1
 
 grep -q "memcopy clamp: wild copies at 0x5038cfe0 are zeroed" out/round80_clamp.log
-grep -q "^--- stop: null call (8) at 0000000000 ---" out/round80_clamp.log
-grep -q "insns=26652" out/round80_clamp.log
-grep -q "mmio: 3441 reads, 22928 writes" out/round80_clamp.log
-grep -q "lr=0x503da6d5" out/round80_clamp.log
-grep -q "r3=0xe59ff028" out/round80_clamp.log
+# Round 93 honours the Thumb bit in iEntryPoint when a scheduler thread is
+# resumed.  The server entry 0x503da675 is Thumb, so it is now executed as
+# Thumb from the first instruction instead of being decoded as ARM garbage and
+# rescued by the mode-inference heuristic.  The run therefore no longer stops
+# on the round-80 null call: it runs to 19,262 instructions and returns into
+# the NK_SCHED_STACK_FILL sentinel 0xdead0000 (the function 0x503da5cc reaches
+# its epilogue at 0x503da6ee and pops the sentinel).  Keep the clamp
+# assertions and pin the corrected outcome.
+grep -q "^--- stop: returned (2) at 0xdead0000 ---" out/round80_clamp.log
+grep -q "insns=19262" out/round80_clamp.log
+grep -q "Thumb 329)" out/round80_clamp.log
 
 .venv/bin/python - <<'PY'
 d = open('out/round80_fb.bin','rb').read()
@@ -71,7 +77,8 @@ print('ok: framebuffer untouched (%d non-zero bytes)' % nonzero)
 PY
 
 echo "ok: the Mem::Copy clamp prevents the 200k MMIO storm"
-echo "ok: the EStart server advances to 26,652 instructions and a new"
-echo "    null call at lr=0x503da6d5 (r3=0xe59ff028)"
-echo "ok: next task is that server import, not the copy loop"
+echo "ok: the EStart server runs 19,262 instructions and returns through its"
+echo "    epilogue at 0x503da6ee into the stack sentinel 0xdead0000"
+echo "ok: the round-80 null call at 0x503da6d5 was an artifact of decoding the"
+echo "    Thumb entry as ARM (fixed in round 93)"
 echo "PASS: round 80 advances the EStart server past the wild copy"

@@ -416,6 +416,20 @@ static int hle_alloc_block(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc,
                            uint32_t n, uint32_t* out) {
     uint32_t sz = (n + 7u) & ~7u;
     if (sz < 8u) sz = 8u;
+    /* Round 94: a caller sometimes passes a pointer where a byte count is
+     * expected (EFile asked ReAlloc for 0x503c7168 bytes = one of its own
+     * rodata table addresses).  That is not a real allocation, so fail it
+     * like a heap with no room instead of poisoning the bump heap and
+     * reporting a bogus "undefined instruction". */
+    uint32_t cap = ip->alloc_max ? ip->alloc_max : 0x100000u;
+    if (sz > cap) {
+        fprintf(stderr, "[interp] HLE alloc rejected: %#x bytes > cap %#x "
+                "at %#010x (r0=%#x r1=%#x r2=%#x)\n",
+                sz, cap, pc, c->r[0], c->r[1], c->r[2]);
+        ip->alloc_bogus++;
+        *out = 0;
+        return -1;
+    }
     if (ip->alloc_base == 0 || ip->alloc_cur + NK_HLE_BLOCK_HDR + sz >
             ip->alloc_end) {
         ip->st.stop_reason = NK_STOP_UNDEFINED;
@@ -463,8 +477,10 @@ static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
         uint32_t heap = c->r[0];
         if (n < 0) {
             p = ip->alloc_cur;
-        } else if (!hle_alloc_block(ip, c, pc, (uint32_t)n, &p)) {
-            return 1;
+        } else {
+            int rc = hle_alloc_block(ip, c, pc, (uint32_t)n, &p);
+            if (rc == 0) return 1;
+            if (rc < 0) { hle_return(ip, c, 0); return 1; }
         }
         ip->alloc_hits++;
         hle_return(ip, c, p);
@@ -482,7 +498,11 @@ static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
             return 0;               /* not a block we own: use the real heap */
         uint32_t oldsz = nk_r32(c, old - NK_HLE_BLOCK_HDR);
         uint32_t newp;
-        if (!hle_alloc_block(ip, c, pc, (uint32_t)n, &newp)) return 1;
+        {
+            int rc = hle_alloc_block(ip, c, pc, (uint32_t)n, &newp);
+            if (rc == 0) return 1;
+            if (rc < 0) { hle_return(ip, c, 0); return 1; }
+        }
         uint32_t copy = oldsz < (uint32_t)n ? oldsz : (uint32_t)n;
         for (uint32_t i = 0; i < copy; i++)
             nk_w8(c, newp + i, nk_r8(c, old + i));
@@ -1857,6 +1877,16 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
         if (ip->pc_hook2 && (c->r[15] & ~1u) == ip->pc_hook2_addr) {
             uint32_t before = c->r[15];
             ip->pc_hook2(c, ip, c->r[15]);
+            if (c->r[15] != before) continue;
+        }
+        if (ip->pc_hook3 && (c->r[15] & ~1u) == ip->pc_hook3_addr) {
+            uint32_t before = c->r[15];
+            ip->pc_hook3(c, ip, c->r[15]);
+            if (c->r[15] != before) continue;
+        }
+        if (ip->pc_hook4 && (c->r[15] & ~1u) == ip->pc_hook4_addr) {
+            uint32_t before = c->r[15];
+            ip->pc_hook4(c, ip, c->r[15]);
             if (c->r[15] != before) continue;
         }
         if (spin_tick(ip, c->r[15])) {
