@@ -688,6 +688,14 @@ EStart 的 wait 返回后停在 `0x50398660` 的 wait-status check，不再撞
 `0x50314f78` 的 pre-handler self-loop。下一步是完成该
 TRequestStatus。验收：`tools/test_round74.sh`。
 
+### round 75：wait 退出后立即重试 StartThread
+
+把 wait-status loop 分支 `0x50398664` NOP 掉后，EStart 退出 wait，
+但立刻回到 `0x503998b0` 的 `RThread::Resume/StartThread`（SVC 0x76，
+handle `0x32`）。说明这个 wait 等的是**真实启动的线程**，不是单纯
+status 写完。下一步需要给 handle 0x32 一个 DThread/server 对象，而
+不是继续 HLE status。验收：`tools/test_round75.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -750,6 +758,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 完成 EStart 的 wait status：round 74 修好 nested SVC return 后，
-   停在 `0x50398660` 的 wait-status check。下一步让该
-   TRequestStatus 真正完成，或实现 server 完成路径。
+8. 给 handle 0x32 建 DThread/server 对象：round 75 已证明 NOP wait
+   分支后会立刻重试 StartThread。下一步实现 minimal scheduler 或
+   fake DThread，而不是继续 HLE status。

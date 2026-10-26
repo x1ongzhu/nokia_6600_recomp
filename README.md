@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 74)
+## Status (2026-10-26, round 75)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -86,8 +86,8 @@ must come from EStart or the kernel process loader. Round 69 binds EStart's
 first unresolved import; round 70 adds wait completion; round 71 rebinds the
 global CBase slot and advances EStart past the zero-vtable object; round 72
 pins the app slot/export offset; round 73 shows the next EStart blocker is the
-service-start handshake/wait; round 74 fixes the nested SVC return and reaches
-the wait-status check. What works:
+service-start handshake/wait; round 74 fixes the nested SVC return; round 75 shows the wait needs a real
+started thread. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -518,6 +518,13 @@ the wait-status check. What works:
   self-loop; framebuffer remains untouched.
   `tools/test_round74.sh` pins the fix.
 
+- [x] **Wait needs a real thread** (round 75): NOP-ing the wait-status
+  loop branch `0x50398664` makes EStart leave the wait, but it immediately
+  retries `RThread::Resume/StartThread` at `0x503998b0` (SVC 0x76, handle
+  `0x32`). The wait is for a real started thread, so the next step is a
+  DThread/server object for that handle, not another status HLE.
+  `tools/test_round75.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -668,7 +675,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round71.sh` | EStart CBase rebind; 13,162 insns; bad virtual dispatch at `0x00a04d08` |
 | `tools/test_round72.sh` | app slot `0x503b4338` = export 745, app expects export 747 (2-entry offset) |
 | `tools/test_round73.sh` | HLE EStart bad dispatch; 200k wait loop on handle `0x32`; no draw |
-| `tools/test_round74.sh` | **current acceptance**: nested SVC fix; EStart reaches `0x50398660` wait-status check |
+| `tools/test_round74.sh` | nested SVC fix; EStart reaches `0x50398660` wait-status check |
+| `tools/test_round75.sh` | **current acceptance**: exiting the wait retries StartThread handle `0x32`; real thread/server needed |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 74）
+最后更新：2026-10-26（round 75）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -470,6 +470,13 @@
   停在 `0x50398660`（wait-status check），不再撞 `0x50314f78`。
   framebuffer 仍 0；下一步是完成 wait status。验收
   `tools/test_round74.sh`。
+
+- **wait 退出后立即重试 StartThread**（round 75）：把 wait-status
+  loop 分支 `0x50398664` NOP 掉后，EStart 退出 wait，但立刻回到
+  `0x503998b0` 的 `RThread::Resume/StartThread`（SVC 0x76，
+  handle `0x32`）。说明这个 wait 等的是**真实启动的线程**，不是
+  单纯 status 写完；下一步需要给 handle 0x32 一个 DThread/server
+  对象，而不是继续 HLE status。验收 `tools/test_round75.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -783,7 +790,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 推进到 13k 条；round 72 钉住 slot/export offset；round 73 定位 service-start 握手；round 74 修 nested SVC return，EStart 到 `0x50398660` wait-status check |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 推进到 13k 条；round 72 钉住 slot/export offset；round 73 定位 service-start 握手；round 74 修 nested SVC return；round 75 证明 wait 等的是真实线程，退出后会重试 StartThread |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -816,10 +823,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. EStart 的 nested SVC 已能正确返回（round 74），现在停在
-    `0x50398660` 的 wait-status check。下一步完成该 TRequestStatus
-    （或实现真正的 wait/server 完成），让 EStart 继续启动
-    SplashScreen/window server。
+11. EStart 的 wait 已证明等真实线程（round 75）：NOP wait 分支后
+    立刻重试 StartThread handle 0x32。下一步给该 handle 建一个
+    DThread/server 对象（或实现 minimal scheduler），而不是继续
+    HLE status。
 
 ---
 

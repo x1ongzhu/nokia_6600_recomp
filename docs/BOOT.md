@@ -642,6 +642,14 @@ nested SVC 保留 caller LR，`movs pc,lr` 通过 bank LR 返回 caller。
 EStart 的 wait 返回后停在 `0x50398660` 的 wait-status check，不再撞
 `0x50314f78`；framebuffer 仍 0 像素。验收 `tools/test_round74.sh`。
 
+### 2.28 round 75：wait 退出后立即重试 StartThread
+
+把 wait-status loop 分支 `0x50398664` NOP 掉后，EStart 退出 wait，
+但立刻回到 `0x503998b0` 的 `RThread::Resume/StartThread`（SVC 0x76，
+handle `0x32`）。说明这个 wait 等的是**真实启动的线程**；下一步需要
+给 handle 0x32 一个 DThread/server 对象，而不是继续 HLE status。
+验收 `tools/test_round75.sh`。
+
 ---
 
 ## 3. EUser 导入映射
