@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 102)
+## Status (2026-10-27, round 103)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -824,6 +824,20 @@ works:
   `0x80004500`) because its descriptor grow still receives a stack address
   (`0x80561f28`) as a length. `tools/test_round102.sh` pins it.
 
+- [x] **Application-time import rebinds** (round 103): EFile's startup
+  function `0x503bfc78` creates objects and then calls EUser slot
+  `0x503b37c4` with ONE argument (`bl` with only `r0` set, taken from the
+  fixed global `0x80100c0c`), while the ROM's export 12 at that slot is
+  `0x503988a8`, a THREE-argument heap grow (`svc 0x6c` then
+  `0x5039c438 -> 0x5039c37c`). The leftover `r1`/`r2` are what make the heap
+  receive a `0x503c7180`-byte request and EFile leave with KErrNoMemory: the
+  application was linked against a different EUser `.def` revision than the
+  ROM ships. `NK_IMPORTMAP_APP=<file>` applies per-slot rebinds after the
+  kernel-time map is reverted. Sweeping exports 6..44 for that slot does not
+  unlock EFile - the best outcomes are budget-bound spins (exports 20, 23, 44)
+  and the Thumb count stays between 1,281 and 1,450 - so the mismatch is
+  broader than one slot. `tools/test_round103.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -1002,7 +1016,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round99.sh` | handle-lookup slot keeps the kernel-time variant |
 | `tools/test_round100.sh` | oversized allocation traced and clamped |
 | `tools/test_round101.sh` | `NK_STUB_PC` neutralises guest RHeap housekeeping |
-| `tools/test_round102.sh` | **current acceptance**: the application thread runs on the kernel's real RHeap |
+| `tools/test_round102.sh` | the application thread runs on the kernel's real RHeap |
+| `tools/test_round103.sh` | **current acceptance**: app-time import rebinds; the app/ROM EUser mismatch is broader than one slot |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -1169,7 +1169,7 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
             next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u |
                          (t ? NK_CPSR_T : 0u);
         }
-        if (getenv("NK_IMPORTMAP_REVERT"))
+        if (getenv("NK_IMPORTMAP_REVERT") || getenv("NK_IMPORTMAP_APP"))
             importmap_revert(c);
         /* Round 102: the kernel's own boot cannot run without the HLE
          * allocator (it panics at 12,595 instructions when the allocator is
@@ -2003,12 +2003,31 @@ static int importmap_keep_slot(uint32_t slot) {
 }
 
 static void importmap_revert(nk_cpu_t* c) {
-    if (g_map_revert_done || !g_map_revert_n) return;
+    if (g_map_revert_done) return;
     g_map_revert_done = 1;
-    for (int i = 0; i < g_map_revert_n; i++)
-        nk_w32(c, g_map_revert_addr[i], g_map_revert_old[i]);
-    printf("importmap: reverted %d kernel-time rebinds for the app thread\n",
-           g_map_revert_n);
+    if (g_map_revert_n) {
+        for (int i = 0; i < g_map_revert_n; i++)
+            nk_w32(c, g_map_revert_addr[i], g_map_revert_old[i]);
+        printf("importmap: reverted %d kernel-time rebinds for the app thread\n",
+               g_map_revert_n);
+    }
+    /* Round 103: an application that was linked against a different EUser
+     * .def revision needs its own rebinds, applied after the kernel-time ones
+     * are reverted.  NK_IMPORTMAP_APP=<file> uses the same "<slot> <target>"
+     * format as NK_IMPORTMAP. */
+    const char* app = getenv("NK_IMPORTMAP_APP");
+    if (app) {
+        import_override_t ov[NK_MAX_IMPORT_OVERRIDES];
+        int n = load_import_overrides(app, ov, NK_MAX_IMPORT_OVERRIDES);
+        int applied = 0;
+        for (int i = 0; i < n; i++) {
+            uint32_t old = nk_r32(c, ov[i].slot);
+            nk_w32(c, ov[i].slot, ov[i].target);
+            if (old != ov[i].target) applied++;
+        }
+        printf("importmap: applied %d application rebinds from %s\n",
+               applied, app);
+    }
 }
 
 static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,

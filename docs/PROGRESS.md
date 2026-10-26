@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 102）
+最后更新：2026-10-27（round 103）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -841,6 +841,30 @@
     （UnTrap 返回 `0x80004500`）干净离开，原因是它的描述符增长
     仍然收到一个**栈地址当长度**（delta `0x80561f28`）。
   - 验收 `tools/test_round102.sh`。
+
+- **app 期 import 重绑 + EUser 12 号槽不匹配**（round 103）：
+  - EFile 的启动函数 `0x503bfc78` 创建若干对象后，**只用一个参数**
+    调用 EUser 槽 `0x503b37c4`：
+    ```
+    503bfcba  bl 0x503b7164      ; r0 = new(0x48) + ctor（装 vtable）
+    503bfcbe  r1 = 0x80100c0c    ; 固定全局
+    503bfcc0  [r1] = r0
+    503bfccc  r0 = [0x80100c0c]
+    503bfcd0  bl 0x503c5dcc      ; EUser slot 0x503b37c4
+    ```
+  - 而 ROM 在该槽的 **export 12 = `0x503988a8`，是 3 参数**函数
+    （`Mem::ReAlloc` 风格：先 `svc 0x6c` 取线程堆，再用调用者的
+    `r0/r1/r2` 调 `0x5039c438 → 0x5039c37c`）。只设 `r0` 调用时
+    `r1/r2` 是残留值 —— 这就是 EFile 向堆要 `0x503c7180` 字节、
+    最终以 `KErrNoMemory` 离开的原因：**app 链接时用的 EUser `.def`
+    与 ROM 里的不是同一版**。
+  - 新增 **`NK_IMPORTMAP_APP=<file>`**：在 kernel 期 map 回滚**之后**
+    再应用一份 `<slot> <target>` 重绑，用于逐槽修正 app 的期望。
+  - 对 `0x503b37c4` 做了 **export 6..44 的绑定扫描**：没有哪个绑定
+    能解锁 EFile —— 最好的是 export 20/23/44 的"跑满预算自旋"，
+    Thumb 数始终落在 1,281–1,450。说明 **app/ROM 的 EUser 不匹配
+    比单个槽更广**，不是替换一个函数能解决的。
+  - 验收 `tools/test_round103.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

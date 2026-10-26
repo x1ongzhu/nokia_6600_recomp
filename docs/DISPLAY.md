@@ -1058,3 +1058,11 @@ kernel 在 12,595 条就以 PLAT fault halt），配合
 guest 的 alloc/free/合并/realloc 全部真实执行；EFile 改以
 `KErrNoMemory`（-4）经 trap frame 干净离开。验收
 `tools/test_round102.sh`。
+
+### round 103：app 期 import 重绑
+
+EFile 以**单参数**调用 EUser 槽 `0x503b37c4`（新对象 `CleanupStack`
+式用法），而 ROM 的 export 12 = `0x503988a8` 是 3 参数堆增长函数；
+残留寄存器导致 `0x503c7180` 字节请求 → `KErrNoMemory`。新增
+`NK_IMPORTMAP_APP=<file>` 逐槽修正；对 export 6..44 扫描无效，说明
+app/ROM 的 EUser 不匹配比单槽更广。验收 `tools/test_round103.sh`。

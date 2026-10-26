@@ -1226,3 +1226,17 @@ frontier 是 `0x503a2660..0x503a2674` 的 TDblQue 遍历，链表头无效
 clamp、无异常跳转；EFile 以 `KErrNoMemory`（-4）经 trap frame
 （UnTrap 返回 `0x80004500`）干净离开——因为描述符增长仍收到栈地址当
 长度（delta `0x80561f28`）。验收 `tools/test_round102.sh`。
+
+### 2.56 round 103：app 期 import 重绑与 EUser 12 号槽
+
+EFile 启动函数 `0x503bfc78` 创建对象后**只用一个参数**调用 EUser 槽
+`0x503b37c4`（`bl` 前仅设 `r0`，其值来自固定全局 `0x80100c0c`）。
+ROM 在该槽的 export 12 = `0x503988a8` 是 **3 参数**函数
+（`svc 0x6c` 取堆 + `0x5039c438 → 0x5039c37c`），残留的 `r1/r2` 让堆
+收到 `0x503c7180` 字节的请求 → `KErrNoMemory`。即 **app 链接时的
+EUser `.def` 与 ROM 版本不同**。
+
+`NK_IMPORTMAP_APP=<file>`：在 kernel 期 map 回滚后追加 `<slot> <target>`
+重绑。对 `0x503b37c4` 扫描 export 6..44：无绑定能解锁 EFile（最好为
+export 20/23/44 的预算自旋，Thumb 1,281–1,450），说明不匹配比单槽更广。
+验收 `tools/test_round103.sh`。
