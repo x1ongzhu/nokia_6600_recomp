@@ -896,6 +896,21 @@ works:
   exits cleanly at 1,380 Thumb instructions. `NK_NO_CLEANUP58=1` suppresses the
   fix for comparison. `tools/test_round107.sh` pins it.
 
+- [x] **EFile dereferences a stale pointer to freed heap memory** (round 108):
+  with slot `0x503b37c4` bound to the one-argument PushL shape and
+  `thread+0x58` published, EFile stops at `0x503bfcfa`: `r4 = 0x510355e0`
+  (returned by `0x503bdc5c`), `ldr r0,[r4]` yields `0x5103559c` instead of a
+  vtable, and `bx r1` jumps to `0xf0009b06`. The constructor `0x503bdca4`
+  really does install `[r4] = 0x503c80c4` (a vtable in EFile's own `.rdata`)
+  and `[r4+0x18] = 0xffff8001`. Dumping the block shows the tail
+  (`+0x18 = 0xffff8001`, `+0x1c = 0`) still intact while the first 0x18 bytes
+  were overwritten with what looks like a queue node (`[0]=0x5103559c`,
+  `[0x10]=0x510355dc`): the object was freed and the block handed out again, so
+  EFile holds a dangling pointer. The prime suspect is the invented CCleanup
+  graph published at `thread+0x58` - PushL works now, but the matching
+  Pop/PopAndDestroy may destroy live objects because our `iBase/iTop/iNext`
+  layout is not right. `tools/test_round108.sh` pins the measurement.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
