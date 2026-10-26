@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 50）
+最后更新：2026-10-26（round 51）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -249,6 +249,13 @@
   `0x4a7846c0` 指向 high-vector 的零返回 stub。EwSrv 执行
   `0xffff0d00 -> 0xffff0d04 -> 0x506c0b14`，越过第一个 call，随后遇到
   下一个 null pointer。
+
+- **EwSrv 真实 prologue / packed veneer**（round 51）：call
+  `0x506a821a` 编码 `0x506c0b0c`（函数中间），真实 prologue 是
+  `0x506c0a4a`。`config/callmap-ewsrv-6600.txt` 做 call-site fixup
+  （`NK_CALL_INFER=1`）。修正后 EwSrv 进入 prologue，但下一个 veneer
+  `0x506c1dba` 的 literal 是代码/padding，不是 slot，属于
+  packed/relocated veneer literal 问题。
 
 ### 未完成
 

@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 50)
+## Status (2026-10-26, round 51)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -283,6 +283,15 @@ stable executive loop. What works:
   continues to the next unresolved pointer. This is a concrete step past the
   first missing-DLL call, not a full window-server bring-up.
 
+- [x] **EwSrv real prologue / packed veneer** (round 51): EwSrv's call at
+  `0x506a821a` encodes `0x506c0b0c`, the middle of the function whose real
+  prologue is `0x506c0a4a`. `config/callmap-ewsrv-6600.txt` redirects it
+  (`0x506a821a 0x506c0a4a T`; callmap fixups run only with
+  `NK_CALL_INFER=1`). EwSrv then enters the proper prologue and reaches the
+  next veneer at `0x506c1dba`, whose literal is code/padding rather than a
+  slot — a packed/relocated veneer-literal problem, not a single missing
+  import. `NK_FIX_4A78` now fills the whole missing-DLL page.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -411,7 +420,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round47.sh` | EwSrv export snap; SplashScreen runs the full 2M budget in the wait service |
 | `tools/test_round48.sh` | wait-completion exposes a wild descriptor copy; direct EwSrv null-calls at `0x506c0b15` |
 | `tools/test_round49.sh` | splash MBM header, no MBM load in RAM, EwSrv bad veneer literal `0x4a7846c0` |
-| `tools/test_round50.sh` | **current acceptance**: EwSrv passes its first missing-DLL call via a mapped zero-return stub |
+| `tools/test_round50.sh` | EwSrv passes its first missing-DLL call via a mapped zero-return stub |
+| `tools/test_round51.sh` | **current acceptance**: EwSrv callmap redirect to its real prologue, then the packed-veneer literal frontier |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

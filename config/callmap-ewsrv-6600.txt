@@ -1,0 +1,20 @@
+# callmap-ewsrv-6600.txt - RTC extension fixups plus the EwSrv entry fixup.
+#
+# EwSrv's call at 0x506a821a has a stale BL target 0x506c0b0c, which is in
+# the middle of the function whose real prologue is 0x506c0a4a:
+#
+#   506c0a4a  push {r4-r7,lr}; mov r7,sb; mov r6,r8; push {r6,r7}
+#   506c0a52  sub sp,#0xc
+#   ...
+#   506c0b0c  adds r0,r5,#0x14   ; mid-function
+#
+# Entering at 0x506c0b0c skips the prologue and the epilogue pops from an
+# unbalanced stack (return address 0).  This fixup redirects the call to the
+# real entry.  It is a bring-up call-site fix, not recovered ROM state.
+#
+# Format: <call_pc> <target|sentinel> <A|T>
+
+0x5033efa8 0xfffffffb A
+0x5033eff0 0xfffffffb A
+0x5033f040 0xfffffff9 A
+0x506a821a 0x506c0a4a T

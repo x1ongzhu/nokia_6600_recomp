@@ -241,7 +241,22 @@ round 50 用 `NK_FIX_4A78=1` 把 `0x4a7846c0` 指向 high-vector page 的
 它越过了第一个 missing-DLL call，但很快遇到下一个 null pointer。
 这是 window-server bring-up 的下一步，而不是完整启动。
 
-下一步是补齐 EwSrv/FbsCli 的 relocation/surface 初始化，或 HLE
+round 51 进一步修正了 EwSrv 的入口：call `0x506a821a` 编码的是
+`0x506c0b0c`，落在真实函数中间；真实 prologue 在 `0x506c0a4a`：
+
+```
+506c0a4a  push {r4-r7,lr}; mov r7,sb; mov r6,r8; push {r6,r7}
+506c0a52  sub sp,#0xc
+...
+506c0b0c  adds r0,r5,#0x14   ; mid-function
+```
+
+新增 `config/callmap-ewsrv-6600.txt` 做 call-site fixup（需要
+`NK_CALL_INFER=1`）。修正后 EwSrv 进入真实 prologue，但下一个 veneer
+`0x506c1dba` 的 literal 是代码/padding，不是 slot——这是
+**packed/relocated veneer literal** 问题，不是单个缺失 import。
+
+下一步是修 EwSrv 的 packed veneer/literal pool，或 HLE
 window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 
 另外，direct 路径对 `0x600000` 的 400 KB+ 写入不是 framebuffer，而是

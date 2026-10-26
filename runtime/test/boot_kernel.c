@@ -2382,7 +2382,9 @@ int main(int argc, char** argv) {
             nk_w32(&cpu, 0xffff0d00u, 0xe3a00000u);  /* mov r0,#0 */
             nk_w32(&cpu, 0xffff0d04u, 0xe12fff1eu);  /* bx lr     */
             nk_code_range_add(&ip, 0xffff0d00u, 0xffff0d08u);
-            nk_w32(&cpu, 0x4a7846c0u, 0xffff0d00u);
+            for (uint32_t o = 0; o < 0x10000u; o += 4)
+                nk_w32(&cpu, 0x4a780000u + o, 0xffff0d00u);
+            printf("EwSrv DLL stub page: 0x4a780000..0x4a790000\n");
             printf("EwSrv DLL stub: 0x4a7846c0 -> 0xffff0d00\n");
         }
     }
