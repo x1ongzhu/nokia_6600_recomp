@@ -939,6 +939,8 @@ static void sched_load_calls(nk_interp_t* ip, sched_thread* s) {
     }
 }
 
+static void importmap_revert(nk_cpu_t* c);
+
 /* "auto" honours the entry bit, "thumb" forces Thumb, anything else forces
  * ARM (the pre-round-93 behaviour that the legacy tests pin). */
 static int sched_mode_thumb(int entry_bit, const char* mode) {
@@ -1161,6 +1163,8 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
             next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u |
                          (t ? NK_CPSR_T : 0u);
         }
+        if (getenv("NK_IMPORTMAP_REVERT"))
+            importmap_revert(c);
         /* The kernel's resume path clears the suspend bits before a thread
          * runs; the direct switch bypasses it, so clear them here. */
         nk_w32(c, next->thread + 0x20u,
@@ -1912,6 +1916,29 @@ static int flat_slot_owner(const rom_image_t* imgs, int nimg, uint32_t slot,
     return 0;
 }
 
+/* Round 95: NK_IMPORTMAP rebinds EUser export-table slots, and EUser's
+ * export table doubles as the import slot table for every ROM image.  A map
+ * built for the kernel therefore also rewrites the slots an application
+ * imports, so an app thread called the wrong EUser function with its own
+ * arguments (EFile passed pointers where lengths were expected).  Record the
+ * original values while patching and restore them when an app thread starts. */
+#define NK_MAP_REVERT_MAX 2048
+static uint32_t g_map_revert_addr[NK_MAP_REVERT_MAX];
+static uint32_t g_map_revert_old[NK_MAP_REVERT_MAX];
+static int      g_map_revert_n;
+static int      g_map_revert_done;
+
+static void importmap_revert(nk_cpu_t* c);
+
+static void importmap_revert(nk_cpu_t* c) {
+    if (g_map_revert_done || !g_map_revert_n) return;
+    g_map_revert_done = 1;
+    for (int i = 0; i < g_map_revert_n; i++)
+        nk_w32(c, g_map_revert_addr[i], g_map_revert_old[i]);
+    printf("importmap: reverted %d kernel-time rebinds for the app thread\n",
+           g_map_revert_n);
+}
+
 static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,
                               const rom_image_t* imgs, int nimg,
                               const uint8_t* flat, long len) {
@@ -1949,6 +1976,13 @@ static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,
                     nk_w32(cpu, target + 4, 0xe12fff1eu);
                     nk_code_range_add(ip, target, target + 8);
                     zero_stub = 1;
+                }
+                if (getenv("NK_IMPORTMAP_REVERT") &&
+                    g_map_revert_n < NK_MAP_REVERT_MAX &&
+                    v != target) {
+                    g_map_revert_addr[g_map_revert_n] = slot;
+                    g_map_revert_old[g_map_revert_n] = v;
+                    g_map_revert_n++;
                 }
                 nk_w32(cpu, slot, target);
                 patched++;

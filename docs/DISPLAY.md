@@ -989,3 +989,12 @@ hand-off，方案 3 必须由 harness 自己执行。验收
 （`0x503c7168` 字节）变成干净失败。EFile 现在跑进 EUser 堆代码，并在
 `0x2c` 离开 image。另加 `pc_hook3/4`、`NK_SCHED_MODE=auto|arm|thumb`。
 验收 `tools/test_round94.sh`。
+
+### round 95：kernel 期 import rebind 泄漏到 app 线程
+
+EUser 导出表同时是 ROM 镜像的 import slot 表。kernel map 重绑了 236 个
+槽，app 也走这些槽 → 调到错误的 EUser 函数，把代码地址/ctor 表当长度，
+缓冲区涨到 `0x503c7168` 字节。`NK_IMPORTMAP_REVERT=1` 在第一个 app
+线程恢复时写回原值：control 仍报 `HLE alloc rejected: 0x503c7168`，
+revert 运行无异常分配，EFile 在 868 条 Thumb 指令后进入阻塞等待。
+验收 `tools/test_round95.sh`。

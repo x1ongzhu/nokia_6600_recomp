@@ -1104,3 +1104,17 @@ memory clamp 移到 `pc_hook2`；`NK_SCHED_MODE=auto|arm|thumb`（默认
 auto）。round 79/81–83/85–89 固定 `arm` 保留历史 frontier；round 80
 的预期更新为 Thumb 正确执行后的 19,262 条 / 返回 `0xdead0000`。
 验收 `tools/test_round94.sh`。
+
+### 2.48 round 95：kernel 期 import rebind 不能泄漏到 app 线程
+
+EUser 的导出表**同时就是所有 ROM 镜像的 import slot 表**：ROM importer
+的 stub 是 `ldr rX,[pc]; ldr rX,[rX]; bx rX`，字面量直接指向 EUser
+`.edata` 的某一项。`config/imports-r29-6600.txt` 为 kernel 重绑了其中
+**236 个**槽；同一 boot 里的 app 也走这些槽，于是调到错误的 EUser 函数，
+把自己的参数当长度：EFile 把 `0x503bfcf3`（代码地址）与 `0x503c7148`
+（ctor 表）当描述符长度，缓冲区涨到 `0x503c7168` 字节。
+
+`NK_IMPORTMAP_REVERT=1` 在打补丁时记录原值，在**第一个 app 线程恢复**
+时全部写回。control 运行仍报 `HLE alloc rejected: 0x503c7168`；
+revert 运行无异常分配，EFile 在 868 条 Thumb 指令后进入阻塞等待。
+验收 `tools/test_round95.sh`。

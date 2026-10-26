@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 94)
+## Status (2026-10-26, round 95)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -100,7 +100,8 @@ ABI mismatch; round 90 corrects that analysis from static evidence; round 91 map
 ROM boot chain and the empty kernel object index; round 92 shows the kernel
 cannot start the next boot stage by itself; round 93 fixes thread entry-mode
 selection so a real ROM image (EFile) runs to the kernel; round 94 pushes it
-through the kernel start hand-off. What works:
+through the kernel start hand-off; round 95 stops kernel-time import rebinds
+from leaking into an app thread. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -704,6 +705,21 @@ through the kernel start hand-off. What works:
   and adds `NK_SCHED_MODE=auto|arm|thumb` (auto honours iEntryPoint bit 0).
   `tools/test_round94.sh` pins the result.
 
+- [x] **Kernel-time import rebinds must not reach an app thread** (round 95):
+  EUser's export table doubles as the import slot table for every ROM image
+  (an importer's stub is `ldr rX,[pc]; ldr rX,[rX]; bx rX` and the literal
+  points at an EUser `.edata` entry). `config/imports-r29-6600.txt` rebinds
+  236 of those entries for the kernel, which was linked against a different
+  EUser `.def`, so an application running in the same boot calls the wrong
+  EUser function with its own arguments: EFile passed `0x503bfcf3` (a code
+  address) and `0x503c7148` (its ctor table) as descriptor lengths and grew a
+  buffer to `0x503c7168` bytes. `NK_IMPORTMAP_REVERT=1` records each original
+  value while patching and restores all of them when the first application
+  thread is resumed. The control run still logs
+  `HLE alloc rejected: 0x503c7168 bytes`; the revert run has no anomalous
+  allocation and EFile reaches a blocking wait after 868 Thumb instructions.
+  `tools/test_round95.sh` pins both runs.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -874,7 +890,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round91.sh` | ROM boot chain `ekern->EFile->EStart->Starter->SplashScreen`; kernel object index is empty |
 | `tools/test_round92.sh` | kernel idles after one timer IRQ; no process is ever created; harness must do the boot hand-off |
 | `tools/test_round93.sh` | thread entry-mode honours iEntryPoint bit 0; EFile runs into the kernel |
-| `tools/test_round94.sh` | **current acceptance**: EFile passes the kernel start hand-off and leaves the image at `0x2c` on a null heap pointer |
+| `tools/test_round94.sh` | EFile passes the kernel start hand-off |
+| `tools/test_round95.sh` | **current acceptance**: `NK_IMPORTMAP_REVERT` keeps kernel-time rebinds out of the app thread; EFile blocks cleanly |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 94）
+最后更新：2026-10-26（round 95）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -695,6 +695,26 @@
     `0x503da6ee` 的正常尾声返回到 sentinel `0xdead0000`，原来的
     `0x503da6d5` null call 是 ARM 误解码的产物。
   - 验收 `tools/test_round94.sh`。
+
+- **kernel 期 import rebind 泄漏到 app 线程**（round 95）：找到并修复
+  round 94 那个"指针当长度"的真正根因。
+  - EUser 的导出表**同时就是所有 ROM 镜像的 import slot 表**：
+    ROM importer 的 stub 是 `ldr rX,[pc]; ldr rX,[rX]; bx rX`，
+    字面量直接指向 EUser `.edata` 的某一项。
+  - `config/imports-r29-6600.txt` 为了 kernel（用另一版 EUser `.def`
+    链接）重绑了其中 **236 个** 槽；app 在同一个 boot 里调用同一批槽，
+    于是调到**错误的 EUser 函数**，把自己的参数当长度用：
+    EFile 把 `0x503bfcf3`（代码地址）和 `0x503c7148`（自己的 ctor
+    表）当成描述符长度，把缓冲区增长到 `0x503c7168` 字节，正好撞上
+    round 94 的分配上限。
+  - 修复：**`NK_IMPORTMAP_REVERT=1`** —— 打补丁时记录每个槽的原值，
+    在**第一个 app 线程被恢复**时全部写回（日志
+    `importmap: reverted 236 kernel-time rebinds for the app thread`）。
+  - 效果：control 运行仍出现
+    `HLE alloc rejected: 0x503c7168 bytes`；revert 运行**完全没有**
+    异常分配，EFile 在 868 条 Thumb 指令后进入一个阻塞等待，boot 继续
+    跑到预算。
+  - 验收 `tools/test_round95.sh`（control + revert 两次运行对比）。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
