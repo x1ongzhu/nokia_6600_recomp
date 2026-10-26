@@ -6,14 +6,15 @@
 # 0x503b4980 (TTrap wrapper), to TTrap::Trap at 0x5038cae8.  The app then
 # takes the 0x509ef5fc main/constructor path instead of the early return.
 #
-# That path is immediately blocked by the kernel's SVC return:
-#   - the first failing SVC is 0x6c, called from User::Alloc (0x503988f8);
-#   - the kernel handler falls into 0x50314f78 with lr=0x503988fc, then the
-#     mode/SPSR restore degrades into a bx-lr self-loop at 0x50314f78;
+# That path exposes the next blocker:
+#   - the first SVC 0x6c (User::Alloc, 0x503988f8) actually returns
+#     correctly (0x50314f78 -> bx lr -> 0x503988fc);
+#   - two MMIO writes to 0xe59ff028/0xe59ff02c come from 0x50383c74/7c
+#     (caller 0x50383ec0, cleanup destination r5=0xe59ff028);
+#   - after that, a later SVC falls into the 0x50314f78 bx-lr self-loop
+#     with lr=0x50314f78;
 #   - NK_USER_SVC_KERNEL=2 clears bit 23 on all 9 EUser SVC stubs, but does
-#     not fix the return; it still self-loops;
-#   - two MMIO writes to 0xe59ff028/0xe59ff02c show a bad descriptor
-#     destination later in the same path.
+#     not fix the loop.
 #
 # Acceptance:
 #   - the rebind log lists both app slots;
@@ -73,8 +74,8 @@ PY
 
 echo "ok: rebinding the TTrap slot makes SplashScreen take the 0x509ef5fc"
 echo "    main/constructor path instead of returning after static init"
-echo "ok: that path is blocked by the kernel SVC return self-loop at"
-echo "    0x50314f78 (first hit from User::Alloc -> svc 0x6c)"
-echo "ok: clearing bit 23 on all EUser SVC stubs does not fix the return;"
-echo "    the next task is the SVC exception-return/SPSR path"
+echo "ok: the first SVC 0x6c returns correctly; after the 0xe59ff028"
+echo "    cleanup/destination writes, a later SVC self-loops at 0x50314f78"
+echo "ok: clearing bit 23 on all EUser SVC stubs does not fix the loop;"
+echo "    the next task is the 0xe59ff028 descriptor/cleanup target"
 echo "PASS: round 64 exposes the app main path and the SVC-return blocker"

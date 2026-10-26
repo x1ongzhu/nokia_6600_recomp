@@ -486,20 +486,31 @@ main 路径立刻被 kernel SVC return 卡住：
 
 ```
 User::Alloc (0x503988f8) -> svc #0x6c
-  kernel handler returns into 0x50314f78
-  lr also becomes 0x50314f78 -> bx lr self-loop
+  first return is correct: 0x50314f78 -> bx lr -> 0x503988fc
+  later (after the 0xe59ff028 writes) a subsequent SVC falls into
+  0x50314f78 with lr=0x50314f78 -> bx lr self-loop
 ```
 
 `NK_USER_SVC_KERNEL=2` 清掉 9 个 EUser SVC stub 的 bit 23，仍然
-self-loop；所以这不是 user/kernel selector，而是 **SVC
-exception-return/SPSR** 的问题。该路径还会对 `0xe59ff028` 写 2 笔
-MMIO，说明后续 descriptor 目标也坏了。
+self-loop。第一条 SVC 本身能正常返回，说明问题不是最开始的
+exception-return；更像是 `0xe59ff028` 的 descriptor/cleanup 目标先被
+写坏，后续 SVC 的 bank/LR 才被污染。该路径对 `0xe59ff028` 的 2 笔
+MMIO 写来自 `0x50383c74/7c`，调用点是 `0x50383ec0`，此时 `r5`
+（cleanup/destination）就是 `0xe59ff028`。
 
 另一个线索：kernel handler 在 `0x50314f60` 实际读的是
 `[0x80000f48]`（静态字 `0x80000f48`），而 harness 的 svc hook 设在
 `[0x80000f34]`；失败运行里 `[0x80000f48] = 0`。把
 `[0x80000f48]` 设成 `0xffff0b04` 仍未消除 self-loop，说明 self-loop
 还涉及 SVC bank/SPSR 的返回路径，不只是这一个 pre-handler 指针。
+
+进一步 trace 到 `r5=0xe59ff028` 的来源：call chain 是
+`0x509ef612 -> 0x509ef78c -> 0x50383e50 -> 0x50383e80`，进入
+`0x50383e80` 时 **r0=0**、r1=`0x54442d18`；该函数把 r0 当 descriptor/
+overflow 对象，读 `[r0+0xc]` 就从低地址读回了 `0xe59ff028`。也就是说
+这不是 cleanup stack 溢出，而是 main 路径里一个 **null descriptor /
+TDes16Overflow 参数** 被格式化函数解引用。下一步应确认
+`0x509ef78c` 这个 app helper 的 import/ABI 是否又绑错。
 
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。

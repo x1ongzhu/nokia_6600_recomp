@@ -366,17 +366,24 @@
     ROM 里是 `0x50396ca8`（string helper），返回非零指针，使 app 认为
     初始 TRAP 失败并跳过 `0x509ef5fc` 的 splash main/constructor。
     把它重绑到 `0x5038cae8`（TTrap::Trap）后，app 确实进入 main 路径。
-  - 该路径立刻被 kernel SVC return 卡住：第一个失败点是
-    `User::Alloc` 的 `svc #0x6c`（`0x503988f8`），handler 在
-    `0x50314f78` 进入 `bx lr` self-loop（lr 也变成 `0x50314f78`），
-    随后还有对 `0xe59ff028` 的 2 笔 MMIO 写。
+  - 该路径的**第一条** `User::Alloc` `svc #0x6c`（`0x503988f8`）其实
+    正常返回：`0x50314f78 -> bx lr -> 0x503988fc`。真正的问题在后面：
+    对 `0xe59ff028` 的 2 笔 MMIO 写（来自 `0x50383c74/7c`，调用点
+    `0x50383ec0`，此时 cleanup/destination `r5=0xe59ff028`）之后，
+    后续 SVC 才在 `0x50314f78` 形成 `bx lr` self-loop。
   - `NK_USER_SVC_KERNEL=2` 清掉 9 个 EUser SVC stub 的 bit 23，仍不能
-    修复该 return；问题在 SVC exception-return/SPSR 路径，而不是
-    user/kernel selector 本身。
+    修复该 self-loop；它更像是 `0xe59ff028` descriptor/cleanup 目标先
+    被写坏后污染了 SVC bank/LR，而不是第一条 SVC 的 return 语义。
   - 另外，kernel handler 实际读 `[0x80000f48]`（失败时为 0），而
     harness 的 svc hook 设在 `[0x80000f34]`；把 `[0x80000f48]` 设成
     `0xffff0b04` 仍未消除 self-loop，说明返回路径还有 SVC bank/SPSR
     问题。
+  - `r5=0xe59ff028` 的来源已追到 main 路径的
+    `0x509ef612 -> 0x509ef78c -> 0x50383e50 -> 0x50383e80`：
+    进入 `0x50383e80` 时 **r0=0**、r1=`0x54442d18`，函数把 r0 当
+    descriptor/TDes16Overflow 解引用 `[r0+0xc]`，从低地址读回
+    `0xe59ff028`。所以问题不是 cleanup stack 溢出，而是 **null
+    descriptor/overflow 参数**；下一步查 `0x509ef78c` 的 import/ABI。
   - 该实验放在 `config/imports-app-main-6600.txt`，默认 app map
     （`imports-app-6600.txt`）仍只做 round-63 的 CBase rebind，保持
     干净返回。framebuffer 仍无 app 像素。

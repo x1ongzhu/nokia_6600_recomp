@@ -530,11 +530,18 @@ active scheduler）。
 失败、跳过 `0x509ef5fc`。重绑到 `0x5038cae8`（TTrap::Trap）后，app
 进入 main/constructor 路径。
 
-该路径第一条 `User::Alloc` 的 `svc #0x6c`（`0x503988f8`）就让 kernel
-handler 落到 `0x50314f78`，lr 也变成 `0x50314f78`，形成 `bx lr`
-self-loop；随后还有 2 笔对 `0xe59ff028` 的 MMIO 写。清掉全部 9 个
-EUser SVC stub 的 bit 23（`NK_USER_SVC_KERNEL=2`）仍不解决，说明是
-**SVC exception-return / SPSR** 的问题。
+该路径第一条 `User::Alloc` 的 `svc #0x6c`（`0x503988f8`）其实正常
+返回（`0x50314f78 -> bx lr -> 0x503988fc`）。真正的问题在后面：
+`0x50383c74/7c` 对 `0xe59ff028` 写 2 笔 MMIO（调用点 `0x50383ec0`，
+destination `r5=0xe59ff028`），之后某个 SVC 才在 `0x50314f78` 形成
+`bx lr` self-loop（lr=0x50314f78）。清掉全部 9 个 EUser SVC stub 的
+bit 23（`NK_USER_SVC_KERNEL=2`）仍不解决。
+
+`r5` 的来源是 `0x509ef612 -> 0x509ef78c -> 0x50383e50 -> 0x50383e80`
+调用链；进入 `0x50383e80` 时 r0=0、r1=`0x54442d18`，函数把 r0 当
+descriptor/TDes16Overflow 解引用 `[r0+0xc]`，从低地址读回
+`0xe59ff028`。因此是 **null descriptor/overflow 参数**，不是 cleanup
+stack 溢出；下一步查 `0x509ef78c` 的 import/ABI。
 
 实验 map 在 `config/imports-app-main-6600.txt`；默认 app map 仍只做
 CBase rebind。验收 `tools/test_round64.sh`。

@@ -423,14 +423,20 @@ What works:
 - [x] **App main path and SVC-return blocker** (round 64): rebinding the
   app's TTrap wrapper slot `0x503b4980` from the ROM string helper
   `0x50396ca8` to `TTrap::Trap` (`0x5038cae8`) makes SplashScreen take the
-  real `0x509ef5fc` main/constructor path. That path immediately hits the
-  kernel SVC return: `User::Alloc`'s `svc #0x6c` returns into `0x50314f78`,
-  where the mode/SPSR restore degrades into a `bx lr` self-loop. Clearing
-  bit 23 on all nine EUser SVC stubs (`NK_USER_SVC_KERNEL=2`) does not fix
-  it, so the next task is the SVC exception-return/SPSR path. The
+  real `0x509ef5fc` main/constructor path. The first `User::Alloc`
+  `svc #0x6c` returns correctly; later, after two MMIO writes to
+  `0xe59ff028` from `0x50383c74/7c` (caller `0x50383ec0`, destination
+  `r5=0xe59ff028`), a subsequent SVC falls into the `0x50314f78` `bx lr`
+  self-loop with `lr=0x50314f78`. The bad pointer comes from the
+  `0x509ef612 -> 0x509ef78c -> 0x50383e50 -> 0x50383e80` call chain:
+  `0x50383e80` receives `r0=0`, treats it as a descriptor/TDes16Overflow,
+  and reads `[0+0xc]`, which yields `0xe59ff028`. Clearing bit 23 on all
+  nine EUser SVC stubs (`NK_USER_SVC_KERNEL=2`) does not fix it. The next
+  task is the null descriptor/overflow ABI at `0x509ef78c`. The
   experimental map is `config/imports-app-main-6600.txt`; the default app
-  map still only does the round-63 CBase rebind. `tools/test_round64.sh`
-  pins the frontier; framebuffer still has no app pixels.
+  map still only does the round-63 CBase rebind.
+  `tools/test_round64.sh` pins the frontier; framebuffer still has no app
+  pixels.
 
 Not implemented yet:
 
