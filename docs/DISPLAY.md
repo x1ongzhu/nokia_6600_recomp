@@ -808,6 +808,20 @@ framebuffer 仍 0。验收：`tools/test_round83.sh`。
 object/argument，不是单个 slot target 选错。验收：
 `tools/test_round84.sh`。
 
+### round 85：supervisor 把 stack params 当 CBase
+
+在 `0x503ce69c` 处：
+
+```
+this = 0x8057ffd8
+[this+0x14] = 0x503da4cd   ; 代码返回地址，不是 vtable
+```
+
+EUser 函数把 EStart 的 stack params block 当成 CBase，读
+`[this+0x14+0xc]` 得到 `0x00a04d08`。下一 fix 是构造/传入真实
+CBase，而不是换 slot target。framebuffer 仍 0。验收：
+`tools/test_round85.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -870,6 +884,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 构造 supervisor 传给 `0x00a04d08` 的正确 object/argument：
-   round 84 已排除相邻 slot target；下一步从 `r6/this` 的构造路径
-   入手，而不是换 slot/HLE。
+8. 构造真实 CBase 替代 supervisor 的 stack params：round 85 已确认
+   `[this+0x14]` 是返回地址。下一步从 `r6/this` 的构造路径入手，
+   而不是换 slot/HLE。

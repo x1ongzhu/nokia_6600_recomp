@@ -722,6 +722,13 @@ framebuffer 仍 0。验收 `tools/test_round82.sh`。
 leave，framebuffer 仍 0。blocker 是 supervisor object/argument，不是
 单个 slot target。验收 `tools/test_round84.sh`。
 
+### 2.38 round 85：supervisor 把 stack params 当 CBase
+
+在 `0x503ce69c` 处 `this=0x8057ffd8`，`[this+0x14]=0x503da4cd`
+（代码返回地址，不是 vtable）。EUser 函数把 EStart 的 stack params
+block 当成 CBase，读 `[this+0x14+0xc]` 得到 `0x00a04d08`。下一 fix
+是构造/传入真实 CBase，而不是换 slot。验收 `tools/test_round85.sh`。
+
 ---
 
 ## 3. EUser 导入映射

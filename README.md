@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 84)
+## Status (2026-10-26, round 85)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -93,7 +93,8 @@ entry; round 79 adds auto-complete so the server runs; round 80 clamps the
 wild Mem::Copy and advances it; round 81 shows the server entry needs a
 real StartThread frame; round 82 completes the server run/return cycle; round 83 shows the
 supervisor's `0x00a04d08` cannot be zero-return HLE'd; round 84 rules out the
-adjacent EUser slot targets. What works:
+adjacent EUser slot targets; round 85 diagnoses the stack-params-as-CBase
+bug. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -597,6 +598,13 @@ adjacent EUser slot targets. What works:
   supervisor object/argument, not a one-entry target mistake.
   `tools/test_round84.sh` pins the negative sweep.
 
+- [x] **Supervisor passes stack params as a CBase** (round 85): at
+  `0x503ce69c`, `this=0x8057ffd8` and `[this+0x14]=0x503da4cd`, a code
+  return address rather than a vtable. EUser therefore reads
+  `[this+0x14+0xc] = 0x00a04d08`. The next fix is constructing/passing a
+  real CBase, not changing the slot target. Framebuffer remains untouched.
+  `tools/test_round85.sh` pins the diagnosis.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -757,7 +765,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round81.sh` | stack sentinel still null-calls at `0x503da6ee`; real StartThread frame needed |
 | `tools/test_round82.sh` | server returns and supervisor resumes; still hits `0x00a04d08` |
 | `tools/test_round83.sh` | HLE supervisor dispatch enters TTrap/leave at `0x5038cb70`; real object needed |
-| `tools/test_round84.sh` | **current acceptance**: adjacent EUser slot targets also fail to draw; supervisor object is the blocker |
+| `tools/test_round84.sh` | adjacent EUser slot targets also fail to draw; supervisor object is the blocker |
+| `tools/test_round85.sh` | **current acceptance**: supervisor passes stack params as a CBase; `[this+0x14]` is a return address |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
