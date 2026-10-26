@@ -1017,3 +1017,30 @@ kernel IRQ entry 的关键序列（round 30 已实际执行）：
 - display/keypad/audio/file server/app launch 未实现。
 - PeaK record codec 未解出；当前 hand-off 是 trampoline stand-in。
 - `references/`、`fw/`、`out/` 均为本地材料，不随仓库分发。
+
+### 2.44 round 91：ROM 启动链与 kernel object index 为空
+
+方案 3（kernel process loader / 真 EFSrv）的事实基础：
+
+```
+ekern.exe   169804  0x5030ff9c
+EFile.exe    74520  0x503b70a0   文件服务器
+EFSrv.dll    26724  0x503c9420   客户端 API，241 exports
+EStart.exe    5844  0x503da440   导入 EFSrv -> 必须在 EFile 之后
+Starter.exe  18720  0x509e9ac0
+SplashScreen.exe 3156 0x509eee20 (+ SplashScreen.mbm)
+nosstarter.ext  148 0x50341430   kernel extension
+```
+
+真实开机链是 `ekern -> EFile -> EStart -> Starter -> SplashScreen`；
+EStart 的 12 个 EFSrv 槽必须等 EFile 起来，单独驱动 EStart 画不出帧。
+
+kernel 侧：600k 指令的 boot 中，handle→object 查找经 EUser slot
+`0x503b3948`（`config/imports-r29-6600.txt` 从 ROM 的 `0x50380270`
+重绑到 `0x5038e4b4`，kernel 的 K-3 构建）。该查找使用的 process
+object index 位于 `0x80600e98`，其 `+8` 元素计数为 **0**、`+0x14`
+也为 0，因此**所有 handle 查找返回 0**，handle `0x32` 永远解析不到，
+Init3 的 thread-start 无法完成。
+
+方案 3 的第一项任务：按 `CObjectIx::AddL` 语义给该 index 填充真实
+DThread/DProcess 条目。验收 `tools/test_round91.sh`。

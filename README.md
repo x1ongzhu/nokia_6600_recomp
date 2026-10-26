@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 90)
+## Status (2026-10-26, round 91)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -96,7 +96,8 @@ supervisor's `0x00a04d08` cannot be zero-return HLE'd; round 84 rules out the
 adjacent EUser slot targets; round 85 diagnoses the stack-params-as-CBase
 bug; round 86 shows a vtable pointer alone still leaves; round 87 shows a real
 vtable/method still fails; round 88 rules out the global CBase as `this`; round 89 traces the callback
-ABI mismatch; round 90 corrects that analysis from static evidence. What works:
+ABI mismatch; round 90 corrects that analysis from static evidence; round 91 maps the real
+ROM boot chain and the empty kernel object index. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -650,6 +651,18 @@ ABI mismatch; round 90 corrects that analysis from static evidence. What works:
   file server being unavailable, not an object vtable.
   `tools/test_round90.sh` pins these facts offline.
 
+- [x] **ROM boot chain and empty kernel object index** (round 91): the real
+  chain is `ekern.exe -> EFile.exe -> EFSrv.dll -> EStart.exe ->
+  Starter.exe -> SplashScreen.exe`, so EStart's 12 EFSrv slots only work
+  after the file server exists — driving EStart alone can never draw. On
+  the kernel side, handle lookups go through EUser slot `0x503b3948`
+  (rebound by `config/imports-r29-6600.txt` from the ROM's `0x50380270`
+  to `0x5038e4b4`) against the process object index `0x80600e98`, whose
+  element count at `+8` is **0**, so every handle lookup returns 0 and
+  handle `0x32` never resolves. Populating that index (`CObjectIx::AddL`
+  semantics) is the first task of the kernel-process-loader route.
+  `tools/test_round91.sh` pins these facts offline.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -816,7 +829,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round87.sh` | real vtable/method still fails on the stack params; real class instance needed |
 | `tools/test_round88.sh` | global CBase as `this` also fails; real class instance/server response needed |
 | `tools/test_round89.sh` | callback receives stack params instead of a CBase (superseded by round 90) |
-| `tools/test_round90.sh` | **current acceptance**: EStart main `0x503db29c`, 0x24-byte params block, 12 EFSrv import slots; EFSrv is the blocker |
+| `tools/test_round90.sh` | EStart main `0x503db29c`, 0x24-byte params block, 12 EFSrv import slots; EFSrv is the blocker |
+| `tools/test_round91.sh` | **current acceptance**: ROM boot chain `ekern->EFile->EStart->Starter->SplashScreen`; kernel object index is empty |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

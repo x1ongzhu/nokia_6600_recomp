@@ -948,3 +948,18 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
 8. callback/object ABI 不匹配（round 89）：`0x503da6f0` 期望
    CBase，但 `0x503db2dc` 传 stack params。需要真实
    server/class instance，或改走 kernel process loader。
+
+### round 91：ROM 启动链与 kernel object index 为空
+
+方案 3 的事实基础：
+
+```
+ekern.exe -> EFile.exe -> EFSrv.dll -> EStart.exe -> Starter.exe -> SplashScreen.exe
+```
+
+EStart 的 12 个 EFSrv 槽必须等 `EFile.exe` 起来；单独驱动 EStart
+画不出帧。kernel boot 中 handle→object 查找（EUser slot
+`0x503b3948` → `0x5038e4b4`）使用 index `0x80600e98`，其 `+8` 计数
+为 0，**所有 handle 查找返回 0**，handle `0x32` 无法解析。
+第一项任务：按 `CObjectIx::AddL` 填充该 index。验收
+`tools/test_round91.sh`。

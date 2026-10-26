@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 90）
+最后更新：2026-10-26（round 91）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -615,6 +615,26 @@
   - 因此真正的 blocker 是 **EFSrv（文件服务器）不可用**：`RFile`/`RFs`
     没连上 session，半初始化对象上的虚拟调用就落到 `0x00a04d08`。
   - 验收 `tools/test_round90.sh`（离线、确定性）。
+
+- **ROM 启动链 + kernel object index 为空**（round 91）：确定方案 3
+  （kernel process loader / 真 EFSrv）的事实基础。
+  - ROMFS 启动链：`ekern.exe`(0x5030ff9c) → **`EFile.exe`**
+    (0x503b70a0) → **`EFSrv.dll`**(0x503c9420, 241 exports) →
+    **`EStart.exe`**(0x503da440) → `Starter.exe`(0x509e9ac0) →
+    `SplashScreen.exe`(0x509eee20) + `SplashScreen.mbm`；另有
+    `nosstarter.ext`(0x50341430)。
+  - 所以 EStart 的 12 个 EFSrv 槽**必须等 EFile.exe 起来**才可能工作；
+    单独驱动 EStart 永远画不出帧 —— 这解释了 round 63–89 的反复失败。
+  - kernel 侧：600k 指令的 kernel boot 中，handle→object 查找走
+    EUser slot `0x503b3948`；`config/imports-r29-6600.txt` 把它从 ROM
+    的 `0x50380270` 重绑到 `0x5038e4b4`（kernel 的 K-3 构建）。
+    查找用的 process object index 是 `0x80600e98`，其 `+8`
+    **元素计数为 0**，`+0x14` 也是 0 → **所有 handle 查找返回 0**。
+    因此 handle `0x32` 永远解析不到，Init3 的 thread-start 完成不了。
+  - 方案 3 的第一项具体任务：**给 kernel 的 object index 填充真实
+    条目**（按 `CObjectIx::AddL` 语义登记 DThread/DProcess），让
+    handle `0x32` 解析到 supervisor DThread。
+  - 验收 `tools/test_round91.sh`（离线、确定性）。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
