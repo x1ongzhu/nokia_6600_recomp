@@ -1007,3 +1007,11 @@ EUser export 757 → `svc #0x1c`，仅当返回 -1（KErrNotFound）才继续；
 模型返回 0 → main 立即返回。新增 `NK_SWI_RET`；用 `0x1c:-1` 绕过门槛
 后 EFile 在 `0x5039c6bc` 自旋于真实 RHeap 空闲链表（HLE 堆不维护 cell
 链表）。验收 `tools/test_round96.sh`。
+
+### round 97：应用堆 HLE-only
+
+`RHeap1::ReAlloc1` 的 fall-through 让 guest 真分配器遍历不存在的空闲链表
+（`0x5039c6bc` 自旋）。去掉 fall-through 后自旋消失，EFile 前进到陷阱
+处理器恢复 `0x5038cb34`（`svc #0x73` → `ldm r5,{...,sp,lr}` → `bx lr`），
+恢复出的 LR 是 `0x2c`。下一 frontier 是 trap handler 栈。
+验收 `tools/test_round97.sh`。

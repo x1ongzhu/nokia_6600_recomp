@@ -203,6 +203,8 @@ typedef struct nk_interp {
     unsigned long alloc_hits;
     unsigned long realloc_hits;
     unsigned long alloc_bogus;   /* rejected pointer-sized requests */
+    unsigned long realloc_foreign;  /* reallocs of pointers we do not own */
+    unsigned long free_foreign;     /* frees of pointers we do not own */
     uint32_t      alloc_max;     /* per-request cap, 0 = 0x100000 */
     unsigned long free_hits;
     int      alloc_log;     /* log the first N allocations */

@@ -505,8 +505,25 @@ static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
         uint32_t old = c->r[1];
         int32_t n = (int32_t)c->r[2];
         uint32_t heap = c->r[0];
-        if (!old || !hle_is_bump_ptr(ip, old) || n < 0)
-            return 0;               /* not a block we own: use the real heap */
+        /* Round 97: never fall through to the guest RHeap.  On this boot the
+         * application heap is entirely HLE-managed, so guest RHeap code that
+         * walks the free list reads a list that does not exist and spins on a
+         * bogus link (round 96 saw r4=0x2f).  A realloc of a pointer we do not
+         * own therefore becomes a fresh allocation; the old contents cannot be
+         * sized, so nothing is copied. */
+        if (n < 0) return 0;
+        if (!old || !hle_is_bump_ptr(ip, old)) {
+            uint32_t fresh;
+            int rc = hle_alloc_block(ip, c, pc, (uint32_t)n, &fresh);
+            if (rc == 0) return 1;
+            if (rc < 0) { hle_return(ip, c, 0); return 1; }
+            ip->realloc_foreign++;
+            if (ip->alloc_log-- > 0)
+                fprintf(stderr, "[interp] HLE realloc of foreign %#010x -> "
+                        "fresh %#010x (%d) at %#010x\n", old, fresh, n, pc);
+            hle_return(ip, c, fresh);
+            return 1;
+        }
         uint32_t oldsz = nk_r32(c, old - NK_HLE_BLOCK_HDR);
         uint32_t newp;
         {
@@ -528,7 +545,16 @@ static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
 
     if (ip->free_pc && pc == ip->free_pc) {
         uint32_t p = c->r[1];
-        if (!hle_is_bump_ptr(ip, p)) return 0;
+        /* Round 97: same policy as realloc - a free of a pointer we do not
+         * own must not enter the guest RHeap, which has no valid free list. */
+        if (!hle_is_bump_ptr(ip, p)) {
+            ip->free_foreign++;
+            if (ip->alloc_log-- > 0)
+                fprintf(stderr, "[interp] HLE free of foreign %#010x at "
+                        "%#010x\n", p, pc);
+            hle_return(ip, c, 0);
+            return 1;
+        }
         ip->free_hits++;
         hle_return(ip, c, 0);
         if (ip->alloc_log-- > 0)

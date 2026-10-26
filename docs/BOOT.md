@@ -1134,3 +1134,17 @@ EFile 入口 `0x503b7104` → 静态构造 → main `0x503bfe6c` → 门槛
 EFile 在 `0x5039c6bc` 自旋于真实 RHeap 空闲链表（`r4=0x2f`、
 `r6=0x80601b64`）：**HLE bump 分配器不维护 guest heap 的 cell 链表，
 guest 真实 RHeap 代码无法在其上运行**。验收 `tools/test_round96.sh`。
+
+### 2.50 round 97：应用堆 HLE-only，陷阱处理器成为下一 frontier
+
+`RHeap1::ReAlloc1`（`0x5039c630`）原先只拦 HLE bump 堆拥有的指针，其余
+交给 guest 真分配器，于是它遍历 HLE 堆从不建立的空闲链表（round 96 的
+`0x5039c6bc` 自旋，`r4=0x2f`）。
+
+round 97 去掉全部 fall-through：foreign/null 的 realloc → 新分配（不拷贝，
+旧尺寸未知）；foreign 的 free → 记日志的 no-op；超大请求仍干净失败。
+
+之后 EFile 前进到陷阱处理器恢复 `0x5038cb34`：`svc #0x73`
+（trap handler uninstall）→ `ldm r5, {r4..fp, sp, lr}` → `bx lr`，
+恢复出的 LR 为 `0x2c`。下一 frontier：**trap handler 栈**（svc
+`0x72`/`0x73`）。验收 `tools/test_round97.sh`。

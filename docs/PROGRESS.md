@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 96）
+最后更新：2026-10-26（round 97）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -735,6 +735,22 @@
     无法在 HLE 堆上运行** —— 这是下一个 frontier（要么把堆入口全部
     HLE，要么改用 guest 真实堆）。
   - 验收 `tools/test_round96.sh`。
+
+- **应用堆改为 HLE-only，guest RHeap 不再运行**（round 97）：
+  - round 96 的 `0x5039c6bc` 自旋根因是 HLE 分配器的**礼貌性
+    fall-through**：`RHeap1::ReAlloc1`（`0x5039c630`）只拦 HLE bump
+    堆拥有的指针，其他指针就交给 guest 真正的分配器，于是它遍历一个
+    HLE 堆**从不建立**的空闲链表。
+  - 去掉所有 fall-through：**不属于我们的指针**（含 null）的 realloc
+    变成一次新分配（旧尺寸未知，不拷贝）；不属于我们的指针的 free
+    变成记日志的 no-op；超大请求仍干净失败。新增计数
+    `realloc_foreign` / `free_foreign`。
+  - 效果：`0x5039c6bc` 自旋消失，EFile 前进到**陷阱处理器恢复路径**
+    `0x5038cb34`：它调 `svc #0x73`（trap handler uninstall），用
+    `ldm r5, {r4..fp, sp, lr}` 整体恢复上下文，然后 `bx lr` ——
+    而恢复出的 LR 是垃圾 **`0x2c`**。
+  - 因此下一个 frontier 是**陷阱处理器栈**（svc 0x72/0x73）。
+  - 验收 `tools/test_round97.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

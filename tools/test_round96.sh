@@ -19,16 +19,16 @@
 #     path.  Forcing the SVC to return -1 (NK_SWI_RET=0x1c:-1) gets EFile
 #     past the gate.
 #
-#     It then spins at 0x5039c6bc walking a real RHeap free list with
+#     It then spun at 0x5039c6bc walking a real RHeap free list with
 #     r4=0x2f, r6=0x80601b64: the HLE bump allocator hands out blocks without
-#     maintaining the guest heap's cell links, so guest RHeap code cannot run
-#     on a HLE heap.  That is the next frontier.
+#     maintaining the guest heap's cell links.  Round 97 removed that
+#     fall-through, so this test now pins only the starvation fix and the
+#     gate; round 97 pins the heap policy and its new frontier.
 #
 # Acceptance:
 #   - control (no SVC override): "thread 0x80601830 returned" happens and the
 #     gate comparison at 0x503bfe46 sees r0=0;
-#   - override run: no early return, Thumb instructions > 1300, and the stop
-#     is the 0x5039c6bc free-list walk with r4=0x2f / r6=0x80601b64.
+#   - override run: no early return, Thumb instructions > 1300.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
@@ -75,9 +75,6 @@ if grep -q "sched: thread 0x80601830 returned" out/round96_gate.log; then
     echo "FAIL: the app thread still returns early with the gate bypassed" >&2
     exit 1
 fi
-grep -q "pc=0x5039c6bc" out/round96_gate.log 2>/dev/null || true
-grep -q "r4=0x0000002f" out/round96_gate.log
-grep -q "r6=0x80601b64" out/round96_gate.log
 .venv/bin/python - <<'PY'
 import re
 line = [l for l in open('out/round96_gate.log') if l.startswith('insns=')][-1]
@@ -90,6 +87,6 @@ echo "ok: NK_SCHED_NO_PREEMPT stops the supervisor from starving the app thread"
 echo "ok: EFile's main gate calls SVC 0x1c with the literal \"FileServer\" and"
 echo "    continues only on -1 (KErrNotFound); our model returns 0, so EFile"
 echo "    exits immediately and the kernel takes the non-0x32 StartThread path"
-echo "ok: bypassing the gate reaches a real RHeap free-list walk (r4=0x2f,"
-echo "    r6=0x80601b64), i.e. guest RHeap code cannot run on a HLE heap"
+echo "ok: bypassing the gate lets EFile run on; the RHeap free-list walk it"
+echo "    used to reach is gone since round 97 (see test_round97.sh)"
 echo "PASS: round 96 isolates the FileServer gate and the heap-model conflict"

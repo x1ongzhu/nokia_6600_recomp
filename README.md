@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 96)
+## Status (2026-10-26, round 97)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -102,7 +102,8 @@ cannot start the next boot stage by itself; round 93 fixes thread entry-mode
 selection so a real ROM image (EFile) runs to the kernel; round 94 pushes it
 through the kernel start hand-off; round 95 stops kernel-time import rebinds
 from leaking into an app thread; round 96 isolates EFile's "FileServer" gate
-and the HLE-heap / guest-RHeap conflict. What works:
+and the HLE-heap / guest-RHeap conflict; round 97 makes the application heap
+HLE-only. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -736,6 +737,18 @@ and the HLE-heap / guest-RHeap conflict. What works:
   cell links, so guest RHeap code cannot run on a HLE heap. That is the next
   frontier. `tools/test_round96.sh` pins both runs.
 
+- [x] **The application heap is HLE-only** (round 97): `RHeap1::ReAlloc1`
+  (`0x5039c630`) was only intercepted for pointers the HLE bump heap owns, so
+  any other pointer fell through to the guest allocator, which walked a free
+  list the HLE heap never builds (the round-96 `0x5039c6bc` spin with
+  `r4=0x2f`). All fall-throughs are gone: realloc of a foreign or null
+  pointer becomes a fresh block (nothing copied, the old size is unknown),
+  free of a foreign pointer is a logged no-op, and oversized requests still
+  fail cleanly. EFile now reaches the trap-handler restore at `0x5038cb34`:
+  `svc #0x73` (trap handler uninstall), `ldm r5, {r4..fp, sp, lr}`, then
+  `bx lr` through a garbage restored LR of `0x2c`. The trap-handler stack is
+  the next frontier. `tools/test_round97.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -908,7 +921,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round93.sh` | thread entry-mode honours iEntryPoint bit 0; EFile runs into the kernel |
 | `tools/test_round94.sh` | EFile passes the kernel start hand-off |
 | `tools/test_round95.sh` | `NK_IMPORTMAP_REVERT` keeps kernel-time rebinds out of the app thread |
-| `tools/test_round96.sh` | **current acceptance**: app thread is not starved; EFile's SVC 0x1c "FileServer" gate; HLE heap vs guest RHeap |
+| `tools/test_round96.sh` | app thread is not starved; EFile's SVC 0x1c "FileServer" gate |
+| `tools/test_round97.sh` | **current acceptance**: application heap is HLE-only; EFile reaches the trap-handler restore |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
