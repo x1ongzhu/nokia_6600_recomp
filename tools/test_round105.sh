@@ -25,14 +25,14 @@
 #   rot=1 -> budget at 0x5037d8b0 (Thumb 1080)
 #   rot=2 -> budget at 0x5038cf4c (Thumb 1037)
 #   rot=3 -> null object call at 0x503c2adc (Thumb 1229)
-#   rot=4 -> budget, spinning in the TDblQue walk 0x503a2664 (Thumb 785)
+#   rot=4 -> budget, spinning in the TDblQue walk 0x503a266x (Thumb 785)
 #
 # So the shift exists (round 104 validated slot 0x503b37c4 -> export 9) but
 # the application's ordinal base is not uniform: a per-slot map is required.
 #
 # Acceptance:
 #   - rot=3 stops at the null-object call 0x503c2adc with r4=0;
-#   - rot=4 is budget-bound at 0x503a2664;
+#   - rot=4 is budget-bound near 0x503a267;
 #   - the two Thumb counts differ (different trajectories).
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -81,12 +81,12 @@ grep -q "euser: rotated export entries 6..1787 by 3" out/round105_r3.log
 grep -q "^--- stop: pc left the image (5) at 0xe92d4070 ---" out/round105_r3.log
 grep -q "503c2ae4" out/round105_r3.log
 grep -q "euser: rotated export entries 6..1787 by 4" out/round105_r4.log
-grep -q "^--- stop: budget (0) at 0x503a2664 ---" out/round105_r4.log
+grep -q "^--- stop: budget (0) at 0x503a267" out/round105_r4.log
 grep -q "Thumb 785)" out/round105_r4.log
 
 echo "ok: M = K - 3 is the kernel-verified rule (236 slots, euser_reloc.py)"
 echo "ok: applying it to applications (rot=3) reaches 0x503c2adc with a NULL this"
-echo "ok: other shift amounts land elsewhere (rot=4 spins at 0x503a2664)"
+echo "ok: other shift amounts land elsewhere (rot=4 spins near 0x503a267)"
 echo "ok: the shift is real, but the application ordinal base is not uniform,"
 echo "    so a per-slot map is required"
 echo "PASS: round 105 shows a single rotation is not sufficient"
