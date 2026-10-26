@@ -119,6 +119,22 @@ imports，或改用 kernel 的 process loader。
 user-side descriptor/thread context。下一步要么补齐这部分，要么改用
 kernel process loader。
 
+直接 SWI gate（`NK_SWI_DIRECT=1`）只到 3,612 条：格式化调用会破坏
+`0x80600018` 的 vtable。改用**真实 banked SVC 异常路径**
+（`NK_SWI_DIRECT=0 NK_BANKED=1`）后，vtable 破坏消失，FbServ 跑到
+**1,499,521 条**：
+
+```
+- 切换到 kernel 分配的用户栈，sp 约 0x7fef....
+- 进入重复的 EUser wait/scheduler 链：
+  5039eddc -> 5039d9d0 -> 503998b4 -> 50392e00 -> 50392ec0
+- 最后 null callback（lr=0, pc=0）
+```
+
+这说明 direct-SWI gate 很可能没有保存 callee-saved `r4-r11`，而真实
+SVC entry 会保存。当前 blocker 变成 kernel executive/thread 状态，
+不是 app 的 C++ 对象。这条路径是目前离第一帧最近的路线。
+
 这条路径绕过了 kernel 死锁，是目前离第一帧最近的路线。
 
 ---

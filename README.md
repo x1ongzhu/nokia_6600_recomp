@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 40)
+## Status (2026-10-26, round 41)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -193,6 +193,15 @@ stable executive loop. What works:
   it; the guest builds the descriptor header itself. The direct FbServ route
   therefore needs the user-side descriptor/thread context of a real process.
 
+- [x] **FbServ on the real SVC path** (round 41): with
+  `NK_SWI_DIRECT=0 NK_BANKED=1` the direct-SWI vtable corruption disappears.
+  FbServ reaches **1,499,521 instructions** with 0 undefined/unbound, moves
+  to a kernel-allocated user stack around `0x7fef....`, and enters a repeating
+  EUser wait chain
+  (`0x5039eddc -> 0x5039d9d0 -> 0x503998b4 -> 0x50392e00 -> 0x50392ec0`)
+  before a null callback. The next blocker is the kernel executive/thread
+  state the wait loop expects, not the app's C++ objects.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -311,7 +320,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round37.sh` | static display-chain inventory (`FbServ.exe`, `FbsCli.dll`, `BitGdi.dll`, `ecust.dll` hardware constants) |
 | `tools/test_round38.sh` | direct Thumb FbServ startup, 3,612 instructions, uninitialized-vtable blocker at `0x5068a572` |
 | `tools/test_round39.sh` | exact FbServ vtable write/overwrite sequence; byte/halfword write watches |
-| `tools/test_round40.sh` | **current acceptance**: FbServ descriptor/object overlap call chain and 20-byte allocation |
+| `tools/test_round40.sh` | FbServ descriptor/object overlap call chain and 20-byte allocation |
+| `tools/test_round41.sh` | **current acceptance**: FbServ on the real banked SVC path, 1,499,521 instructions, EUser wait chain |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 40）
+最后更新：2026-10-26（round 41）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -174,6 +174,14 @@
   `NK_APP_STACK_CLEAR=1` 无效，descriptor header 是 guest 构造的。
   直接 FbServ 入口因此缺少真实进程的 user-side descriptor/thread
   context。
+
+- **FbServ 真实 SVC 路径**（round 41）：`NK_SWI_DIRECT=0 NK_BANKED=1`
+  时 direct-SWI 的 vtable 破坏消失，FbServ 从 3,612 条推进到
+  **1,499,521 条**；切换到 kernel 分配的用户栈（约 `0x7fef....`），
+  进入重复的 EUser wait 链
+  `5039eddc -> 5039d9d0 -> 503998b4 -> 50392e00 -> 50392ec0`，
+  最后 null callback。说明 direct-SWI gate 可能未保存 `r4-r11`；当前
+  blocker 是 kernel executive/thread 状态。
 
 ### 未完成
 
