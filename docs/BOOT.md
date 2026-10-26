@@ -431,6 +431,26 @@ current-thread 状态。
 
 ---
 
+### 2.14 round 44：user/kernel SVC selector
+
+真实 SVC 模型下，FbServ 的第一条系统调用是：
+
+```
+0x50392b88  ef00006c   svc #0x6c
+```
+
+kernel handler `0x50314f30` 用 immediate 的 **bit 23** 区分
+user/kernel。`0x6c` 没有该位，handler 走 kernel-side 路径，返回
+boot sentinel/0，而不是回 app。flat image 把 app 的 import 绑到了
+kernel-side EUser stub 表，stub 缺少 user marker。
+
+把 EUser stub 表的 SVC 都标上 bit 23（`NK_USER_SVC=1`）还不够：
+handler 随后从 dispatch table 取到 `0xe59ff028` 并跳到这个指令字。
+user path 期望的是另一种 table/entry 格式。这是下一个 loader/ABI
+frontier。
+
+---
+
 ## 3. EUser 导入映射
 
 EKA1 import stub：

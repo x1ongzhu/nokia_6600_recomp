@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 43)
+## Status (2026-10-26, round 44)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -219,6 +219,15 @@ stable executive loop. What works:
   `0xdead0000` after 11,114 instructions; direct FbServ stops at 56 because
   its user-SVC return path still needs the current-thread state.
 
+- [x] **User/kernel SVC selector** (round 44): FbServ's first system call
+  is `0x50392b88 ef00006c` (`svc #0x6c`). The kernel handler uses immediate
+  bit 23 as the user/kernel selector; with it clear it takes the kernel path
+  and the app stops at 56 instructions. Setting bit 23 on the EUser stub
+  table (`NK_USER_SVC=1`) is not enough: the handler then loads
+  `0xe59ff028` from its dispatch table and jumps to that instruction word.
+  The user path expects a different table/entry format, so this is the next
+  loader/ABI frontier.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -340,7 +349,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round40.sh` | FbServ descriptor/object overlap call chain and 20-byte allocation |
 | `tools/test_round41.sh` | FbServ on the real banked SVC path, 1,499,521 instructions, EUser wait chain |
 | `tools/test_round42.sh` | the 1.5M blocker is a post-executive stack/context switch, not the vtable or wait SWIs |
-| `tools/test_round43.sh` | **current acceptance**: real SVC exception model; the 1.5M FbServ run was no-op SWIs, not a kernel path |
+| `tools/test_round43.sh` | real SVC exception model; the 1.5M FbServ run was no-op SWIs, not a kernel path |
+| `tools/test_round44.sh` | **current acceptance**: FbServ's first `svc #0x6c`, user/kernel bit-23 selector, and the dispatch-table frontier |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

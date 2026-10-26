@@ -2329,6 +2329,20 @@ int main(int argc, char** argv) {
         printf("app stack cleared: %#010x..%#010x\n", base, cpu.r[13]);
     }
 
+    if (env_ulong("NK_USER_SVC", 0)) {
+        /* The flat image binds app imports to the kernel-side EUser stub
+         * table, whose `svc #N` immediates lack the bit-23 user marker.  Mark
+         * them as user SVCs so the real kernel handler takes its user path. */
+        unsigned patched = 0;
+        for (uint32_t a = 0x50392b88u; a < 0x50393388u; a += 4) {
+            uint32_t w = nk_r32(&cpu, a);
+            if ((w & 0x0f000000u) == 0x0f000000u && !(w & 0x00800000u)) {
+                nk_w32(&cpu, a, w | 0x00800000u);
+                patched++;
+            }
+        }
+        printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
+    }
     install_svc_hook(&cpu, &ip);
     printf("run: sp=%#010x cpsr=%#010x budget=%ld infer=%d call-infer=%d policy=%d\n",
            cpu.r[13], cpu.cpsr, ip.budget, ip.infer_mode, ip.infer_calls,

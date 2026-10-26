@@ -146,6 +146,13 @@ pre-handler `[0x80000f34]`；direct E32 entry 下它是 0，所以
 所以 round 41 的 “1.5M 真实 SVC” 结论需要修正：它是 no-op SWI 运行。
 真实 SVC 模型已经加入，但还没接到完整的 user thread/executive 上下文。
 
+round 44 进一步定位：FbServ 的第一条系统调用是
+`0x50392b88 ef00006c`（`svc #0x6c`）。kernel handler 用 bit 23 区分
+user/kernel；flat image 把 app 的 import 绑到 kernel-side EUser stub，
+所以 handler 走 kernel 路径。给 stub 标 bit 23 后，handler 从
+dispatch table 取到 `0xe59ff028` 并跳到指令字，说明 user path 的
+table/entry 格式还不对。下一步是修 import 绑定或 user SVC table。
+
 round 42 进一步确认：最终返回 0 **不是** vtable 调用。第一次在
 `0x5039ee14` 观察 pop 时，栈上仍有正确的 saved LR `0x5039edc8`；只有
 经过 executive call `0x5039b05c` 后，最终 pop 才读到 0。也就是说，
