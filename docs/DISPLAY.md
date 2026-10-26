@@ -1049,3 +1049,12 @@ kernel 变体 `0x5038e4b4` 读到 count=0 会安全返回。故新增
 900k 预算（Thumb 1,447 → 1,601），新 frontier 是
 `0x503a2660..0x503a2674` 的 TDblQue 遍历（头无效，`r0=8`、`r3=0x2f`）。
 验收 `tools/test_round101.sh`。
+
+### round 102：应用线程使用 kernel 真实 RHeap
+
+`NK_ALLOC_HLE_KERNEL_ONLY=1` 只在 app 线程调度后关闭 HLE 分配器（否则
+kernel 在 12,595 条就以 PLAT fault halt），配合
+`NK_THREAD_HEAP=0x80905ec4` 让 app 线程跑在 kernel 真实 `RHeap` 上。
+guest 的 alloc/free/合并/realloc 全部真实执行；EFile 改以
+`KErrNoMemory`（-4）经 trap frame 干净离开。验收
+`tools/test_round102.sh`。

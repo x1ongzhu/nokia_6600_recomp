@@ -1209,3 +1209,20 @@ dump `0x80100c00..0x80100c80` 显示该对象除 `+0x0c`/`+0x10` 两个数据
 `0x5039c954` 后，EFile **用满 900k 预算**（Thumb 1,447 → 1,601），新
 frontier 是 `0x503a2660..0x503a2674` 的 TDblQue 遍历，链表头无效
 （`r0=8`、`r3=0x2f`）。验收 `tools/test_round101.sh`。
+
+### 2.55 round 102：应用线程使用 kernel 的真实 RHeap
+
+日志显示 guest 早已在传真实堆指针 `0x80905ec4`（kernel boot 期创建的
+`RHeap`）；round 101 的堆内务崩溃正是因为该堆对象从未被我们构造。
+
+但 kernel 不能一开始关 HLE 分配器：`NK_ALLOC_HLE=0` 时它在 **12,595
+条**指令就以 PLAT fault（`0x50312b88`）halt。
+
+`NK_ALLOC_HLE_KERNEL_ONLY=1`：只在第一个 app 线程被调度后关闭 HLE
+分配器。kernel 保留 HLE 堆，app 线程用 `NK_THREAD_HEAP=0x80905ec4`
+的真实 `RHeap`。
+
+结果：guest 的 alloc/free/合并/realloc **全部真实执行**，无 stub、无
+clamp、无异常跳转；EFile 以 `KErrNoMemory`（-4）经 trap frame
+（UnTrap 返回 `0x80004500`）干净离开——因为描述符增长仍收到栈地址当
+长度（delta `0x80561f28`）。验收 `tools/test_round102.sh`。

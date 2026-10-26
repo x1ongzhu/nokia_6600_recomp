@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 101)
+## Status (2026-10-27, round 102)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -811,6 +811,19 @@ works:
   (`r0=8`, `r3=0x2f`) at `0x503a2660..0x503a2674`.
   `tools/test_round101.sh` pins it.
 
+- [x] **The application thread runs on the kernel's real RHeap** (round 102):
+  guest code was already passing a real heap pointer around - `0x80905ec4` is
+  the RHeap the kernel creates during boot - which is exactly why round 101's
+  heap housekeeping crashed on an object the harness never built. The kernel
+  cannot give up the HLE allocator from the start (`NK_ALLOC_HLE=0` makes it
+  halt with a PLAT fault at 12,595 instructions), so
+  `NK_ALLOC_HLE_KERNEL_ONLY=1` disables it only once an application thread is
+  dispatched. With `NK_THREAD_HEAP=0x80905ec4` the guest's alloc, free,
+  coalesce and realloc all run for real: no stub, no clamp, no fault. EFile now
+  leaves with KErrNoMemory (-4) through the round-98 trap frame (UnTrap returns
+  `0x80004500`) because its descriptor grow still receives a stack address
+  (`0x80561f28`) as a length. `tools/test_round102.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -988,7 +1001,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round98.sh` | per-thread trap frame and heap pointer |
 | `tools/test_round99.sh` | handle-lookup slot keeps the kernel-time variant |
 | `tools/test_round100.sh` | oversized allocation traced and clamped |
-| `tools/test_round101.sh` | **current acceptance**: `NK_STUB_PC` neutralises guest RHeap housekeeping; EFile uses the full budget |
+| `tools/test_round101.sh` | `NK_STUB_PC` neutralises guest RHeap housekeeping |
+| `tools/test_round102.sh` | **current acceptance**: the application thread runs on the kernel's real RHeap |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

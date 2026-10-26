@@ -1171,6 +1171,15 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
         }
         if (getenv("NK_IMPORTMAP_REVERT"))
             importmap_revert(c);
+        /* Round 102: the kernel's own boot cannot run without the HLE
+         * allocator (it panics at 12,595 instructions when the allocator is
+         * disabled from the start), but an application thread can use the
+         * kernel's real RHeap object.  NK_ALLOC_HLE_KERNEL_ONLY=1 hands the
+         * heap back to the guest once an application thread is dispatched. */
+        if (getenv("NK_ALLOC_HLE_KERNEL_ONLY")) {
+            ip->alloc_hle = 0;
+            printf("alloc hle: disabled for the application thread\n");
+        }
         /* The kernel's resume path clears the suspend bits before a thread
          * runs; the direct switch bypasses it, so clear them here. */
         nk_w32(c, next->thread + 0x20u,

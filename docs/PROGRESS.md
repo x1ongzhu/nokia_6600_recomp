@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 101）
+最后更新：2026-10-27（round 102）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -823,6 +823,24 @@
     1,447 → **1,601**；新 frontier 是 `0x503a2660..0x503a2674` 的
     **TDblQue 遍历**，链表头无效（`r0=8`、`r3=0x2f`）。
   - 验收 `tools/test_round101.sh`。
+
+- **应用线程改用 kernel 的真实 RHeap**（round 102）：把 round 35 起的
+  "方案 2"真正落地。
+  - 日志显示 guest 早就在传一个**真实堆指针**：`0x80905ec4` 是 kernel
+    在 boot 期创建的 `RHeap`（round 95 control 运行里的
+    `heap 0x80905ec4`）。round 101 的堆内务崩溃正是因为这个堆对象
+    我们从来没建过。
+  - 但 kernel **不能**一开始就关掉 HLE 分配器：`NK_ALLOC_HLE=0` 时
+    kernel 在 **12,595 条**指令就以 PLAT fault（`0x50312b88`）halt。
+  - 新增 **`NK_ALLOC_HLE_KERNEL_ONLY=1`**：只在**第一个 app 线程被
+    调度后**关闭 HLE 分配器。于是 kernel 保留它需要的 HLE 堆，而
+    app 线程用 kernel 的真实 `RHeap`（`NK_THREAD_HEAP=0x80905ec4`）。
+  - 效果：guest 的 alloc / free / 合并 / realloc **全部真实执行** ——
+    不用 stub、不用 clamp、不再有空调用或野跳。EFile 改以
+    **`KErrNoMemory`（-4）** 经 round 98 的 trap frame
+    （UnTrap 返回 `0x80004500`）干净离开，原因是它的描述符增长
+    仍然收到一个**栈地址当长度**（delta `0x80561f28`）。
+  - 验收 `tools/test_round102.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
