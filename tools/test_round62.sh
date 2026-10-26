@@ -72,7 +72,7 @@ common NK_BUDGET=5000 NK_MAP_LCD=1 \
     --rom-image out/6600_runtime.bin >out/round62_map.log 2>&1
 
 grep -q "thread-start HLE: bring-up DThread vtable+0x20 completes" out/round62_map.log
-grep -q "user SVC kernel patch: 1 SVC 0x76 stubs" out/round62_map.log
+grep -q "user SVC kernel patch: 1 SVC stubs (0x76 only)" out/round62_map.log
 grep -q "^--- stop: null call (8) at 0000000000 ---" out/round62_map.log
 grep -q "506ca5e4 506ca5e4 506ca5e8" out/round62_map.log
 if grep -q "484c4289" out/round62_map.log; then

@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 63)
+## Status (2026-10-26, round 64)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -78,7 +78,9 @@ stable executive loop. On the display side, the firmware's own
 allocator header and the shared EUser export-table conflict. Round 63 adds the
 first app-side EUser import rebind, so SplashScreen's static init now
 constructs its CBase and returns cleanly instead of crashing on a zero
-vtable. What works:
+vtable. Round 64 rebinds the app's TTrap wrapper too, which takes the real
+`0x509ef5fc` main path — currently blocked by a kernel SVC-return self-loop.
+What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -418,6 +420,18 @@ vtable. What works:
   vtable `0x503b359c`. No framebuffer writes yet — the real splash
   main/active object is the next frontier. `tools/test_round63.sh` pins it.
 
+- [x] **App main path and SVC-return blocker** (round 64): rebinding the
+  app's TTrap wrapper slot `0x503b4980` from the ROM string helper
+  `0x50396ca8` to `TTrap::Trap` (`0x5038cae8`) makes SplashScreen take the
+  real `0x509ef5fc` main/constructor path. That path immediately hits the
+  kernel SVC return: `User::Alloc`'s `svc #0x6c` returns into `0x50314f78`,
+  where the mode/SPSR restore degrades into a `bx lr` self-loop. Clearing
+  bit 23 on all nine EUser SVC stubs (`NK_USER_SVC_KERNEL=2`) does not fix
+  it, so the next task is the SVC exception-return/SPSR path. The
+  experimental map is `config/imports-app-main-6600.txt`; the default app
+  map still only does the round-63 CBase rebind. `tools/test_round64.sh`
+  pins the frontier; framebuffer still has no app pixels.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -559,7 +573,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round60.sh` | `CFbsBitmap::Create` hits the same unresolved veneer (`0x506dd80c` → `0xe59ff028`) |
 | `tools/test_round61.sh` | real `SplashScreen.mbm` logo frame written through guest `Mem::Copy` |
 | `tools/test_round62.sh` | app-entry allocator cell header, StartThread completion, and shared EUser export-slot conflict |
-| `tools/test_round63.sh` | **current acceptance**: first app-side EUser import rebind; CBase vtable `0x503b359c`; static init returns cleanly |
+| `tools/test_round63.sh` | first app-side EUser import rebind; CBase vtable `0x503b359c`; static init returns cleanly |
+| `tools/test_round64.sh` | **current acceptance**: TTrap rebind exposes the app main path; kernel SVC-return self-loop at `0x50314f78` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

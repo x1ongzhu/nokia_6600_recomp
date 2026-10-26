@@ -475,6 +475,36 @@ insns=360
 
 验收：`tools/test_round63.sh`。
 
+### round 64：main 路径与 kernel SVC-return blocker
+
+第二个 app-side rebind 是 `0x503b4980`（app 的 TTrap wrapper）。ROM
+slot 里是 string helper `0x50396ca8`，它返回非零指针，使 app 认为初始
+TRAP 失败并跳过 `0x509ef5fc` 的 splash main/constructor。把它重绑到
+`0x5038cae8`（TTrap::Trap）后，app 确实进入 main 路径。
+
+main 路径立刻被 kernel SVC return 卡住：
+
+```
+User::Alloc (0x503988f8) -> svc #0x6c
+  kernel handler returns into 0x50314f78
+  lr also becomes 0x50314f78 -> bx lr self-loop
+```
+
+`NK_USER_SVC_KERNEL=2` 清掉 9 个 EUser SVC stub 的 bit 23，仍然
+self-loop；所以这不是 user/kernel selector，而是 **SVC
+exception-return/SPSR** 的问题。该路径还会对 `0xe59ff028` 写 2 笔
+MMIO，说明后续 descriptor 目标也坏了。
+
+另一个线索：kernel handler 在 `0x50314f60` 实际读的是
+`[0x80000f48]`（静态字 `0x80000f48`），而 harness 的 svc hook 设在
+`[0x80000f34]`；失败运行里 `[0x80000f48] = 0`。把
+`[0x80000f48]` 设成 `0xffff0b04` 仍未消除 self-loop，说明 self-loop
+还涉及 SVC bank/SPSR 的返回路径，不只是这一个 pre-handler 指针。
+
+实验配置放在 `config/imports-app-main-6600.txt`；默认
+`config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
+framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
+
 ## 8. BitGdi 导出符号表（round 59）
 
 ROM BitGdi 的 export dir（`0x506a7e78`，185 项）只有地址，没有名字。
@@ -533,6 +563,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 找到 SplashScreen 真正的 main / active object 驱动：round 63 的静态
-   初始化已经构造出 vtable `0x503b359c` 的 CBase 并返回，但没有
-   framebuffer 写入；需要确认 EStart 调用、独立线程或 active scheduler。
+8. 修 SVC exception-return/SPSR：round 64 已用 TTrap rebind 进入
+   `0x509ef5fc` 的 main 路径，但第一条 `svc #0x6c` 的 kernel return
+   在 `0x50314f78` self-loop。先修这个 return，再看 main 路径的
+   descriptor/EwSrv 问题。

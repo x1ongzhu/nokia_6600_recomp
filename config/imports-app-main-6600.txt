@@ -1,0 +1,17 @@
+# imports-app-main-6600.txt - experimental app main path (round 64)
+#
+# The default app map (imports-app-6600.txt) only fixes the static-init
+# CBase constructor, so SplashScreen returns cleanly without drawing.
+#
+# 0x503b4980 is the app's TTrap wrapper.  The ROM slot holds a string helper
+# (0x50396ca8), which returns a non-zero pointer; the app therefore thinks its
+# initial TRAP failed and skips 0x509ef5fc (the splash main/constructor).
+# Rebinding it to 0x5038cae8 (TTrap::Trap) makes the app take that main path.
+#
+# This is deliberately a separate experimental map: the main path currently
+# dies in the kernel SVC user-return self-loop at 0x50314f78 and writes to
+# 0xe59ff028.  It is the next blocker, not a working boot path yet.
+#
+# Format: <slot> <target>
+0x503b4338 0x50383c84
+0x503b4980 0x5038cae8

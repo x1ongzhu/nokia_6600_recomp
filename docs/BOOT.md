@@ -523,6 +523,22 @@ vtable+8/`r1=3` 调用。
 下一步是 splash main/active object 的驱动方式（EStart / 线程 /
 active scheduler）。
 
+### 2.19 round 64：TTrap rebind 进入 app main，SVC return self-loop
+
+第二个 app-side rebind：`0x503b4980` 是 app 的 TTrap wrapper，ROM slot
+里是 string helper `0x50396ca8`，返回非零指针，导致 app 认为初始 TRAP
+失败、跳过 `0x509ef5fc`。重绑到 `0x5038cae8`（TTrap::Trap）后，app
+进入 main/constructor 路径。
+
+该路径第一条 `User::Alloc` 的 `svc #0x6c`（`0x503988f8`）就让 kernel
+handler 落到 `0x50314f78`，lr 也变成 `0x50314f78`，形成 `bx lr`
+self-loop；随后还有 2 笔对 `0xe59ff028` 的 MMIO 写。清掉全部 9 个
+EUser SVC stub 的 bit 23（`NK_USER_SVC_KERNEL=2`）仍不解决，说明是
+**SVC exception-return / SPSR** 的问题。
+
+实验 map 在 `config/imports-app-main-6600.txt`；默认 app map 仍只做
+CBase rebind。验收 `tools/test_round64.sh`。
+
 ---
 
 ## 3. EUser 导入映射

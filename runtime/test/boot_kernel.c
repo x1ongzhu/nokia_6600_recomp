@@ -208,9 +208,11 @@
  *                           from the bring-up DThread vtable+0x20 slot (round
  *                           62).  Without it SplashScreen spins in the
  *                           EUser wait-any-request poll loop.
- *   NK_USER_SVC_KERNEL=1    clear bit 23 on EUser's SVC 0x76 stub so the
- *                           kernel StartThread service is dispatched instead
- *                           of the missing mask-ROM user-SVC handler.
+ *   NK_USER_SVC_KERNEL=1|2  clear bit 23 on EUser SVC stubs so the kernel
+ *                           service table is dispatched instead of the missing
+ *                           mask-ROM user-SVC handler.  Mode 1 patches only
+ *                           SVC 0x76 (StartThread); mode 2 patches all nine
+ *                           stubs in the 0x50392b80 table.
  *   NK_APP_IMPORTMAP=path   app-side EUser import rebinds, applied after the
  *                           flat image load.  Use this instead of
  *                           NK_IMPORTMAP for direct app entries: the kernel
@@ -2511,19 +2513,23 @@ int main(int argc, char** argv) {
 
     if (env_ulong("NK_USER_SVC_KERNEL", 0)) {
         /* EUser's user-style SVC stubs carry bit 23, which sends the kernel
-         * handler down the mask-ROM user path.  For SVC 0x76 the real service
-         * is the kernel's StartThread entry; clear bit 23 on that one stub so
-         * the kernel service table dispatches it.  (Direct app entry has no
-         * mask-ROM user-SVC dispatcher.) */
+         * handler down the mask-ROM user path.  Direct app entry has no
+         * mask-ROM user-SVC dispatcher, so that path ends in a self-loop at
+         * 0x50314f78.  Clear bit 23 so the kernel service table dispatches
+         * the call instead.  Mode 1 patches only SVC 0x76 (StartThread);
+         * mode 2 patches every EUser SVC stub in the 0x50392b80 table. */
+        int all = (int)env_ulong("NK_USER_SVC_KERNEL", 0) >= 2;
         unsigned patched = 0;
         for (uint32_t a = 0x50392b80u; a < 0x50392bc0u; a += 4) {
             uint32_t w = nk_r32(&cpu, a);
-            if ((w & 0x0fffffffu) == 0x0fc00076u) {
-                nk_w32(&cpu, a, w & ~0x00800000u);
-                patched++;
-            }
+            if ((w & 0x0f000000u) != 0x0f000000u) continue;
+            if (!(w & 0x00800000u)) continue;
+            if (!all && (w & 0x0fffffffu) != 0x0fc00076u) continue;
+            nk_w32(&cpu, a, w & ~0x00800000u);
+            patched++;
         }
-        printf("user SVC kernel patch: %u SVC 0x76 stubs\n", patched);
+        printf("user SVC kernel patch: %u SVC stubs (%s)\n", patched,
+               all ? "all" : "0x76 only");
     }
     if (env_ulong("NK_USER_SVC", 0)) {
         /* The flat image binds app imports to the kernel-side EUser stub
