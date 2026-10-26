@@ -822,6 +822,15 @@ EUser 函数把 EStart 的 stack params block 当成 CBase，读
 CBase，而不是换 slot target。framebuffer 仍 0。验收：
 `tools/test_round85.sh`。
 
+### round 86：只换 vtable 指针仍会 leave
+
+新增 `NK_SUPERVISOR_OBJECT_FIX=1`，在 `0x503ce696` 把
+`[this+0x14]` 写成 B7e vtable `0x80003040`。`0x00a04d08` 消失，
+但 `+0xc` 变成 zero-return stub，supervisor 仍在 30,988 条进入
+EUser TTrap/leave，`lr=0x5038cb70`（`r1=0xfffffff8`）。
+需要真实 class vtable/method，而不只是一个合法指针。framebuffer
+仍 0。验收：`tools/test_round86.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -884,6 +893,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 构造真实 CBase 替代 supervisor 的 stack params：round 85 已确认
-   `[this+0x14]` 是返回地址。下一步从 `r6/this` 的构造路径入手，
-   而不是换 slot/HLE。
+8. 找 supervisor 对象真实 class vtable/method：round 86 已证明
+   只换 vtable 指针会进入 leave。下一步从对象构造路径入手，而不是
+   造指针。

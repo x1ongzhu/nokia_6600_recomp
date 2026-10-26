@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 85)
+## Status (2026-10-26, round 86)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -94,7 +94,7 @@ wild Mem::Copy and advances it; round 81 shows the server entry needs a
 real StartThread frame; round 82 completes the server run/return cycle; round 83 shows the
 supervisor's `0x00a04d08` cannot be zero-return HLE'd; round 84 rules out the
 adjacent EUser slot targets; round 85 diagnoses the stack-params-as-CBase
-bug. What works:
+bug; round 86 shows a vtable pointer alone still leaves. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -605,6 +605,14 @@ bug. What works:
   real CBase, not changing the slot target. Framebuffer remains untouched.
   `tools/test_round85.sh` pins the diagnosis.
 
+- [x] **A vtable pointer alone still leaves** (round 86):
+  `NK_SUPERVISOR_OBJECT_FIX=1` writes the B7e vtable into `[this+0x14]`
+  at `0x503ce696`. The `0x00a04d08` dispatch disappears, but the
+  zero-return `+0xc` method makes the supervisor enter EUser TTrap/leave
+  at 30,988 instructions (`lr=0x5038cb70`, `r1=0xfffffff8`). The object
+  needs its real class vtable/method. Framebuffer remains untouched.
+  `tools/test_round86.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -766,7 +774,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round82.sh` | server returns and supervisor resumes; still hits `0x00a04d08` |
 | `tools/test_round83.sh` | HLE supervisor dispatch enters TTrap/leave at `0x5038cb70`; real object needed |
 | `tools/test_round84.sh` | adjacent EUser slot targets also fail to draw; supervisor object is the blocker |
-| `tools/test_round85.sh` | **current acceptance**: supervisor passes stack params as a CBase; `[this+0x14]` is a return address |
+| `tools/test_round85.sh` | supervisor passes stack params as a CBase; `[this+0x14]` is a return address |
+| `tools/test_round86.sh` | **current acceptance**: vtable pointer alone still enters TTrap/leave; real class vtable/method needed |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

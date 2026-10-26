@@ -254,6 +254,8 @@ typedef struct nk_interp {
      * either preserve PC or leave it at the address it wants to execute. */
     void      (*pc_hook)(nk_cpu_t* c, struct nk_interp* ip, uint32_t pc);
     uint32_t    pc_hook_addr;
+    void      (*pc_hook2)(nk_cpu_t* c, struct nk_interp* ip, uint32_t pc);
+    uint32_t    pc_hook2_addr;
 
     /* Bring-up watchdog: a tight loop that keeps executing the same few
      * addresses (typically a descriptor scan with a bogus argument) is treated

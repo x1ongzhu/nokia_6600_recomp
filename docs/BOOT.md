@@ -729,6 +729,14 @@ leave，framebuffer 仍 0。blocker 是 supervisor object/argument，不是
 block 当成 CBase，读 `[this+0x14+0xc]` 得到 `0x00a04d08`。下一 fix
 是构造/传入真实 CBase，而不是换 slot。验收 `tools/test_round85.sh`。
 
+### 2.39 round 86：只换 vtable 指针仍会 leave
+
+`NK_SUPERVISOR_OBJECT_FIX=1` 在 `0x503ce696` 把 `[this+0x14]` 写成
+B7e vtable `0x80003040`。`0x00a04d08` 消失，但 `+0xc` 变成
+zero-return stub，supervisor 在 30,988 条进入 EUser TTrap/leave
+（`lr=0x5038cb70`，`r1=0xfffffff8`）。需要真实 class
+vtable/method，而不只是一个合法指针。验收 `tools/test_round86.sh`。
+
 ---
 
 ## 3. EUser 导入映射

@@ -192,6 +192,8 @@
  *                           for epilogues whose frame sits above it (round 82)
  *   NK_SCHED_EXIT=1         when the fake thread returns to 0xdead0000,
  *                           retire it and resume the supervisor (round 82).
+ *   NK_SUPERVISOR_OBJECT_FIX=1  at 0x503ce696, write the B7e vtable into
+ *                           [this+0x14] before EUser reads it (round 86).
  *   NK_SCHED_AUTOCOMPLETE=1  after a switch, complete the blocked thread's
  *                           status and make it runnable again (round 79).
  *   NK_MEMCOPY_CLAMP=1      at Mem::Copy 0x5038cfe0, zero copies whose
@@ -681,6 +683,17 @@ static void memcopy_clamp_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
     if (len > 0x100000u || invalid) {
         c->r[2] = 0;
     }
+}
+
+/* Round 86: the EStart supervisor's 0x00a04d08 dispatch treats its stack
+ * params block as a CBase and reads [this+0x14] as a vtable.  Replace that
+ * field with the B7e vtable so the +0xc dispatch lands on a zero-return
+ * stub instead of a code address. */
+static void supervisor_object_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
+    (void)ip; (void)pc;
+    uint32_t thisp = c->r[4];
+    if (thisp >= 0x80500000u && thisp < 0x80600000u)
+        nk_w32(c, thisp + 0x14u, 0x80003040u);
 }
 
 static void timerq_pc_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
@@ -2548,6 +2561,11 @@ int main(int argc, char** argv) {
         ip.pc_hook_addr = 0x5038cfe0u;
         ip.pc_hook = memcopy_clamp_hook;
         printf("memcopy clamp: wild copies at 0x5038cfe0 are zeroed\n");
+    }
+    if (env_ulong("NK_SUPERVISOR_OBJECT_FIX", 0)) {
+        ip.pc_hook2_addr = 0x503ce696u;
+        ip.pc_hook2 = supervisor_object_hook;
+        printf("supervisor object fix: [this+0x14] -> B7e vtable at 0x503ce696\n");
     }
     if (env_ulong("NK_TIMERQ", 0) && !ip.pc_hook) {
         ip.pc_hook_addr = 0x5031ef40u;
