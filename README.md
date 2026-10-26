@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 91)
+## Status (2026-10-26, round 92)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -97,7 +97,8 @@ adjacent EUser slot targets; round 85 diagnoses the stack-params-as-CBase
 bug; round 86 shows a vtable pointer alone still leaves; round 87 shows a real
 vtable/method still fails; round 88 rules out the global CBase as `this`; round 89 traces the callback
 ABI mismatch; round 90 corrects that analysis from static evidence; round 91 maps the real
-ROM boot chain and the empty kernel object index. What works:
+ROM boot chain and the empty kernel object index; round 92 shows the kernel
+cannot start the next boot stage by itself. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -663,6 +664,19 @@ ROM boot chain and the empty kernel object index. What works:
   semantics) is the first task of the kernel-process-loader route.
   `tools/test_round91.sh` pins these facts offline.
 
+- [x] **The kernel cannot start the next boot stage** (round 92): a 460k
+  instruction kernel boot arms the HAL timer once (`reload=compare=0x632ea`,
+  `control=0x2`) and takes exactly one IRQ at ~430k, then idles by design;
+  the timer-queue `+0x1c` HAL tick getter is never called, so a monotonic
+  tick (`NK_HAL_TICK=1`) changes nothing. `Kern::Init2`'s tail
+  (`0x50330a88..0x50330aa8`) is a retry wait loop, so completing its status
+  from the harness only makes the supervisor re-block at `0x50330a98` about
+  11 times between 440,946 and 442,511 instructions. Only two DThreads ever
+  exist and no DProcess/EFile/EStart is created. The mask ROM's boot
+  hand-off (create and start the first user process) is what is missing, so
+  this route requires the harness to perform that hand-off.
+  `tools/test_round92.sh` pins the measurement.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -830,7 +844,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round88.sh` | global CBase as `this` also fails; real class instance/server response needed |
 | `tools/test_round89.sh` | callback receives stack params instead of a CBase (superseded by round 90) |
 | `tools/test_round90.sh` | EStart main `0x503db29c`, 0x24-byte params block, 12 EFSrv import slots; EFSrv is the blocker |
-| `tools/test_round91.sh` | **current acceptance**: ROM boot chain `ekern->EFile->EStart->Starter->SplashScreen`; kernel object index is empty |
+| `tools/test_round91.sh` | ROM boot chain `ekern->EFile->EStart->Starter->SplashScreen`; kernel object index is empty |
+| `tools/test_round92.sh` | **current acceptance**: kernel idles after one timer IRQ; no process is ever created; harness must do the boot hand-off |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

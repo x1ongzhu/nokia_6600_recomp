@@ -963,3 +963,12 @@ EStart 的 12 个 EFSrv 槽必须等 `EFile.exe` 起来；单独驱动 EStart
 为 0，**所有 handle 查找返回 0**，handle `0x32` 无法解析。
 第一项任务：按 `CObjectIx::AddL` 填充该 index。验收
 `tools/test_round91.sh`。
+
+### round 92：kernel 自己不会启动下一阶段
+
+460k 指令实测：timer 只起火 1 次（reload 0x632ea，~430k），kernel 进入
+设计内的 idle；`Kern::Init2` 尾部是重试等待循环，harness 完成 status
+只是在 `0x50330a98` 反复 ping-pong；全程只有 2 个 DThread，
+**没有创建任何 DProcess/EFile/EStart**。缺的是 mask ROM 的 boot
+hand-off，方案 3 必须由 harness 自己执行。验收
+`tools/test_round92.sh`。

@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 91）
+最后更新：2026-10-26（round 92）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -635,6 +635,26 @@
     条目**（按 `CObjectIx::AddL` 语义登记 DThread/DProcess），让
     handle `0x32` 解析到 supervisor DThread。
   - 验收 `tools/test_round91.sh`（离线、确定性）。
+
+- **kernel 自己不会启动下一阶段**（round 92，实测）：方案 3 的关键
+  结论。
+  - HAL timer 只被设定**一次**：`reload = compare = 0x632ea`、
+    `control = 0x2`，在 ~430k 指令处触发 **1 次** IRQ
+    （`timer: on, 1 expiries`）。下一次要到 ~836k，超出预算 ——
+    kernel 是**按设计进入 idle**，不是缺 tick。
+  - timerq 对象的 `+0x1c` HAL tick getter 在这个窗口内**从未被调用**，
+    所以新增的 `NK_HAL_TICK=1`（单调 tick）对现状没有影响。
+  - `Kern::Init2` 尾部（`0x50330a88..0x50330aa8`）是一个**重试等待
+    循环**：重新填 `[sp]`、调用 `0x50336da4` 的 wait、只有在 status 仍为
+    `KRequestPending` 时才 panic KERN 6。harness 去“完成”该 status
+    只会让 supervisor 在 `0x50330a98` **反复重新阻塞**（440,946 →
+    442,511 之间约 11 次 ping-pong），没有任何新工作。
+  - 全程只有 **2 个 DThread**（supervisor `0x80601078`、NULL
+    `0x80601830`），**从未创建任何 DProcess / EFile / EStart**。
+  - 结论：kernel 不会自己加载 EFile/EStart。缺的是 **mask ROM 的
+    boot hand-off**（创建并启动第一个用户进程）。所以方案 3 要求
+    **harness 自己执行这个 hand-off**，而不是等 kernel 去做。
+  - 验收 `tools/test_round92.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

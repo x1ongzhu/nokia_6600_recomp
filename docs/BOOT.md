@@ -1044,3 +1044,24 @@ Init3 的 thread-start 无法完成。
 
 方案 3 的第一项任务：按 `CObjectIx::AddL` 语义给该 index 填充真实
 DThread/DProcess 条目。验收 `tools/test_round91.sh`。
+
+### 2.45 round 92：kernel 自己不会启动下一阶段
+
+实测 460k 指令的 kernel boot：
+
+- HAL timer 只设定一次（`reload = compare = 0x632ea`、`control = 0x2`），
+  在 ~430k 触发 **1 次** IRQ；下一次要到 ~836k。kernel 是**按设计
+  idle**，不是缺 tick。
+- timerq 的 `+0x1c` HAL tick getter 在此窗口内**从未被调用**，新增的
+  `NK_HAL_TICK=1` 对现状无影响。
+- `Kern::Init2` 尾部（`0x50330a88..0x50330aa8`）是**重试等待循环**：
+  重填 `[sp]` → 调 `0x50336da4` wait → 仅当 status 仍为
+  `KRequestPending` 才 panic KERN 6。harness 完成该 status 只会让
+  supervisor 在 `0x50330a98` 反复重阻塞（440,946→442,511 约 11 次
+  ping-pong），没有新工作。
+- 全程只有 2 个 DThread（supervisor `0x80601078`、NULL `0x80601830`），
+  **从未创建 DProcess/EFile/EStart**。
+
+结论：kernel 不会自己加载 EFile/EStart；缺的是 **mask ROM 的 boot
+hand-off**。方案 3 要求 **harness 自己执行这个 hand-off**。
+验收 `tools/test_round92.sh`。

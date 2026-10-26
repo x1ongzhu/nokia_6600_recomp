@@ -633,6 +633,23 @@ static void install_extension_stub(nk_cpu_t* c, nk_interp_t* ip) {
 #define TIMERQ_CTOR       0x5032aff8u
 #define TIMERQ_SENTINEL   0xdead0100u
 
+/* Round 92: the timer-queue object's +0x1c slot is the HAL tick/time
+ * getter.  A zero-return stub makes the kernel's timing math produce no
+ * delay, so no timer is ever armed and the idle loop spins forever with
+ * "timer: off, 0 expiries".  NK_HAL_TICK=1 replaces the stub with a hook
+ * that returns a monotonic tick derived from executed instructions. */
+static unsigned long g_tick_calls;
+
+static void hal_tick_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
+    (void)pc;
+    uint32_t v = (uint32_t)env_ulong("NK_HAL_TICK_SHIFT", 10);
+    c->r[0] = (uint32_t)(ip->st.insns >> (v ? v : 1));
+    uint32_t lr = c->r[14];
+    c->r[15] = lr & ~1u;
+    if (lr & 1u) c->cpsr |= NK_CPSR_T; else c->cpsr &= ~NK_CPSR_T;
+    g_tick_calls++;
+}
+
 static int g_timerq_state;
 
 /* Call one guest function with a private interpreter, preserving the CPU
@@ -780,6 +797,13 @@ static void timerq_pc_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
     nk_w32(c, 0x80001c34u, obj);
     printf("timerq: [0x80001c34] = %#010x -> vtable+0xc = %#010x\n",
            obj, nk_r32(c, nk_r32(c, obj) + 0x0c));
+    if (env_ulong("NK_HAL_TICK", 0)) {
+        /* Intercept the +0x1c getter before its zero-return body runs. */
+        ip->pc_hook2_addr = 0xffff0a00u;
+        ip->pc_hook2 = hal_tick_hook;
+        printf("timerq: HAL tick hook at %#010x (shift %lu)\n",
+               0xffff0a00u, (unsigned long)env_ulong("NK_HAL_TICK_SHIFT", 10));
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2824,7 +2848,10 @@ int main(int argc, char** argv) {
                 uint32_t addr = (uint32_t)strtoul(p, &end, 0);
                 if (!end || *end != ':') break;
                 uint32_t len = (uint32_t)strtoul(end + 1, &end, 0);
-                printf("dump %#010x..%#010x (%u bytes)\n", addr, addr + len, len);
+                if (g_tick_calls)
+        printf("HAL tick getter calls: %lu (last value %lu)\n",
+               g_tick_calls, (unsigned long)(ip.st.insns >> 10));
+    printf("dump %#010x..%#010x (%u bytes)\n", addr, addr + len, len);
                 for (uint32_t i = 0; i < len; i++)
                     fputc(nk_r8(&cpu, addr + i), f);
                 if (!end || *end != ',') break;
