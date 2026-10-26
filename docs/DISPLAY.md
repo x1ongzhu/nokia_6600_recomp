@@ -311,6 +311,19 @@ fixup**，所以 veneer literal（`0x4a7846c0`、`0x40b846c0`）只是
 placeholder，不是解析后的 IAT slot。这是 window server 起不来的
 架构原因。
 
+round 56 进一步发现：这些坏 literal 看起来是 **link-time address**。
+用 `0x4a780000` 作为 link base，把 `0x4a7846c0` 按每个 image 的
+`code - 0x4a780000` 平移，会落在多个 image 的合法 Thumb prologue 上：
+
+```
+uid 0x10003c77 -> 0x505bf774  b510
+uid 0x10f9a40  -> 0x50815a74  b570
+uid 0x1000a859 -> 0x50a6d6f4  b5f0
+```
+
+`0x40b846c0` 不匹配这个 base，说明每个 DLL 可能有自己的 link base。
+这进一步支持“缺 ROM-loader relocation/import fixup”的结论。
+
 下一步是给 flat image 的 ROMFS app 加 literal-pool/relocation 处理，
 或 HLE window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 

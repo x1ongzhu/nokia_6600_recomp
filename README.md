@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 55)
+## Status (2026-10-26, round 56)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -323,6 +323,14 @@ stable executive loop. What works:
   (`0x4a7846c0`, `0x40b846c0`) are placeholders, not resolved IAT slots.
   This is the architectural reason the window server cannot start.
 
+- [x] **Link-time literal relocation lead** (round 56): EwSrv's veneer
+  literal `0x4a7846c0` is not a resolved IAT slot, but applying the
+  `0x4a780000` link-base delta to it lands on valid Thumb prologues in
+  several images (`uid 0x10003c77 -> 0x505bf774` `b510`, `uid 0x10f9a40 ->
+  0x50815a74` `b570`, ...). That points at a missing ROM-loader
+  relocation/import fixup rather than one bad import. The `0x40b846c0`
+  literal does not match this base, so each DLL may have its own link base.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -456,7 +464,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round52.sh` | EwSrv IAT is resolved but the veneer literal at `0x506c1dba` is padding (`0x40b846c0`) |
 | `tools/test_round53.sh` | real LCD base `0x59200000`, framebuffer `0x59800000` |
 | `tools/test_round54.sh` | the normal kernel boot also writes no LCD pixels |
-| `tools/test_round55.sh` | **current acceptance**: EwSrv is a `TRomImageHeader` with a 7-entry DLL ref table; the flat image never applies the ROM loader's import fixups |
+| `tools/test_round55.sh` | EwSrv is a `TRomImageHeader` with a 7-entry DLL ref table |
+| `tools/test_round56.sh` | **current acceptance**: app literals behave like link-time addresses; a `0x4a780000` link base lands on valid Thumb prologues |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

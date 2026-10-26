@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 55）
+最后更新：2026-10-26（round 56）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -280,6 +280,12 @@
   imported-DLL entry 地址。flat image 没有应用 ROM loader 的 import
   fixup，veneer literal 是 placeholder。这是 window server 起不来的
   架构原因。
+
+- **link-time literal relocation lead**（round 56）：坏 literal 看起来是
+  link-time address。用 `0x4a780000` 作 link base，按每个 image 的
+  `code - 0x4a780000` 平移 `0x4a7846c0`，会落在多个 image 的合法
+  Thumb prologue 上（如 `uid 0x10003c77 -> 0x505bf774`）。`0x40b846c0`
+  不匹配这个 base，说明每个 DLL 可能有自己的 link base。
 
 ### 未完成
 
