@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 49）
+最后更新：2026-10-26（round 50）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -242,6 +242,13 @@
   dump 没有 MBM signature，app 还没加载 splash。EwSrv null call 来自
   veneer `0x506c15ee` 的坏字面量 `0x4a7846c0`，是 relocation/veneer
   问题，不是未绑定 import。
+
+- **EwSrv 第一个 missing-DLL call**（round 50）：veneer `0x506c15ee`
+  从缺失 DLL 载入 stale pointer `0x4a7846c0`。`NK_FIX_4A78=1` 在
+  `0x4a780000` 映射完整 64 KiB page（page size 是 64 KiB），并把
+  `0x4a7846c0` 指向 high-vector 的零返回 stub。EwSrv 执行
+  `0xffff0d00 -> 0xffff0d04 -> 0x506c0b14`，越过第一个 call，随后遇到
+  下一个 null pointer。
 
 ### 未完成
 

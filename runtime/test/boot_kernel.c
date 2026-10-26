@@ -2371,6 +2371,21 @@ int main(int argc, char** argv) {
         }
         printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
     }
+    if (env_ulong("NK_FIX_4A78", 0)) {
+        /* EwSrv's veneer at 0x506c15ee loads a stale absolute function
+         * pointer 0x4a7846c0 from its missing DLL.  Map that address and
+         * point it at a zero-return stub so the call is observable instead
+         * of branching to 0. */
+        int m = nk_alloc_ram(&cpu, 0x4a780000u, 0x10000u);
+        printf("EwSrv DLL stub: map=%d\n", m);
+        if (m == 0) {
+            nk_w32(&cpu, 0xffff0d00u, 0xe3a00000u);  /* mov r0,#0 */
+            nk_w32(&cpu, 0xffff0d04u, 0xe12fff1eu);  /* bx lr     */
+            nk_code_range_add(&ip, 0xffff0d00u, 0xffff0d08u);
+            nk_w32(&cpu, 0x4a7846c0u, 0xffff0d00u);
+            printf("EwSrv DLL stub: 0x4a7846c0 -> 0xffff0d00\n");
+        }
+    }
     if (env_ulong("NK_EWSRV_SNAP", 0)) {
         /* The ROM build's EwSrv export slot 0x506ce7d0 holds 0x506cbf1d,
          * two bytes before the real Thumb prologue at 0x506cbf1e.  Snap it

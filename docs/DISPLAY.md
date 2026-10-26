@@ -231,6 +231,16 @@ round 49 又确认了两点：
   `0x4a7846c0`，它不是合法 IAT slot。这是 **relocation/veneer** 问题，
   不是简单未绑定 import。
 
+round 50 用 `NK_FIX_4A78=1` 把 `0x4a7846c0` 指向 high-vector page 的
+零返回 stub，EwSrv 于是执行：
+
+```
+506c15ee -> 0xffff0d00 -> 0xffff0d04 -> 506c0b14 ...
+```
+
+它越过了第一个 missing-DLL call，但很快遇到下一个 null pointer。
+这是 window-server bring-up 的下一步，而不是完整启动。
+
 下一步是补齐 EwSrv/FbsCli 的 relocation/surface 初始化，或 HLE
 window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 

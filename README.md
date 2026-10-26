@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 49)
+## Status (2026-10-26, round 50)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -275,6 +275,14 @@ stable executive loop. What works:
   loading the literal `0x4a7846c0`, which is not a valid IAT slot — a
   relocation/veneer problem, not a simple unbound import.
 
+- [x] **EwSrv first missing-DLL call** (round 50): EwSrv's veneer
+  `0x506c15ee` loads the stale pointer `0x4a7846c0` from a missing DLL.
+  `NK_FIX_4A78=1` maps a full 64 KiB page at `0x4a780000` (the page size is
+  64 KiB) and points `0x4a7846c0` at a zero-return stub in the high-vector
+  page. EwSrv then executes `0xffff0d00 -> 0xffff0d04 -> 0x506c0b14` and
+  continues to the next unresolved pointer. This is a concrete step past the
+  first missing-DLL call, not a full window-server bring-up.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -402,7 +410,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round46.sh` | splash-screen route; SplashScreen reaches EwSrv and stops on the bad pointer `0x506cbf1c` |
 | `tools/test_round47.sh` | EwSrv export snap; SplashScreen runs the full 2M budget in the wait service |
 | `tools/test_round48.sh` | wait-completion exposes a wild descriptor copy; direct EwSrv null-calls at `0x506c0b15` |
-| `tools/test_round49.sh` | **current acceptance**: splash MBM header, no MBM load in RAM, EwSrv bad veneer literal `0x4a7846c0` |
+| `tools/test_round49.sh` | splash MBM header, no MBM load in RAM, EwSrv bad veneer literal `0x4a7846c0` |
+| `tools/test_round50.sh` | **current acceptance**: EwSrv passes its first missing-DLL call via a mapped zero-return stub |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
