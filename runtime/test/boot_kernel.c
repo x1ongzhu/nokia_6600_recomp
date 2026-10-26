@@ -174,6 +174,10 @@
  *   NK_CPSR=0x...           override the initial CPSR.  The mask-ROM IRQ
  *                           hand-off needs I=0 (0x40000053 for SVC/ARM);
  *                           the default 0x400000d3 keeps IRQs masked.
+ *   NK_SCHED=1              model WaitForAnyRequest with a NULL-thread switch
+ *                           (round 33).  NK_SCHED_LOG=n limits the scheduler
+ *                           log; NK_SCHED_DEFER=1 preempts only after the
+ *                           start hand-off returns at 0x5033130c (round 35).
  *   NK_E32_SECTIONS=1       with --e32: place data/exports/dllref at their
  *                           runtime addresses (finds the packed export run)
  *   NK_E32_HDR=0x64         serialized EKA1 image header size (code offset)
@@ -653,6 +657,9 @@ static int      b7e_live;      /* keep kernel-created +0x18/+0x5c/+0x64 */
 
 static sched_thread sched_slot_tab[SCHED_SLOTS];
 static int      sched_on;
+static int      sched_defer;    /* let the start hand-off return before preempt */
+static uint32_t sched_arm_pc;
+static unsigned long sched_arm_insns;
 static int      sched_log = 8;
 static unsigned sched_switches;
 static unsigned sched_blocks;
@@ -725,6 +732,21 @@ static int sched_yield_hook(nk_cpu_t* c, nk_interp_t* ip) {
         }
     }
     if (!sched_need_yield) return 0;
+    if (sched_defer) {
+        /* Round 35: the start hand-off runs 0x50318398 -> Open semaphore ->
+         * back to 0x5033130c.  Preempting at 0x503183bc freezes it before the
+         * supervisor's next request can be consumed, so the two threads
+         * deadlock.  Let it reach the return site (or time out after 2000
+         * instructions) before switching. */
+        if (!sched_arm_pc) {
+            sched_arm_pc = 0x5033130cu;
+            sched_arm_insns = ip->st.insns;
+        }
+        if (c->r[15] != sched_arm_pc &&
+            ip->st.insns - sched_arm_insns < 2000)
+            return 0;
+        sched_arm_pc = 0;
+    }
     sched_need_yield = 0;
     if (!sched_on || !sched_supervisor) return 0;
     uint32_t t = nk_r32(c, SCHED_CURRENT);
@@ -1044,6 +1066,17 @@ static uint32_t b7e_trap_slot(uint32_t t) {
     return 0;
 }
 
+/* [0x80000408] is the kernel's scheduler alias for the thread being
+ * published/closed.  The direct E32-entry boot never runs the mask-ROM code
+ * that seeds it, and the close path restores it to 0 when there was no
+ * previous thread.  Keep it pointing at a live DThread so SysGetProcess/
+ * thread-create bookkeeping can call its vtable. */
+static void b7e_alias_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
+    if (!b7e_enabled || value) return;
+    if (b7e_current_thread)
+        boot_time_raw_w32(c, addr, b7e_current_thread);
+}
+
 static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     (void)addr;
     if (!b7e_enabled) return;
@@ -1086,6 +1119,14 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
             nk_w32(c, t + 0x64, B7E_OBJIDX);
         else if (b7e_installs <= 8)
             printf("B7e: thread %#010x keeps object index %#010x\n", t, h);
+        /* The kernel's thread-create/teardown path uses [0x80000408] as the
+         * thread it is publishing; the direct E32-entry boot never runs the
+         * mask-ROM code that seeds it.  Keep the two scheduler aliases in
+         * sync with the current thread/process. */
+        if (b7e_live) {
+            nk_w32(c, 0x80000408u, t);
+            nk_w32(c, 0x80000404u, p);
+        }
     }
     if (b7e_trapclean) {
         uint32_t base = b7e_trap_slot(t);
@@ -1966,6 +2007,8 @@ int main(int argc, char** argv) {
         b7e_install(&cpu, &ip, base, size);
         nk_w32(&cpu, 0x800017d4u, B7E_THREAD);
         nk_dbg_watch_write(0x800017d4u, b7e_thread_hook);
+        if (b7e_live)
+            nk_dbg_watch_write4(0x80000408u, b7e_alias_hook);
         printf("B7e: watching [%#010x] for current-thread updates\n",
                0x800017d4u);
     }
@@ -2239,6 +2282,7 @@ int main(int argc, char** argv) {
      * generic SWI dispatch, so NK_SWI_COMPLETE=0x4d must not be set. */
     if (env_ulong("NK_SCHED", 0)) {
         sched_on = 1;
+        sched_defer = (int)env_ulong("NK_SCHED_DEFER", 0);
         ip.swi_hook = sched_swi_hook;
         ip.yield_hook = sched_yield_hook;
         /* The inline NK_SWI_COMPLETE model stays for every other call site;
@@ -2283,6 +2327,17 @@ int main(int argc, char** argv) {
         printf("shadow calls (%d):", ip.calls_n);
         for (int i = 0; i < ip.calls_n; i++)
             printf(" %08x", ip.calls[i].lr);
+        printf("\n");
+    }
+    if (sched_on) {
+        printf("sched slots: pending-slot=%#010x", nk_r32(&cpu, SCHED_PENDING));
+        for (int i = 0; i < SCHED_SLOTS; i++) {
+            sched_thread* s = &sched_slot_tab[i];
+            if (!s->thread) continue;
+            printf(" [%#010x state=%d status=%#010x pc=%#010x val=%#010x]",
+                   s->thread, s->state, s->status, s->r[15],
+                   s->status ? nk_r32(&cpu, s->status & ~3u) : 0);
+        }
         printf("\n");
     }
 

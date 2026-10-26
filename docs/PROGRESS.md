@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 34）
+最后更新：2026-10-26（round 35）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -122,12 +122,30 @@
   运行 **5,999,982 条、14 次 timer IRQ、0 undefined、0 unbound IAT、
   0 recoveries**，停在 executive timing 循环 `0x5032211c`。
 
+- **hand-off 完成与死锁定位**（round 35）：6M 的“稳定”其实是
+  **死锁**。scheduler 在 `0x503183bc` 抢占 NULL 线程，位置在
+  `Kern::StartThread` hand-off **内部**，因此 supervisor 的下一个
+  `TRequestStatus` 永远没人消费。`NK_SCHED_DEFER=1` 把抢占推迟到
+  hand-off 返回到 `0x5033130c`；supervisor 在两次 wait 之间从
+  441,434 推进到 460,289，再到 463,666/464,336。最终状态仍死锁：
+  - `pending-slot=0x802fff8c`
+  - supervisor `state=3 status=0x802fff8c val=0x80000001`
+  - NULL `state=2 pc=0x5033130c`
+  - 只有两个 `DThread`（`0x80601078`、`0x80601830`）
+  - timer queue `[0x80001c34]` 为空
+  说明 CPU/显示路径没问题；缺的是 handle `0x32` 的 thread-start
+  completion 或 DFC 线程。
+
 ### 未完成
 
-- **DFC / WSERV 线程启动**：boot 已进入稳定循环，但 display/UI server
-  线程还没有被创建和调度。当前 run queue 只真正跑 supervisor 与
-  NULL 两个线程；`Kern::StartThread` 余下的启动请求需要完整
-  ready queue 与每线程状态。
+- **handle `0x32` / DFC 线程**：supervisor 的 `RThread::Resume(0x32)`
+  在进程 `CObjectIx`（`0x80601210`）里查不到对象（`At` 返回 0），
+  于是落到“启动 current thread 并等待 request”的回退路径；NULL 线程
+  只跑 Init3 的 timing loop，不再做 hand-off。需要按真实
+  `CObjectIx::AddL` 语义登记线程 handle，或创建 mask-ROM 的 DFC
+  线程，让 supervisor 的最后一次 wait 有真正的 completer。
+- **DFC / WSERV 线程启动**：display/UI server 线程还没有被创建和
+  调度。当前 run queue 只真正跑 supervisor 与 NULL 两个线程。
 - **完整 ready queue 与优先级**：当前在 Init2 的 wait（LR
   `0x50330a98`）和线程启动交接点切换；尚未实现真正的优先级队列、
   抢占时间片与 DFC 线程。
@@ -422,22 +440,28 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 
 ### 下一步（建议顺序）
 
-1. **启动 DFC / WSERV 线程**：boot 已停在 `0x5032211c` 的 executive
-   timing 循环。下一步从 `[0x800003b8]`/`[0x800003bc]` 等对象表取出
-   DFC 与 WSERV 线程对象，给 `NK_SCHED` 一个真正的 ready queue，让
-   NULL 线程继续 `Kern::Init3` 并创建 UI server。
-2. **实现真正的 ready queue/优先级**：当前只在 Init2 wait 与线程启动
+1. **解决 handle `0x32`**：先确认 `RThread::Resume(0x32)` 的 handle
+   语义（低 15 位 index、bits 16+ instance），按真实 `CObjectIx::AddL`
+   把 supervisor/NULL 线程登记到进程 index `0x80601210`；如果 `0x32`
+   是 mask-ROM 的 DFC 线程，则需要用 kernel 自己的 `RThread::Create`
+   创建它，而不是伪造索引。目标是让 supervisor 的最后一次 wait 由
+   真正的 thread-start hand-off 完成。
+2. **启动 DFC / WSERV 线程**：boot 停在 `0x5032211c` 的 executive
+   timing 循环。handle 修好后，从 `[0x800003b8]`/`[0x800003bc]` 等
+   对象表取出 DFC 与 WSERV 线程对象，给 `NK_SCHED` 一个真正的
+   ready queue，让 NULL 线程继续 `Kern::Init3` 并创建 UI server。
+3. **实现真正的 ready queue/优先级**：当前只在 Init2 wait 与线程启动
    交接点切换；下一步把 `DThread+0x24` 状态、`+0x20` suspend 位、
    优先级 `+0x1c` 纳入 run queue，并允许 NULL 线程被抢占后继续其
    `Kern::Init3`/DFC 创建。
-3. **`svc #0x4d` 的通用完成语义**：给线程请求信号量实现
+4. **`svc #0x4d` 的通用完成语义**：给线程请求信号量实现
    `RequestComplete` 对应的 signal，替换早期 EUser wait 循环仍使用的
    `NK_SWI_COMPLETE=0x4d` 内联 HLE。
-4. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
+5. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
    IRQ 2 → `0x503113d8` → DFC 路径。
-5. **Display controller HLE**：`176x208` 16bpp framebuffer、LCD 控制
+6. **Display controller HLE**：`176x208` 16bpp framebuffer、LCD 控制
    寄存器与 MBM/Sprite 读回；接上窗口后即可验证第一帧。
-6. 之后进入 WSERV / S60 app 启动与待机 UI。
+7. 之后进入 WSERV / S60 app 启动与待机 UI。
 
 ---
 
@@ -454,7 +478,9 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
   kernel 实际分配的堆；旧值 `0x80400000` 会把真实 `DThread` 当成
   transient，并把 boot-stack 上的 SThread 重新发布（round-31 control）。
 - round 32 的 **KERN 6**、round 33 的 `0x503360d4` null call 都已在
-  round 34 关闭；当前 stop 是 6M 预算边界（`0x5032211c`），不是 CPU fault。
+  round 34 关闭；round 35 证明 6M 状态是 **Init2 死锁**（不是 CPU
+  fault），`NK_SCHED_DEFER=1` 让 hand-off 先返回并把 supervisor 推进到
+  464,336，但最后一次 wait 仍 pending。
 - `NK_B7E_LIVE=1` 才会保留 live 的 `DThread+0x18/+0x5c/+0x64`；不设该开关时
   B7e 仍按历史模型覆盖它们，round-33 control 因此保持不变。
 - `NK_SCHED=1` 的 NULL 线程内核栈（0x80540000）和启动 hand-off status

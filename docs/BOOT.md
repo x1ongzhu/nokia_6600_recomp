@@ -348,6 +348,46 @@ B7e: thread 0x80601830 keeps object index 0x806019c0
 结果：**5,999,982 条、14 IRQ、0 undefined/unbound/recovery**，
 `sp=0x802fffe0`，停在 `0x5032211c` 的预算边界。不是 CPU fault。
 
+### 2.11 round 35：hand-off 完成与 Init3 死锁
+
+round 34 的 6M 运行不是 idle，而是死锁。scheduler 在
+`0x503183bc` 抢占 NULL 线程——这个位置在 `Kern::StartThread`
+hand-off 内部，`0x503183b4/b8` 已经消费了**上一个** request，但
+新的 supervisor request 还没被消费，于是：
+
+```
+pending-slot [0x80001784] = 0x802fff8c
+supervisor 0x80601078 state=3 status=0x802fff8c val=0x80000001
+NULL       0x80601830 state=2 pc=0x5033130c
+```
+
+`NK_SCHED_DEFER=1` 把抢占推迟到 hand-off 返回点 `0x5033130c`
+（或 2000 条超时）。于是：
+
+```
+sched: switch #3 -> thread 0x80601830 pc 0x5033130c
+sched: supervisor status 0x802fff8c completed; runnable again
+sched: thread 0x80601078 blocks ... insns=460289
+sched: thread 0x80601078 blocks ... insns=463666
+sched: thread 0x80601078 blocks ... insns=464336
+```
+
+supervisor 在两次 wait 之间推进了约 20k 条（441,434 -> 460,289），
+但最后一次 wait 仍是 pending。NULL 线程只在 `0x5031f1xx` 的
+`Kern::Init3` timing loop 里计算 timeout，不再做 hand-off。堆里只有
+两个 `DThread`（`0x80601078`、`0x80601830`），timer queue
+`[0x80001c34]` 的 `+0x10/+0x14` 指向自己（空）。
+
+结论：下一个阻塞不是 CPU/显示，而是 **handle `0x32` 的
+thread-start completion / DFC 线程**。`RThread::Resume(0x32)` 经
+`0x50334fc0 -> 0x50318410 -> CObjectIx::At(0x80601210, 0x32)` 得到
+0（进程 index 没有 entry），于是走 `0x50334fdc` 的 fallback：
+设一个 status、等 current thread 的 hand-off。没有第三个线程来
+完成它，supervisor 就死锁。
+
+结果：**5,999,983 条、14 IRQ、0 undefined/unbound/recovery**，
+stop 在 `0x50312720` 的预算边界（defer 模式）。不是 fault。
+
 ---
 
 ## 3. EUser 导入映射
@@ -486,6 +526,7 @@ round 30 control（NK_TIMER=1, NK_CPSR=0x400000d3, I=1）:
 | `NK_SCHED_LR=0x...` | 触发切换的 wait 返回地址（默认 `0x50330a98`） |
 | `NK_SCHED_ENTRY=0x...` | NULL 线程入口（默认 `0x5031f144`） |
 | `NK_SCHED_STACK=0x...` | harness NULL 线程栈基址（默认 `0x80540000`） |
+| `NK_SCHED_DEFER=1` | 把抢占推迟到 hand-off 返回点 `0x5033130c`（或 2000 条），round 35 |
 | `NK_TRACE_AFTER=n` | 只从第 n 条指令后开始 trace（与 `NK_TRACE_FROM` 组合定位末期路径） |
 | `NK_CALLS=1` | 停止时打印解释器 shadow call stack（LR 序列） |
 | `NK_ENTRY` / `NK_STOP_PC` | 覆盖入口/停止地址 |
@@ -497,8 +538,18 @@ round 30 control（NK_TIMER=1, NK_CPSR=0x400000d3, I=1）:
 Round 34 从 round-33 的 `0x503360d4` 继续。保留 live 对象后，CObjectIx
 关闭路径调用真实 vtable；status 完成唤醒 supervisor；Init3 的 HAL
 object 3 / `Request(0xd)` 由显式 stub 完成；异常栈不再覆盖 SVC 栈。
-boot 现在稳定运行到 **5,999,982 条、14 IRQ**，停在 `0x5032211c` 的
-executive timing 循环（不是 fault）：
+Round 35 进一步把 6M 状态从“稳定 idle”纠正为“deadlock”，并用
+`NK_SCHED_DEFER=1` 让 hand-off 先返回，supervisor 推进到 464,336。
+现在 boot 在 6M 预算处停在 `0x50312720`，不是 fault：
+
+```
+pending-slot 0x802fff8c
+supervisor state=3 status=0x802fff8c val=0x80000001
+NULL       state=2 pc=0x5033130c
+```
+
+这说明还缺一个真正的 thread-start completer / DFC 线程；不是 CPU
+或显示路径的问题。旧 frontier 的 timing loop：
 
 ```
 0x503343cc  push {r4,lr}
@@ -518,17 +569,22 @@ stop 时：`sp=0x802fffe0`、`cpsr=0x80000053`、`irqs=14`、
 
 下一步：
 
-1. **DFC / WSERV 线程启动**：从 `[0x800003b8]`/`[0x800003bc]` 等
+1. **handle `0x32` / thread-start completer**：`RThread::Resume(0x32)`
+   在进程 index `0x80601210` 的 `At(0x32)` 返回 0；要么按真实
+   `CObjectIx::AddL` 语义登记线程，要么用 kernel 自己的
+   `RThread::Create` 创建 mask-ROM 的 DFC 线程，让 supervisor 的最后
+   一次 wait 有真正的 completer。
+2. **DFC / WSERV 线程启动**：从 `[0x800003b8]`/`[0x800003bc]` 等
    对象表取出 DFC 与 WSERV 线程对象，给调度器真正的 ready queue，
    让 NULL 线程继续 `Kern::Init3` 并创建 UI server。
-2. **真正的 ready queue/优先级**：把 `DThread+0x24` 状态、`+0x20`
+3. **真正的 ready queue/优先级**：把 `DThread+0x24` 状态、`+0x20`
    suspend 位、`+0x1c` 优先级纳入队列，允许线程被抢占后继续。
-3. **`svc #0x4d` 的通用完成路径**：为请求信号量实现
+4. **`svc #0x4d` 的通用完成路径**：为请求信号量实现
    `RequestComplete` 的 signal，替换早期 wait 循环的
    `NK_SWI_COMPLETE=0x4d` 内联 HLE。
-4. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
+5. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
    IRQ 2 → `0x503113d8` → DFC。
-5. **Display controller HLE**：176×208 16bpp framebuffer、LCD 寄存器
+6. **Display controller HLE**：176×208 16bpp framebuffer、LCD 寄存器
    与 MBM/Sprite 读回，接窗口后验证第一帧。
 
 kernel IRQ entry 的关键序列（round 30 已实际执行）：

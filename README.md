@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 34)
+## Status (2026-10-26, round 35)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -144,13 +144,27 @@ stable executive loop. What works:
   frame, and the boot advances to **439,534 instructions** (1 IRQ, 0
   undefined/unbound/recoveries).
 
+- [x] **Hand-off completion + deadlock isolation** (round 35): the round-34
+  6M run was not idle, it was a deadlock.  The scheduler preempted the NULL
+  thread at `0x503183bc`, *inside* the start hand-off, so the supervisor's
+  next request was never consumed.  `NK_SCHED_DEFER=1` holds the preemption
+  until the hand-off returns at `0x5033130c`; the supervisor then runs ~20k
+  instructions further (460,289 vs 441,434) before its next wait.  The
+  remaining blocker is precise: the final wait at 464,336 is still
+  `KRequestPending`, the NULL thread is in the `Kern::Init3` timing loop, and
+  only two `DThread` objects exist.  The missing piece is the handle-`0x32`
+  thread-start completion / DFC thread, not a CPU fault.
+
 Not implemented yet:
 
-- [ ] **DFC / WSERV thread startup** — the boot now reaches a stable
-  6M-instruction loop in `Kern::Init3`, but the display/UI server thread has
-  not been created or scheduled. Round 34 only models the first two threads
-  (supervisor + NULL); `Kern::StartThread`'s remaining start requests need the
-  real ready queue and per-thread state.
+- [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
+  process `CObjectIx` (`0x80601210`) and gets 0, so it falls back to waiting
+  for the current thread's start hand-off; no third thread ever completes it.
+  The next step is a real `CObjectIx::AddL` registration or a kernel-created
+  DFC thread, not a fake index.
+- [ ] **DFC / WSERV thread startup** — the display/UI server thread has not
+  been created or scheduled. Round 34/35 only model the first two threads
+  (supervisor + NULL).
 - [ ] Real ready-queue priorities, DFC thread, timer unit 1 / IRQ 2.
 - [ ] UI/display, keypad, audio, file server, app launching (P3).
 - [ ] Mask-ROM PeaK record codec (the hand-off is an explicit stand-in).
@@ -220,6 +234,13 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
 # ... CObjectIx close runs vtable 0x503b36f8; supervisor status 0x802fff8c
 # ... completion wakes it; HAL object 3 Request(0xd) sets [0x800004cc]
 # ... 5,999,982 insns, 14 timer IRQs, 0 undefined/unbound/recoveries
+
+# 10. round 35: let the hand-off return before preempting and inspect the
+#     remaining deadlock
+#    NK_B7E_LIVE=1 NK_SCHED=1 NK_SCHED_DEFER=1 NK_SCHED_LOG=24 ... (same)
+# ... switch #3 resumes at 0x5033130c (not frozen at 0x503183bc); supervisor
+# ... runs to 460,289/464,336 before its next wait; 5,999,983 insns, 14 IRQs
+# ... sched slots: supervisor state=3 status 0x80000001, NULL state=2
 ```
 
 Without `NK_SYSTEM_TIME=1` the same boot stops at 133,950 instructions with
@@ -246,7 +267,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round31.sh` | historical control: timer-queue ctor, HAL vtable override, round-31 thread model |
 | `tools/test_round32.sh` | live heap DThread, TTrap/UnTrap, first blocking executive call (historical control) |
 | `tools/test_round33.sh` | WaitForAnyRequest block, first switch to the NULL thread, start hand-off, KERN 6 closed (historical control) |
-| `tools/test_round34.sh` | **current acceptance**: live DThread/CObjectIx graph, status-completion wake, Init3 HAL gate, banked stacks, 6M-instruction run |
+| `tools/test_round34.sh` | live DThread/CObjectIx graph, status-completion wake, Init3 HAL gate, banked stacks, 6M-instruction run (historical control) |
+| `tools/test_round35.sh` | **current acceptance**: hand-off returns before preemption, supervisor runs to 464k, Init3 deadlock pinned to the handle-`0x32`/DFC path |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -406,8 +428,24 @@ stable **5,999,982-instruction run with 14 timer IRQs, 0 undefined
 instructions, 0 unbound IAT and 0 recoveries**, ending in the executive timing
 loop at `0x5032211c`.
 
-The next frontier is the real ready queue and the DFC/WSERV thread startup;
-display-controller HLE and the first frame follow after the UI server runs.
+Round 35 showed that this 6M run was a deadlock, not idle.  The scheduler
+preempted the NULL thread at `0x503183bc`, inside the start hand-off, so the
+supervisor's next `TRequestStatus` was never consumed.  With
+`NK_SCHED_DEFER=1` the preemption waits until the hand-off returns at
+`0x5033130c`; the supervisor runs to `460,289`/`463,666`/`464,336` between
+waits, but its final status is still `KRequestPending` and the NULL thread
+falls into the `Kern::Init3` timing loop.  The sched-slot dump at 6M is:
+
+```
+pending-slot=0x802fff8c
+[0x80601078 state=3 status=0x802fff8c val=0x80000001]
+[0x80601830 state=2 pc=0x5033130c]
+```
+
+Only two `DThread` objects exist (`0x80601078`, `0x80601830`) and the timer
+queue `[0x80001c34]` is empty.  The next blocker is therefore the handle-`0x32`
+thread-start completion / DFC thread, not the CPU or the display path.
+Display-controller HLE and the first frame follow after the UI/DFC server runs.
 
 See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for the roadmap.
 
