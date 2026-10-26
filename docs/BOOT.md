@@ -571,6 +571,14 @@ uid3 `0x100039e8`（export_dir `0x503b6b38`，ordinal 2）；实际函数表在
 `0x503b6b30`（两项都是 `0x503b53f5`），`0x503b6b38` 为 0，需要
 export_dir/import fixup。
 
+### 2.22 round 69：EStart 首个 import 绑定
+
+`config/imports-estart-6600.txt` 把 EStart slot `0x503b6b38` 重绑到
+`0x503b53f5`。EStart 不再 119 条 null-call，而是跑满 **200,000 条**，
+停在 kernel SVC/pre-handler 路径 `0x50314f68`；`mmio: 0 reads,
+0 writes`，framebuffer 仍 0 像素。下一步是它等待的线程/信号量事件。
+验收 `tools/test_round69.sh`。
+
 ---
 
 ## 3. EUser 导入映射

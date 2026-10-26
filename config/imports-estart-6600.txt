@@ -1,0 +1,12 @@
+# imports-estart-6600.txt - EStart's first unresolved import (round 69)
+#
+# EStart.exe (entry 0x503da4a5) null-calls after 119 instructions through the
+# stub at 0x503db628 -> slot 0x503b6b38.  The slot belongs to uid3
+# 0x100039e8; its real export table is at 0x503b6b30 (two entries, both
+# 0x503b53f5), while the header's export_dir 0x503b6b38/ordinal 2 is zero.
+#
+# Bind the slot to the image's actual export 0x503b53f5 so EStart can run
+# past its static init.  This is an explicit ROM-loader export fixup.
+#
+# Format: <slot> <target>
+0x503b6b38 0x503b53f5

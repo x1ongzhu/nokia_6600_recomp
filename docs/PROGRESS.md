@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 68）
+最后更新：2026-10-26（round 69）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -410,6 +410,13 @@
     （export_dir `0x503b6b38`，ordinal 2）；实际函数表在
     `0x503b6b30`，前两项都是 `0x503b53f5`，而 `0x503b6b38` 为 0。
     这又是一个 header export_dir/import slot 需要 loader fixup 的洞。
+
+- **EStart 第一个 import 绑定**（round 69）：`config/imports-estart-6600.txt`
+  把 EStart slot `0x503b6b38` 重绑到 uid3 `0x100039e8` 的真实 export
+  `0x503b53f5`。结果 EStart 不再在 119 条时 null-call，而是跑满
+  **200,000 条**，停在 kernel SVC/pre-handler 路径
+  `0x50314f68`；`mmio: 0 reads, 0 writes`，framebuffer 仍 0 像素。
+  下一步是它等待的线程/信号量事件。验收 `tools/test_round69.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -723,7 +730,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68 证明 direct SplashScreen entry 只做初始化、不绘制，下一步必须走 EStart/kernel process/active object |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart 并绑定其首个 import，当前 EStart 跑满 200k 后停在 SVC/wait 路径 |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -756,10 +763,9 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. direct SplashScreen entry 已证明只做初始化（round 68）；
-    下一步转向 EStart / kernel process loader / active object。优先确认
-    ROMFS `EStart.exe` 的真实入口与它启动 SplashScreen 的方式，而不是
-    继续在 SplashScreen 的 E32 entry 里找绘制。
+11. EStart 已能跑满 200k（round 69），当前停在
+    `0x50314f68` 的 kernel SVC/pre-handler 路径；下一步追它等待的
+    线程/信号量事件（很可能是 SplashScreen 或 window server 的启动）。
 
 ---
 

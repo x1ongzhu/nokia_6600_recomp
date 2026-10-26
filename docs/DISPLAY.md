@@ -573,6 +573,24 @@ ordinal 2）；实际函数表在 `0x503b6b30`，前两项都是 `0x503b53f5`，
 而 `0x503b6b38` 为 0。这又是一个 export_dir/import slot 需要 loader
 fixup 的洞；绑定它是下一轮的直接入口。
 
+### round 69：EStart 首个 import 绑定
+
+`config/imports-estart-6600.txt` 把 EStart slot `0x503b6b38` 重绑到
+uid3 `0x100039e8` 的真实 export `0x503b53f5`。结果：
+
+```
+app import rebind: 0x503b6b38 0000000000 -> 0x503b53f5
+--- stop: budget (0) at 0x50314f68 ---
+insns=200000
+mmio: 0 reads, 0 writes
+framebuffer: 0 non-zero bytes
+```
+
+EStart 不再 119 条 null-call，而是跑满 200k，停在 kernel
+SVC/pre-handler 路径 `0x50314f68`。下一步是它等待的线程/信号量事件
+（很可能是 SplashScreen 或 window server 的启动）。验收：
+`tools/test_round69.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -635,7 +653,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 转向 EStart / kernel process loader / active object：round 68 已
-   证明 direct SplashScreen entry 只做初始化、不绘制。先确认 ROMFS
-   `EStart.exe` 的真实入口与它启动 SplashScreen 的方式，而不是继续
-   在 SplashScreen 的 E32 entry 里找绘制。
+8. 追 EStart 的 wait/thread 事件：round 69 已把 EStart 跑到 200k，
+   当前停在 `0x50314f68` 的 SVC/pre-handler 路径；下一步确认它等待的
+   线程/信号量（SplashScreen / window server）。
