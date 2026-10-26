@@ -485,6 +485,29 @@ direct-SWI 路径也到 500k 预算，但出现 `0x600000` wild clear。
 **2,000,000 条**，停在 request-semaphore Wait service
 `0x503244e4..f4`，0 fault。
 
+### 2.17 round 62：app entry 的 allocator / StartThread / 共享 EUser 表
+
+三条与 app-driven 路径直接相关的结论：
+
+1. **HLE allocator cell header**：guest `RHeap::ReAlloc` 从 `[ptr-4]`
+   读 cell size。旧 HLE allocator 在该 word 写 `'HLEH'`，导致
+   `0x484c4544` 字节的 wild `Mem::Copy`。现在 `[ptr-8]` 是 HLE
+   private size，`[ptr-4]` 是 `size+4`。
+2. **StartThread completion**：SplashScreen 的 EUser wrapper 发
+   `svc #0x76`（bit 23 置位，走 mask-ROM user path），然后轮询
+   `TRequestStatus`。`NK_USER_SVC_KERNEL=1` 清掉该 stub 的 bit 23，
+   让 kernel service table 进入 `0x5032557c -> 0x503312d4`；
+   `NK_START_HLE=1` 让 bring-up DThread vtable+0x20 完成 `[r3]`。
+3. **共享 EUser export table**：`config/imports-r29-6600.txt` 直接写
+   EUser .edata slots（例如 `0x503b4f10`），kernel 需要 K-3 目标，
+   但 app 的同一 import slot 链接的是原 export。kernel map 应用后
+   app 会拿到错函数。direct-app 运行必须省略 `NK_IMPORTMAP`。
+
+修正后的 app frontier：`operator new(4)` 返回 `0x80600008`，vtable
+仍为 0；`0x509eef14 ldr r2,[r0,#8]` 读到 `0xe59ff028`，
+`0x509eef1a` 跳过去，`lr=0x509eef1f`。下一步是 per-consumer EUser
+import table 或 app import-name map。
+
 ---
 
 ## 3. EUser 导入映射

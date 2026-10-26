@@ -218,8 +218,10 @@ round 48 用 `NK_WAIT_HLE=1`（semaphore Wait 完成 `[r5]` 并返回 0）让
 它离开 Wait，但 app 立刻进入 `0x5038d2d4` 的 **wild descriptor copy**
 （8-word expansion loop，source/dest 约 `0x80da....`），跑到预算也没有
 显示绘制。直接运行 `EwSrv.exe`（entry `0x506a8205`）也在
-`lr=0x506c0b15` 处 null-call。两个路径都指向缺失的
-window-server/surface 状态，而不是 CPU。
+`lr=0x506c0b15` 处 null-call。round 62 归因：wild copy 的长度
+`0x484c4289` 来自 HLE allocator 的 `'HLEH'` cell header，不是
+window-server surface；修 header 后同一路径到达 EwSrv
+`0x506ca5e4`。
 
 round 49 又确认了两点：
 
@@ -402,7 +404,49 @@ round 58 的白屏只是 source control。
 FbsServ/`CFbsBitmap` 解出来的；后者仍被未重定位的 ROM veneer 卡住
 （rounds 55-60）。像素来自固件资源，framebuffer 写入来自 guest 代码。
 
-## 7. BitGdi 导出符号表（round 59）
+## 7. App-driven 路径：round 62 的三处地基修复
+
+round 61 的 logo 帧仍然是 harness 解码 HLE；要跑完整的 app-driven 开机
+画面，必须让 SplashScreen 自己的启动/import/EwSrv 路径成立。round 62
+定位并修掉了三处地基问题：
+
+1. **HLE allocator cell header**：`RHeap::ReAlloc` / `0x5039c37c` 从
+   `[ptr-4]` 读 cell size。旧 HLE header 在该位置写 `'HLEH'`，于是首次
+   realloc 变成 `0x484c4544` 字节的 `Mem::Copy`（`0x484c4289` 是它在
+   trace 里的长度）。现在 `[ptr-8]` 是 HLE 私有 size，`[ptr-4]` 是
+   guest cell header（`size+4`）。
+2. **thread-start completion**：SplashScreen 通过 EUser wrapper 调
+   `Kern::StartThread`（SVC 0x76）并轮询 `TRequestStatus`。bring-up
+   DThread vtable+0x20 原来直接返回、不完成 `[r3]`，app 永远在
+   `0x50398648` 的 wait-any-request 轮询里。`NK_START_HLE=1` 用
+   `0xffff0e00` 完成 `[r3]`；`NK_USER_SVC_KERNEL=1` 清掉 EUser SVC
+   0x76 stub 的 bit 23，让 kernel service table 真正进入 StartThread。
+3. **共享 EUser export table**：`config/imports-r29-6600.txt` 的 kernel
+   K-3 relocation 直接改写 EUser export slots。比如 `0x503b4f10`
+   （kernel 需要 `0x5038918c`）同时被 app 用作 import slot（app 链接的
+   export 是 `0x50389180`）。kernel map 一应用，app 的 EUser import 就
+   拿到错函数——旧 app 测试的 wild descriptor / 空 vtable 都由此而来。
+   direct-app 运行必须省略 `NK_IMPORTMAP`；正确修法是 per-consumer
+   import table 或 app EUser import-name map。
+
+修正后的 app frontier（不应用 kernel map）：
+
+```
+0x509eef12  ldr r0,[r4]        ; r4 = operator new(4) -> 0x80600008
+0x509eef14  ldr r2,[r0,#8]     ; [0x80600008] = 0, so [8] = 0xe59ff028
+0x509eef1a  bl 0x509ef630      ; bx r2
+```
+
+对象是 `operator new(4)` 返回的 4-byte block，vtable 没有被安装；app
+随后对它做 virtual dispatch，PC 逃到 `0xe59ff028`，`lr=0x509eef1f`。
+下一步是 app EUser import 重绑（按 name/ordinal）或 per-consumer
+import table，然后才轮到 EwSrv jump table/literal relocation。
+
+验收：`tools/test_round62.sh`（含两个 0-instruction dump，证明
+`0x503b4f10` 在 kernel map 下变成 `0x5038918c`，不应用时保持
+`0x50389180`）。
+
+## 8. BitGdi 导出符号表（round 59）
 
 ROM BitGdi 的 export dir（`0x506a7e78`，185 项）只有地址，没有名字。
 匹配的 S60 2.0 SDK `bitgdi.lib` 在 symbol table 里按 **export 顺序**
@@ -428,7 +472,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
 （`lr=0x506dd80d`）。所以 BitGdi/FbsCli 的构造函数也需要同一个
 **ROM-loader import fixup**；仅有符号表还不够。
 
-## 8. 还缺什么
+## 9. 还缺什么
 
 1. **进程启动**：`FbServ.exe` 还没有被 kernel 作为进程加载。当前
    supervisor 死在 `RThread::Resume(0x32)` 的 thread-start 等待上
@@ -442,7 +486,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
 
 ---
 
-## 9. 下一步
+## 10. 下一步
 
 1. 修直接 FbServ 的对象初始化：跑 `.init_array`/constructors，或让
    kernel 的 process loader 正常启动 FbServ。
@@ -455,3 +499,8 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
 5. 把 round-61 的 MBM 解码 HLE 换成真实的 FbsServ/`CFbsBitmap` 路径，
    让 SplashScreen 自己加载并提交同一帧；当前帧是 bring-up 里程碑，
    不是完整的 app-driven splash。
+6. 修共享 EUser export table：给 kernel 使用 per-consumer import table，
+   或建立 app EUser import-name map，避免 kernel K-3 relocation 改写
+   app 的 import slots。
+7. 修 EwSrv jump table / literal relocation：round 62 的
+   `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。

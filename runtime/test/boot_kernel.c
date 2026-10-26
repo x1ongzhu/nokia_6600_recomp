@@ -204,6 +204,13 @@
  *                           EUser Mem::Copy to write the real Nokia logo frame
  *   NK_FB_SRC=1             fill that source buffer with 16bpp white instead
  *                           (round 58 splash-background control)
+ *   NK_START_HLE=1          complete the thread-start TRequestStatus in r3
+ *                           from the bring-up DThread vtable+0x20 slot (round
+ *                           62).  Without it SplashScreen spins in the
+ *                           EUser wait-any-request poll loop.
+ *   NK_USER_SVC_KERNEL=1    clear bit 23 on EUser's SVC 0x76 stub so the
+ *                           kernel StartThread service is dispatched instead
+ *                           of the missing mask-ROM user-SVC handler.
  *   NK_DUMP=a:l[,a:l...]    append guest memory ranges to NK_DUMP_FILE at the
  *                           end of the run (default out/memdump.bin)
  *   NK_POKE=a:v[,a:v...]    write 32-bit values to guest addresses before the
@@ -1086,6 +1093,7 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
 #define B7E_VT_TLS      0x80003e00u
 #define B7E_ONE_STUB    0xffff0500u   /* mov r0,#1; bx lr                  */
 #define B7E_WAIT_STUB   0xffff0c00u   /* complete [r5], return 0           */
+#define B7E_START_STUB  0xffff0e00u   /* complete [r3], return 0           */
 #define B7E_VT_ENTRIES  64
 
 /* Round 25: the user-side runtime normally installs a CTrapCleanup before it
@@ -1344,6 +1352,15 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_w32(c, B7E_WAIT_STUB, 0xe3a00000u);       /* mov r0,#0 */
     nk_w32(c, B7E_WAIT_STUB + 4, 0xe5850000u);   /* str r0,[r5] */
     nk_w32(c, B7E_WAIT_STUB + 8, 0xe12fff1eu);   /* bx lr     */
+    /* Round 62: complete the thread-start request passed in r3.  The app
+     * (SplashScreen) calls Kern::StartThread (SVC 0x76) through the EUser
+     * rendezvous wrapper and then polls the status.  The bring-up thread
+     * object has no real DThread hand-off, so vtable+0x20 used to return
+     * without completing [r3]; the app spun forever.  This opt-in HLE
+     * completes the request so the app can proceed to its next frontier. */
+    nk_w32(c, B7E_START_STUB, 0xe3a00000u);      /* mov r0,#0 */
+    nk_w32(c, B7E_START_STUB + 4, 0xe5830000u);  /* str r0,[r3] */
+    nk_w32(c, B7E_START_STUB + 8, 0xe12fff1eu);  /* bx lr     */
     /* Round 34: Kern::Init3 gets object 3 from the HAL and issues Request
      * 0xd, then polls [0x800004cc] until it is non-zero.  On the real phone
      * the device driver completes that request (its DFC/ISR calls the
@@ -1360,6 +1377,7 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_code_range_add(ip, B7E_ZERO_STUB, B7E_ZERO_STUB + 8);
     nk_code_range_add(ip, B7E_ONE_STUB, B7E_ONE_STUB + 8);
     nk_code_range_add(ip, B7E_WAIT_STUB, B7E_WAIT_STUB + 12);
+    nk_code_range_add(ip, B7E_START_STUB, B7E_START_STUB + 12);
     nk_code_range_add(ip, B7E_HAL_STUB, B7E_HAL_STUB + 0x18);
     nk_code_range_add(ip, B7E_ALLOC_STUB, B7E_ALLOC_STUB + 0x20);
     nk_code_range_add(ip, B7E_AT_STUB, B7E_AT_STUB + 0x20);
@@ -1419,7 +1437,11 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_w32(c, B7E_THREAD, 0x80003040u);       /* thread vtable         */
     nk_w32(c, B7E_THREAD + 0x14, 1);
     b7e_fill_vtable(c, 0x80003040u, B7E_ZERO_STUB);
-    nk_w32(c, 0x80003040u + 0x20, B7E_ZERO_STUB);
+    nk_w32(c, 0x80003040u + 0x20,
+           env_ulong("NK_START_HLE", 0) ? B7E_START_STUB : B7E_ZERO_STUB);
+    if (env_ulong("NK_START_HLE", 0))
+        printf("thread-start HLE: bring-up DThread vtable+0x20 completes [r3] "
+               "via stub %#010x\n", B7E_START_STUB);
 
     /* Kernel HAL stand-in.  The extension loader invokes an in-kernel
      * extension constructor before it registers the real HAL object; the
@@ -2464,6 +2486,22 @@ int main(int argc, char** argv) {
         printf("app stack cleared: %#010x..%#010x\n", base, cpu.r[13]);
     }
 
+    if (env_ulong("NK_USER_SVC_KERNEL", 0)) {
+        /* EUser's user-style SVC stubs carry bit 23, which sends the kernel
+         * handler down the mask-ROM user path.  For SVC 0x76 the real service
+         * is the kernel's StartThread entry; clear bit 23 on that one stub so
+         * the kernel service table dispatches it.  (Direct app entry has no
+         * mask-ROM user-SVC dispatcher.) */
+        unsigned patched = 0;
+        for (uint32_t a = 0x50392b80u; a < 0x50392bc0u; a += 4) {
+            uint32_t w = nk_r32(&cpu, a);
+            if ((w & 0x0fffffffu) == 0x0fc00076u) {
+                nk_w32(&cpu, a, w & ~0x00800000u);
+                patched++;
+            }
+        }
+        printf("user SVC kernel patch: %u SVC 0x76 stubs\n", patched);
+    }
     if (env_ulong("NK_USER_SVC", 0)) {
         /* The flat image binds app imports to the kernel-side EUser stub
          * table, whose `svc #N` immediates lack the bit-23 user marker.  Mark
@@ -2558,6 +2596,9 @@ int main(int argc, char** argv) {
         nk_w32(&cpu, 0x80001c28u, 0x80001c28u);
         printf("dfc queue: empty at 0x80001c28\n");
     }
+    if (rom_image && getenv("NK_ENTRY") && getenv("NK_IMPORTMAP"))
+        printf("warning: NK_IMPORTMAP patches shared EUser export slots; "
+               "direct app entries should omit it (round 62)\n");
     install_svc_hook(&cpu, &ip);
     printf("run: sp=%#010x cpsr=%#010x budget=%ld infer=%d call-infer=%d policy=%d\n",
            cpu.r[13], cpu.cpsr, ip.budget, ip.infer_mode, ip.infer_calls,

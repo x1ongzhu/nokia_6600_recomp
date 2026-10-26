@@ -3,18 +3,20 @@
 #
 # 1. SplashScreen's wait can be made to return with NK_WAIT_HLE=1: the
 #    semaphore-Wait stub completes [r5] and returns 0.  The app then leaves
-#    WaitForAnyRequest, but immediately enters a wild descriptor copy at
-#    0x5038d2d4 (8-word expansion loop) with source/destination around
-#    0x80da.... and runs to the budget with zero display MMIO.  So the wait is
-#    not the only blocker; the window-server surface/descriptor state is.
+#    WaitForAnyRequest and reaches the next real blocker.  Historical note:
+#    before round 62 this path entered a wild descriptor copy at 0x5038d2d4
+#    with a 0x484c4289 length; round 62 showed that length came from the HLE
+#    allocator's private 'HLEH' cell header, not from the window server.  With
+#    the header fixed, the same run reaches EwSrv's unrelocated jump-table
+#    target at 0x506ca5e4 and null-calls.  That is the current app frontier.
 #
 # 2. Running EwSrv.exe directly (entry 0x506a8205) null-calls at
 #    pc=0, lr=0x506c0b15 after a handful of instructions, so EwSrv's own
 #    imports/vtables are not initialised either.
 #
 # Acceptance:
-#   - SplashScreen + NK_WAIT_HLE runs the 5M budget at 0x5038d308 with
-#     0 MMIO writes;
+#   - SplashScreen + NK_WAIT_HLE leaves the wait, reaches EwSrv 0x506ca5e4,
+#     and stops on a null call at 0 with lr=0x509ef1e9;
 #   - EwSrv direct stops on a null call at 0 with lr=0x506c0b15.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -52,10 +54,14 @@ common NK_BUDGET=5000000 NK_EWSRV_SNAP=1 NK_WAIT_HLE=1 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin >out/round48_wait.log 2>&1
 grep -q "EwSrv export snap" out/round48_wait.log
-grep -q "^--- stop: budget (0) at 0x5038d308 ---" out/round48_wait.log
-grep -q "insns=5000000" out/round48_wait.log
+grep -q "^--- stop: null call (8) at 0000000000 ---" out/round48_wait.log
 grep -q "undefined=0" out/round48_wait.log
-grep -q "5038d2d4 5038d2d8 5038d2dc" out/round48_wait.log
+grep -q "506ca5e4 506ca5e4 506ca5e8" out/round48_wait.log
+grep -q "lr=0x509ef1e9" out/round48_wait.log
+if grep -q "5038d2d4 5038d2d8 5038d2dc" out/round48_wait.log; then
+    echo "FAIL: the round-48 wild descriptor copy reappeared" >&2
+    exit 1
+fi
 
 common NK_BUDGET=2000000 NK_ENTRY=0x506a8205 NK_SP=0x80580000 \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
@@ -63,8 +69,9 @@ common NK_BUDGET=2000000 NK_ENTRY=0x506a8205 NK_SP=0x80580000 \
 grep -q "^--- stop: null call (8) at 0000000000 ---" out/round48_ewsrv.log
 grep -q "lr=0x506c0b15" out/round48_ewsrv.log
 
-echo "ok: NK_WAIT_HLE returns from WaitForAnyRequest but the app enters a"
-echo "    wild descriptor copy (0x5038d2d4), not a display draw"
+echo "ok: NK_WAIT_HLE leaves WaitForAnyRequest; with the round-62 allocator"
+echo "    header the old 0x5038d2d4 wild copy is gone and the app reaches the"
+echo "    EwSrv jump table at 0x506ca5e4"
 echo "ok: direct EwSrv.exe null-calls at 0x506c0b15; its imports/vtables are"
 echo "    not initialised either"
-echo "PASS: round 48 pins the two remaining splash/window-server blockers"
+echo "PASS: round 48 pins the splash wait and the current EwSrv app frontier"

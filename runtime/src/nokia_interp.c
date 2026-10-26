@@ -415,8 +415,14 @@ static int hle_alloc_block(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc,
     }
     uint32_t block = ip->alloc_cur;
     ip->alloc_cur += NK_HLE_BLOCK_HDR + sz;
-    nk_w32(c, block, sz);                       /* payload size */
-    nk_w32(c, block + 4, 0x484c4548u);          /* 'HLEH' magic */
+    /* The guest's RHeap code reads the cell header at [payload-4] (see
+     * RHeap::ReAlloc at 0x5039c364) and treats it as "cell size including
+     * the 4-byte header".  Keep that word compatible instead of storing a
+     * private magic: the old 'HLEH' value turned every guest realloc into a
+     * 0x484c4544-byte descriptor copy.  The HLE bookkeeping size stays at
+     * [payload-8], which guest code does not read. */
+    nk_w32(c, block, sz);                       /* HLE payload size      */
+    nk_w32(c, block + 4, sz + 4u);              /* guest cell header      */
     for (uint32_t i = 0; i < sz; i++) nk_w8(c, block + NK_HLE_BLOCK_HDR + i, 0);
     *out = block + NK_HLE_BLOCK_HDR;
     return 1;

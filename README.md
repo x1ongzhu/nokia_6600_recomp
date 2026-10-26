@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 61)
+## Status (2026-10-26, round 62)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -72,7 +72,9 @@ thread-start and close paths**. The boot then runs **6,000,000 instructions
 with 14 timer IRQs and no faults**, through `Kern::Init3` and into the first
 stable executive loop. On the display side, the firmware's own
 `SplashScreen.mbm` logo frame is now decoded and written through guest
-`Mem::Copy` into the real LCD framebuffer (round 61). What works:
+`Mem::Copy` into the real LCD framebuffer (round 61). Round 62 then moved the
+**real SplashScreen app** past its StartThread wait and fixed the bring-up
+allocator header and the shared EUser export-table conflict. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -265,8 +267,10 @@ stable executive loop. On the display side, the firmware's own
   `0x5038d2d4` (8-word expansion loop, source/destination around `0x80da....`)
   and runs to the budget without a display draw. Direct `EwSrv.exe`
   (`0x506a8205`) null-calls at pc=0, lr=`0x506c0b15`, so its own
-  imports/vtables are also uninitialised. Both point at the missing
-  window-server/surface state, not the CPU.
+  imports/vtables are also uninitialised. Round 62 corrected the first half:
+  the wild length came from the HLE allocator's `'HLEH'` cell header, not
+  from a missing surface; with that header fixed the same run reaches EwSrv
+  `0x506ca5e4`.
 
 - [x] **Splash asset / EwSrv relocation facts** (round 49):
   `SplashScreen.mbm` is a 0xd54-byte MBM with UID `0x10000041`, bitmap
@@ -380,6 +384,24 @@ stable executive loop. On the display side, the firmware's own
   write come from the firmware/guest side.
 
   ![Nokia logo frame](docs/assets/nokia_logo_frame_3x.png)
+
+- [x] **App-entry foundations** (round 62): three blockers around the real
+  SplashScreen path are now pinned and fixed:
+  - the bring-up HLE allocator stored `'HLEH'` at `[payload-4]`; guest
+    `RHeap::ReAlloc` read that as the cell size and produced a
+    `0x484c4544`-byte `Mem::Copy`. The header is now guest-compatible
+    (`[payload-8]` = HLE size, `[payload-4]` = payload+4).
+  - `NK_START_HLE=1` completes the `Kern::StartThread` `TRequestStatus` in
+    `[r3]`, and `NK_USER_SVC_KERNEL=1` clears bit 23 on the EUser SVC 0x76
+    stub so the kernel service table dispatches StartThread. SplashScreen
+    leaves the wait-any-request spin.
+  - the kernel EUser relocation map rewrites **shared** EUser export slots
+    (e.g. `0x503b4f10`: kernel `0x5038918c`, app export `0x50389180`).
+    Direct-app runs must omit `NK_IMPORTMAP`; this explains the old wild
+    descriptor/zero-vtable app paths. The next frontier without the kernel
+    map is a zero-vtable object at `0x80600008`, whose virtual dispatch
+    reads `0xe59ff028` (`lr=0x509eef1f`).
+  `tools/test_round62.sh` pins all three with two 0-instruction dumps.
 
 Not implemented yet:
 
@@ -519,7 +541,9 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round57.sh` | EwSrv dllref section layout; the six tail entries are not per-import slots |
 | `tools/test_round58.sh` | first guest-written LCD frame (white splash background) via guest `Mem::Copy` |
 | `tools/test_round59.sh` | BitGdi export symbol map (`Clear`/`DrawBitmap` addresses mapped from the SDK import library) |
-| `tools/test_round60.sh` | **current acceptance**: `CFbsBitmap::Create` hits the same unresolved veneer (`0x506dd80c` → `0xe59ff028`) |
+| `tools/test_round60.sh` | `CFbsBitmap::Create` hits the same unresolved veneer (`0x506dd80c` → `0xe59ff028`) |
+| `tools/test_round61.sh` | real `SplashScreen.mbm` logo frame written through guest `Mem::Copy` |
+| `tools/test_round62.sh` | **current acceptance**: app-entry allocator cell header, StartThread completion, and shared EUser export-slot conflict |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
