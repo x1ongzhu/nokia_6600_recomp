@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 66）
+最后更新：2026-10-26（round 68）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -394,6 +394,22 @@
   写完全消失，framebuffer 仍无像素；剩余 blocker 变成 app main 的
   StartThread/SVC 路径，仍在 `0x50314f78` self-loop。验收
   `tools/test_round66.sh`。
+
+- **direct app entry 不是 splash 绘制路径**（round 68）：把 EwSrv slot
+  `0x506ce44c` HLE 成 zero-return stub（`0xffff0300`）后，direct
+  SplashScreen 入口不再撞 `0xb5f00000`，而是干净返回
+  `0xdead0000`（1,694 条），但 **framebuffer 仍 0 像素**。这说明
+  `0x509ef1e4` 的 EwSrv 调用只是初始化/清理，不是绘制；真正的开机
+  画面必须来自 EStart、kernel 创建的 process/thread，或 active
+  object，而不是直接跑 SplashScreen 的 E32 entry。验收
+  `tools/test_round68.sh`。
+  - EStart.exe 直接入口（`0x503da4a5`）是下一步的候选：它 119 条后
+    在 `lr=0x503da5b9` null-call，`r5=0xe59ff028`，经过
+    `0x503db628` stub 到 slot `0x503b6b38`。这是 EStart 自己的 import
+    未绑定，不是 EStart 逻辑本身。该 slot 属于 uid3 `0x100039e8`
+    （export_dir `0x503b6b38`，ordinal 2）；实际函数表在
+    `0x503b6b30`，前两项都是 `0x503b53f5`，而 `0x503b6b38` 为 0。
+    这又是一个 header export_dir/import slot 需要 loader fixup 的洞。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -707,7 +723,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基并完成首个 app import rebind；round 64 暴露 splash main 路径；round 66 修掉 low allocator/null descriptor，当前被 app main 的 StartThread/SVC self-loop 卡住 |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68 证明 direct SplashScreen entry 只做初始化、不绘制，下一步必须走 EStart/kernel process/active object |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -740,11 +756,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. 找到 SplashScreen 真正的 main / active object 驱动：round 64 用
-    TTrap rebind 已经进入 `0x509ef5fc` 的 main/constructor 路径；round
-    66 修掉 low allocator/null descriptor，`0xe59ff028` 已消失；当前
-    卡在 app main 的 StartThread/SVC 路径（`0x50314f78` self-loop）。
-    下一步追该路径的线程/信号量状态，而不是继续猜 active scheduler。
+11. direct SplashScreen entry 已证明只做初始化（round 68）；
+    下一步转向 EStart / kernel process loader / active object。优先确认
+    ROMFS `EStart.exe` 的真实入口与它启动 SplashScreen 的方式，而不是
+    继续在 SplashScreen 的 E32 entry 里找绘制。
 
 ---
 

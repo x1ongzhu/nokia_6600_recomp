@@ -554,6 +554,25 @@ banked SVC self-loop，而是跑到 EwSrv `0x506ca5e4` null call
 snap 到 `0x506ca57f` 后，调用参数/目标仍不对，下一轮需要确认
 EwSrv 对该 slot 真正的函数入口（可能是相邻的 `0x506ca5ee` 等）。
 
+### round 68：direct entry 不是绘制路径
+
+把 EwSrv slot `0x506ce44c` HLE 成 zero-return stub `0xffff0300`
+后，direct SplashScreen 入口干净返回 `0xdead0000`（1,694 条），
+`mmio: 0 reads, 0 writes`，framebuffer **0 像素**。所以
+`0x509ef1e4` 的 EwSrv 调用只是初始化/清理，不是绘制；直接跑
+SplashScreen 的 E32 entry 不会产生开机画面。真正的 driver 必须来自
+EStart、kernel 创建的 process/thread，或 active object。
+
+验收：`tools/test_round68.sh`。
+
+EStart.exe 直接入口（`0x503da4a5`）是下一步候选：它 119 条后在
+`lr=0x503da5b9` null-call，`r5=0xe59ff028`，经 `0x503db628` stub 到
+slot `0x503b6b38`。这是 EStart 自己的 import 未绑定，不是 EStart 逻辑
+本身。该 slot 属于 uid3 `0x100039e8`（export_dir `0x503b6b38`，
+ordinal 2）；实际函数表在 `0x503b6b30`，前两项都是 `0x503b53f5`，
+而 `0x503b6b38` 为 0。这又是一个 export_dir/import slot 需要 loader
+fixup 的洞；绑定它是下一轮的直接入口。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -616,7 +635,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 追 app main 的 StartThread/SVC self-loop：round 66 已修掉
-   low allocator/null descriptor，`0xe59ff028` 消失；现在
-   `0x50314f78` 的最终寄存器 `r1=0x32` 指向 thread start handle。
-   先确认该 SVC 的线程/信号量状态，再看 EwSrv。
+8. 转向 EStart / kernel process loader / active object：round 68 已
+   证明 direct SplashScreen entry 只做初始化、不绘制。先确认 ROMFS
+   `EStart.exe` 的真实入口与它启动 SplashScreen 的方式，而不是继续
+   在 SplashScreen 的 E32 entry 里找绘制。

@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 66)
+## Status (2026-10-26, round 68)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -80,8 +80,9 @@ first app-side EUser import rebind, so SplashScreen's static init now
 constructs its CBase and returns cleanly instead of crashing on a zero
 vtable. Round 64 rebinds the app's TTrap wrapper too, which takes the real
 `0x509ef5fc` main path. Round 66 then rebinds the app's low allocator slot,
-removing the null-descriptor `0xe59ff028` writes; the remaining blocker is the
-app main's StartThread/SVC path. What works:
+removing the null-descriptor `0xe59ff028` writes. Round 68 proves the direct
+SplashScreen entry path only initializes and never draws, so the splash driver
+must come from EStart or the kernel process loader. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -450,6 +451,17 @@ app main's StartThread/SVC path. What works:
   control that bypasses the banked SVC loop and reaches EwSrv's
   `0xb5f00000` thunk jump.
 
+- [x] **Direct entry is not the drawing path** (round 68): HLE-ing the
+  EwSrv slot `0x506ce44c` to a zero-return stub makes the direct
+  SplashScreen entry return cleanly to `0xdead0000` in 1,694 instructions,
+  with no MMIO writes and no framebuffer pixels. The `0x509ef1e4` EwSrv
+  call is initialization/cleanup, not the splash draw. The next route is
+  EStart / the kernel process loader / an active object.
+  `tools/test_round68.sh` pins the negative result and also opens the
+  EStart route: `EStart.exe` (entry `0x503da4a5`) null-calls after 119
+  instructions at `lr=0x503da5b9` through slot `0x503b6b38`, so its own
+  imports are the next binding target.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -593,7 +605,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round62.sh` | app-entry allocator cell header, StartThread completion, and shared EUser export-slot conflict |
 | `tools/test_round63.sh` | first app-side EUser import rebind; CBase vtable `0x503b359c`; static init returns cleanly |
 | `tools/test_round64.sh` | TTrap rebind exposes the app main path; kernel SVC-return self-loop at `0x50314f78` |
-| `tools/test_round66.sh` | **current acceptance**: low allocator rebind removes `0xe59ff028`; banked SVC loop remains; direct dispatch reaches EwSrv |
+| `tools/test_round66.sh` | low allocator rebind removes `0xe59ff028`; banked SVC loop remains; direct dispatch reaches EwSrv |
+| `tools/test_round68.sh` | **current acceptance**: direct SplashScreen entry only initializes; EStart route opens at slot `0x503b6b38` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

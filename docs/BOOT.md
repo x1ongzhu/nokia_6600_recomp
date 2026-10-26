@@ -556,6 +556,21 @@ CBase rebind。验收 `tools/test_round64.sh`。
 StartThread/SVC 路径，仍在 `0x50314f78` self-loop，最终寄存器
 `r1=0x32` 与 thread start handle 一致。验收 `tools/test_round66.sh`。
 
+### 2.21 round 68：direct entry 只做初始化，不绘制
+
+把 EwSrv slot `0x506ce44c` HLE 成 zero-return stub `0xffff0300` 后，
+direct SplashScreen 入口干净返回 `0xdead0000`（1,694 条），
+`mmio: 0 reads, 0 writes`，framebuffer 0 像素。`0x509ef1e4` 的 EwSrv
+调用只是初始化/清理，不是绘制。真正的 driver 必须来自 EStart、kernel
+创建的 process/thread，或 active object。验收 `tools/test_round68.sh`。
+
+EStart.exe 直接入口（`0x503da4a5`）是候选 driver：119 条后在
+`lr=0x503da5b9` null-call（`r5=0xe59ff028`），经 `0x503db628` stub
+到 slot `0x503b6b38`；这是 EStart 的 import 未绑定。该 slot 属于
+uid3 `0x100039e8`（export_dir `0x503b6b38`，ordinal 2）；实际函数表在
+`0x503b6b30`（两项都是 `0x503b53f5`），`0x503b6b38` 为 0，需要
+export_dir/import fixup。
+
 ---
 
 ## 3. EUser 导入映射
