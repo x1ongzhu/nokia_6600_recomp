@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 62）
+最后更新：2026-10-26（round 63）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -348,6 +348,19 @@
     import 重绑（按 name/ordinal），或 per-consumer import table。
   - 验收 `tools/test_round62.sh`（含共享 slot 的 0-instruction dump）。
 
+- **第一个 app-side EUser import rebind**（round 63）：SplashScreen 的
+  import slot `0x503b4338` 期望一个 CHeartbeat 风格的构造器（对象建好后
+  用 vtable+8、`r1=3` 调用），但 ROM slot 里是 `operator new`
+  （`0x503963dc`，返回 zeroed object）。新增
+  `config/imports-app-6600.txt` + `NK_APP_IMPORTMAP`，把该 slot 重绑到
+  ROM export index 747（`0x50383c84`）。该函数分配 0x10 字节 CBase、
+  安装 vtable `0x503b359c`、再分配 0x40 字节 backing store，并自己完成
+  同样的 vtable+8/`r1=3` 调用。结果：app 静态初始化不再在
+  `0x509eef12` 的零 vtable 上崩，构造出 `0x80600008`（vtable
+  `0x503b359c`），360 条后干净返回 `0xdead0000`。仍无 framebuffer
+  写入；真正的 splash main / active object 是下一步。
+  验收 `tools/test_round63.sh`。
+
 ### 未完成
 
 - **handle `0x32` / DFC 线程**：supervisor 的 `RThread::Resume(0x32)`
@@ -647,7 +660,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62 修通 app-entry allocator/thread/import 地基，app-driven 显示仍缺 EUser import 重绑与 EwSrv relocation |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62 修通 app-entry allocator/thread/import 地基；round 63 完成首个 app EUser import rebind，app 静态初始化干净返回，app-driven 显示仍缺 splash main/active object 与 EwSrv relocation |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -680,6 +693,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
+11. 找到 SplashScreen 真正的 main / active object 驱动：round 63 的
+    静态初始化已经构造出 vtable `0x503b359c` 的 CBase 并返回，
+    但没有 framebuffer 写入；需要确认是 EStart 调用、独立线程，还是
+    需要运行 active scheduler。
 
 ---
 

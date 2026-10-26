@@ -211,6 +211,10 @@
  *   NK_USER_SVC_KERNEL=1    clear bit 23 on EUser's SVC 0x76 stub so the
  *                           kernel StartThread service is dispatched instead
  *                           of the missing mask-ROM user-SVC handler.
+ *   NK_APP_IMPORTMAP=path   app-side EUser import rebinds, applied after the
+ *                           flat image load.  Use this instead of
+ *                           NK_IMPORTMAP for direct app entries: the kernel
+ *                           map patches shared EUser export slots.
  *   NK_DUMP=a:l[,a:l...]    append guest memory ranges to NK_DUMP_FILE at the
  *                           end of the run (default out/memdump.bin)
  *   NK_POKE=a:v[,a:v...]    write 32-bit values to guest addresses before the
@@ -1975,6 +1979,25 @@ int main(int argc, char** argv) {
         free(img);
         entry = rom_image_prepare(&cpu, &ip, rom_copy, rom_len, 1);
         if (!entry) { fprintf(stderr, "no kernel in %s\n", rom_image); return 1; }
+        /* Round 63: app-side EUser import rebinds.  Keep these separate from
+         * the kernel map: the kernel K-3 relocation patches shared EUser
+         * export slots, while app slots were linked against the ROM's own
+         * EUser order.  NK_APP_IMPORTMAP only rewrites the slots named in the
+         * file, after the flat image is loaded and before the run. */
+        {
+            const char* appmap = getenv("NK_APP_IMPORTMAP");
+            if (appmap) {
+                static import_override_t appov[NK_MAX_IMPORT_OVERRIDES];
+                int na = load_import_overrides(appmap, appov,
+                                               NK_MAX_IMPORT_OVERRIDES);
+                for (int i = 0; i < na; i++) {
+                    uint32_t oldv = nk_r32(&cpu, appov[i].slot);
+                    nk_w32(&cpu, appov[i].slot, appov[i].target);
+                    printf("app import rebind: %#010x %#010x -> %#010x\n",
+                           appov[i].slot, oldv, appov[i].target);
+                }
+            }
+        }
         /* The E32Image entry carries the interworking bit: odd = Thumb.
          * The old bring-up forced Thumb because it was executing the 6-byte
          * page tag at the start of the packed record; the real kernel entry

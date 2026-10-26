@@ -404,7 +404,7 @@ round 58 的白屏只是 source control。
 FbsServ/`CFbsBitmap` 解出来的；后者仍被未重定位的 ROM veneer 卡住
 （rounds 55-60）。像素来自固件资源，framebuffer 写入来自 guest 代码。
 
-## 7. App-driven 路径：round 62 的三处地基修复
+## 7. App-driven 路径：round 62/63 的地基修复
 
 round 61 的 logo 帧仍然是 harness 解码 HLE；要跑完整的 app-driven 开机
 画面，必须让 SplashScreen 自己的启动/import/EwSrv 路径成立。round 62
@@ -445,6 +445,35 @@ import table，然后才轮到 EwSrv jump table/literal relocation。
 验收：`tools/test_round62.sh`（含两个 0-instruction dump，证明
 `0x503b4f10` 在 kernel map 下变成 `0x5038918c`，不应用时保持
 `0x50389180`）。
+
+### round 63：第一个 app-side EUser import rebind
+
+SplashScreen 的 import slot `0x503b4338` 期望一个 CHeartbeat 风格的
+构造器：对象建好后，app 会用 `vtable+8`、`r1=3` 调它。ROM slot 里是
+`operator new`（`0x503963dc`，只返回 zeroed object），所以 round-62 的
+frontier 才会读 `[0+8]`。
+
+新增的 `config/imports-app-6600.txt` 把该 slot 重绑到 ROM export
+index 747（`0x50383c84`）。`0x50383c84` 分配 0x10 字节 CBase、安装
+vtable `0x503b359c`、分配 0x40 字节 backing store，并自己完成
+`vtable+8/r1=3` 的调用——与 app 的用法一致。`NK_APP_IMPORTMAP` 在
+flat image load 之后只改文件中列出的 app slots，不碰 kernel map。
+
+结果：
+
+```
+app import rebind: 0x503b4338 0x503963dc -> 0x50383c84
+stop: returned (2) at 0xdead0000
+insns=360
+0x80600008 -> vtable 0x503b359c
+```
+
+即 app 的静态初始化不再崩在 `0x509eef12`，而是构造出 CBase 并干净返回。
+**仍没有 framebuffer 写入**：真正的 splash main / active object 还没有
+被驱动。下一步要确认 SplashScreen 是由 EStart 调用、跑在独立线程，还是
+需要 active scheduler loop；之后再接 EwSrv jump table/literal relocation。
+
+验收：`tools/test_round63.sh`。
 
 ## 8. BitGdi 导出符号表（round 59）
 
@@ -504,3 +533,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
+8. 找到 SplashScreen 真正的 main / active object 驱动：round 63 的静态
+   初始化已经构造出 vtable `0x503b359c` 的 CBase 并返回，但没有
+   framebuffer 写入；需要确认 EStart 调用、独立线程或 active scheduler。

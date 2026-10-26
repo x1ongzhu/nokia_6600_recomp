@@ -508,6 +508,21 @@ direct-SWI 路径也到 500k 预算，但出现 `0x600000` wild clear。
 `0x509eef1a` 跳过去，`lr=0x509eef1f`。下一步是 per-consumer EUser
 import table 或 app import-name map。
 
+### 2.18 round 63：第一个 app-side EUser import rebind
+
+SplashScreen 的 `0x503b4338` slot 期望 CHeartbeat 风格构造器（对象建好
+后用 vtable+8、`r1=3` 调用），ROM slot 却是 `operator new`
+（`0x503963dc`，zeroed object）。`config/imports-app-6600.txt` +
+`NK_APP_IMPORTMAP` 把该 slot 重绑到 ROM export index 747
+（`0x50383c84`）。该函数分配 0x10 字节 CBase、安装 vtable
+`0x503b359c`、分配 0x40 字节 backing store，并自己完成同样的
+vtable+8/`r1=3` 调用。
+
+结果：静态初始化不再崩在 `0x509eef12`，`0x80600008` 得到 vtable
+`0x503b359c`，360 条后干净返回 `0xdead0000`。仍无 framebuffer 写入；
+下一步是 splash main/active object 的驱动方式（EStart / 线程 /
+active scheduler）。
+
 ---
 
 ## 3. EUser 导入映射

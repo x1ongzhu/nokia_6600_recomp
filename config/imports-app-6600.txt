@@ -1,0 +1,18 @@
+# imports-app-6600.txt - app-side EUser import rebinds (round 63)
+#
+# The kernel's EUser relocation map (imports-r29-6600.txt) patches *shared*
+# EUser export-table slots.  Apps use the same slots but were linked against
+# the ROM's EUser export order, so direct-app runs must not apply the kernel
+# map.  This file only rewrites the slots where the app's expected function
+# and the ROM's export differ.
+#
+# 0x503b4338: SplashScreen's static init calls this slot expecting a
+# CHeartbeat-style constructor (it then dispatches through the returned
+# object's vtable+8 with r1=3).  The ROM slot holds operator new(0), which
+# returns a zeroed object and crashes the virtual dispatch at 0x509eef12.
+# ROM export 747 (0x50383c84) is the matching constructor: it allocates the
+# 0x10-byte CBase, installs vtable 0x503b359c, allocates its 0x40-byte
+# backing store, and performs the same vtable+8/r1=3 call internally.
+#
+# Format: <slot> <target>
+0x503b4338 0x50383c84

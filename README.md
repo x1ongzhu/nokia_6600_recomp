@@ -59,9 +59,10 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   bring-up and acceptance.
 - **`config/`** — per-target config and import/call maps
   ([`config/6600.toml`](config/6600.toml),
-  [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
+  [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
+  [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 62)
+## Status (2026-10-26, round 63)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -74,7 +75,10 @@ stable executive loop. On the display side, the firmware's own
 `SplashScreen.mbm` logo frame is now decoded and written through guest
 `Mem::Copy` into the real LCD framebuffer (round 61). Round 62 then moved the
 **real SplashScreen app** past its StartThread wait and fixed the bring-up
-allocator header and the shared EUser export-table conflict. What works:
+allocator header and the shared EUser export-table conflict. Round 63 adds the
+first app-side EUser import rebind, so SplashScreen's static init now
+constructs its CBase and returns cleanly instead of crashing on a zero
+vtable. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -403,6 +407,17 @@ allocator header and the shared EUser export-table conflict. What works:
     reads `0xe59ff028` (`lr=0x509eef1f`).
   `tools/test_round62.sh` pins all three with two 0-instruction dumps.
 
+- [x] **First app-side EUser import rebind** (round 63): SplashScreen's slot
+  `0x503b4338` expects a CHeartbeat-style constructor (the app dispatches
+  through the returned object's vtable+8 with `r1=3`), but the ROM slot holds
+  `operator new` and returns a zeroed object. `config/imports-app-6600.txt`
+  plus `NK_APP_IMPORTMAP` rebind it to ROM export index 747
+  (`0x50383c84`), which allocates the 0x10-byte CBase, installs vtable
+  `0x503b359c`, and allocates its 0x40-byte backing store. Static init now
+  returns cleanly to `0xdead0000` in 360 instructions; `0x80600008` holds
+  vtable `0x503b359c`. No framebuffer writes yet — the real splash
+  main/active object is the next frontier. `tools/test_round63.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -543,7 +558,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round59.sh` | BitGdi export symbol map (`Clear`/`DrawBitmap` addresses mapped from the SDK import library) |
 | `tools/test_round60.sh` | `CFbsBitmap::Create` hits the same unresolved veneer (`0x506dd80c` → `0xe59ff028`) |
 | `tools/test_round61.sh` | real `SplashScreen.mbm` logo frame written through guest `Mem::Copy` |
-| `tools/test_round62.sh` | **current acceptance**: app-entry allocator cell header, StartThread completion, and shared EUser export-slot conflict |
+| `tools/test_round62.sh` | app-entry allocator cell header, StartThread completion, and shared EUser export-slot conflict |
+| `tools/test_round63.sh` | **current acceptance**: first app-side EUser import rebind; CBase vtable `0x503b359c`; static init returns cleanly |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
