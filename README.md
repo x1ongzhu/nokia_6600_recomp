@@ -61,12 +61,16 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 33)
+## Status (2026-10-26, round 34)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
-kernel's own constructor**, and **the first blocking executive call now
-switches to the kernel's NULL thread and returns**. What works:
+kernel's own constructor**, the **first blocking executive call switches to the
+kernel's NULL thread and returns**, and the **kernel's own `DThread` /
+`DProcess` / request-semaphore / `CObjectIx` objects now survive the
+thread-start and close paths**. The boot then runs **6,000,000 instructions
+with 14 timer IRQs and no faults**, through `Kern::Init3` and into the first
+stable executive loop. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -106,6 +110,29 @@ switches to the kernel's NULL thread and returns**. What works:
   complete the pending `TRequestStatus`, and preempts back to the supervisor
   at `0x50330a98`. **KERN 6 no longer fires**; boot advances to
   **440,623 instructions**.
+- [x] **Live kernel object graph** (round 34): the round-33 stop was the B7e
+  stand-in overwriting the kernel's real `DThread+0x18` (`DProcess`), `+0x5c`
+  (request semaphore) and `+0x64` (`CObjectIx`) on every publish; the kernel's
+  own `CObjectIx::Remove` then called a null vtable from our fake index.
+  `NK_B7E_LIVE=1` keeps every live object and fills only missing fields:
+  `0x80600d48` / `0x806019e0` / `0x806019c0` survive, the close path runs
+  vtable `0x503b36f8`, and the frontier moves past `0x503360d4`.
+- [x] **Status-completion scheduler wake** (round 34): a blocked thread becomes
+  runnable when its `TRequestStatus` leaves `KRequestPending`. The NULL
+  thread's second `Kern::StartThread` hand-off completes the supervisor's
+  status directly; the old dummy-page-only wake missed it, so a third hand-off
+  found no request and panicked `PLAT 0x73`. The harness now polls the saved
+  status at each instruction boundary and preempts back.
+- [x] **`Kern::Init3` HAL gate** (round 34): Init3 asks HAL object 3 for
+  `Request(0xd)` and polls `[0x800004cc]`. The stand-in device completes that
+  request explicitly (the real driver is mask-ROM code), so boot passes the
+  gate instead of spinning forever.
+- [x] **Banked exception stacks** (round 34): the supervisor's SVC stack grows
+  past 0x30 KiB. With the historical layout the IRQ stack sat underneath it,
+  so an IRQ frame overwrote the interrupted function's saved `LR` and the
+  return popped `PC=6`. Live mode places the exception stacks low in RAM and
+  treats a preset bank stack as authoritative; the SVC stack keeps its own
+  region.
 - [x] **Live thread identity / TTrap** (round 32): `TTrap` is 0x4c bytes
   (`iState[0x10]` +0x00, `iNext` +0x40, `iResult` +0x44, `iHandler` +0x48).
   The kernel's bootstrap `SThread` at `0x802ffd00` lives inside the boot
@@ -119,12 +146,11 @@ switches to the kernel's NULL thread and returns**. What works:
 
 Not implemented yet:
 
-- [ ] **Run queue / full thread state** — round 33 switches contexts and
-  crosses KERN 6, but `Kern::Init2`'s next step (creating further threads
-  through EUser `RThread::Create`, `0x5032e300`) now stops at a null call
-  `0x503360d4` in the multi-thread `CObjectIx`/B7e stand-in. The B7e graph
-  models a single live thread; it needs per-thread object indices before the
-  DFC threads can start.
+- [ ] **DFC / WSERV thread startup** — the boot now reaches a stable
+  6M-instruction loop in `Kern::Init3`, but the display/UI server thread has
+  not been created or scheduled. Round 34 only models the first two threads
+  (supervisor + NULL); `Kern::StartThread`'s remaining start requests need the
+  real ready queue and per-thread state.
 - [ ] Real ready-queue priorities, DFC thread, timer unit 1 / IRQ 2.
 - [ ] UI/display, keypad, audio, file server, app launching (P3).
 - [ ] Mask-ROM PeaK record codec (the hand-off is an explicit stand-in).
@@ -186,6 +212,14 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
 # ... svc #0x4d -> Wait on thread+0x5c; first switch starts 0x80601830 at
 # ... 0x5031f144; 0x50318398 completes the start request; supervisor resumes
 # ... at 0x50330a98, KERN 6 gone, 440,623 insns, next null call 0x503360d4
+
+# 9. round 34: keep the kernel's live objects, wake on status completion, and
+#    pass the Init3 HAL gate
+#    NK_B7E_LIVE=1 NK_SCHED=1 NK_BUDGET=6000000 ... (same command)
+# ... keeps DProcess 0x80600d48 / semaphore 0x806019e0 / CObjectIx 0x806019c0
+# ... CObjectIx close runs vtable 0x503b36f8; supervisor status 0x802fff8c
+# ... completion wakes it; HAL object 3 Request(0xd) sets [0x800004cc]
+# ... 5,999,982 insns, 14 timer IRQs, 0 undefined/unbound/recoveries
 ```
 
 Without `NK_SYSTEM_TIME=1` the same boot stops at 133,950 instructions with
@@ -211,7 +245,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round30.sh` | UPP timer/ICU, IRQ entry, idle exit, round-30 null call |
 | `tools/test_round31.sh` | historical control: timer-queue ctor, HAL vtable override, round-31 thread model |
 | `tools/test_round32.sh` | live heap DThread, TTrap/UnTrap, first blocking executive call (historical control) |
-| `tools/test_round33.sh` | **current acceptance**: WaitForAnyRequest block, first switch to the NULL thread, start hand-off, KERN 6 closed |
+| `tools/test_round33.sh` | WaitForAnyRequest block, first switch to the NULL thread, start hand-off, KERN 6 closed (historical control) |
+| `tools/test_round34.sh` | **current acceptance**: live DThread/CObjectIx graph, status-completion wake, Init3 HAL gate, banked stacks, 6M-instruction run |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -326,11 +361,53 @@ sched: startup request 0x802fff8c completed, supervisor 0x80601078 ready
 sched: preempt 0x80601830 -> supervisor 0x80601078 at pc 0x50330a98
 ```
 
-**KERN 6 is gone.**  The boot now reaches **440,623 instructions** and stops
+**KERN 6 is gone.**  That is where round 33 stopped: **440,623 instructions**,
 at a null call from `0x503360d4` while `Kern::Init2` creates further threads
-through EUser `RThread::Create` (`0x5032e300`): the B7e graph still models one
-live thread and its `CObjectIx` stand-in.  Per-thread object indices and a
-real ready queue are the next frontier.
+through EUser `RThread::Create` (`0x5032e300`).
+
+Round 34 showed that stop was self-inflicted.  The B7e hook rewrote three
+fields on every current-thread publish:
+
+```
+DThread+0x18  DProcess*           -> harness B7E_PROCESS
+DThread+0x5c  request semaphore   -> harness TLS object
+DThread+0x64  CObjectIx*          -> harness B7E_OBJIDX (no vtable)
+```
+
+The kernel had already created real objects for all three.  Its
+`CObjectIx::~CObjectIx` / `Remove` path (`0x5033606c`) calls
+`[index]->vtable+8`; our fake index had `[0] = 0`, hence the null call.
+`NK_B7E_LIVE=1` preserves live objects and fills only missing fields:
+
+```
+keeps live process 0x80600d48
+keeps request semaphore 0x806019e0
+keeps object index 0x806019c0        ; vtable 0x503b36f8
+```
+
+Two further gaps surfaced once the real objects were in use:
+
+1. The NULL thread's second `Kern::StartThread` hand-off completes the
+   supervisor's `TRequestStatus` directly (`0x503183b4`), without touching the
+   harness dummy page.  The old dummy-only wake missed it, so the NULL thread
+   ran a third hand-off with no pending request and panicked `PLAT 0x73`
+   (`0x50321a74`).  The scheduler now polls the saved status and wakes the
+   supervisor (`supervisor status 0x802fff8c completed`).
+2. The supervisor's SVC stack grows past 0x30 KiB.  The historical bank layout
+   put the IRQ stack underneath it, so an IRQ frame overwrote the interrupted
+   function's saved `LR` and the return popped `PC=6`.  Live mode places the
+   exception stacks low in RAM (`irq=0x801c0000`) and a preset bank stack is
+   authoritative.
+
+`Kern::Init3` then asks the HAL for object 3 and issues `Request(0xd)`, polling
+`[0x800004cc]`.  The stand-in device completes that request explicitly (the
+real driver is mask-ROM code), and boot passes the gate.  The result is a
+stable **5,999,982-instruction run with 14 timer IRQs, 0 undefined
+instructions, 0 unbound IAT and 0 recoveries**, ending in the executive timing
+loop at `0x5032211c`.
+
+The next frontier is the real ready queue and the DFC/WSERV thread startup;
+display-controller HLE and the first frame follow after the UI server runs.
 
 See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for the roadmap.
 

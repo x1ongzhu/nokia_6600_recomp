@@ -45,16 +45,19 @@ extern uint32_t          nk_dbg_write_watch;
 extern nk_write_hook_fn  nk_dbg_write_hook;
 void nk_dbg_watch_write(uint32_t addr, nk_write_hook_fn fn);
 
-/* A second watch is reserved for bring-up diagnostics (NK_WRITE_WATCH), so a
- * debug run can keep the B7e current-thread hook installed.  The third slot
- * follows a live thread's process field after the kernel installs a real
- * DProcess object. */
+/* A second watch is used by the scheduler hand-off page, the third follows a
+ * live thread's process field after the kernel installs a real DProcess
+ * object, and the fourth is reserved for bring-up diagnostics
+ * (NK_WRITE_WATCH) so a debug run keeps all three live hooks installed. */
 extern uint32_t          nk_dbg_write_watch2;
 extern nk_write_hook_fn  nk_dbg_write_hook2;
 void nk_dbg_watch_write2(uint32_t addr, nk_write_hook_fn fn);
 extern uint32_t          nk_dbg_write_watch3;
 extern nk_write_hook_fn  nk_dbg_write_hook3;
 void nk_dbg_watch_write3(uint32_t addr, nk_write_hook_fn fn);
+extern uint32_t          nk_dbg_write_watch4;
+extern nk_write_hook_fn  nk_dbg_write_hook4;
+void nk_dbg_watch_write4(uint32_t addr, nk_write_hook_fn fn);
 
 static inline uint32_t nk_r32(nk_cpu_t* c, uint32_t a) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {
@@ -84,6 +87,8 @@ static inline void nk_dbg_note_write(nk_cpu_t* c, uint32_t a, uint32_t v) {
         nk_dbg_write_hook2(c, a, v);
     if (a == nk_dbg_write_watch3 && nk_dbg_write_hook3)
         nk_dbg_write_hook3(c, a, v);
+    if (a == nk_dbg_write_watch4 && nk_dbg_write_hook4)
+        nk_dbg_write_hook4(c, a, v);
 }
 static inline void nk_w32(nk_cpu_t* c, uint32_t a, uint32_t v) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 4) {

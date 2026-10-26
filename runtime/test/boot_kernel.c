@@ -21,6 +21,8 @@
  *   NK_TRACE=1              print every executed instruction (first NK_TRACE_N)
  *   NK_TRACE_N=64           trace window size
  *   NK_TRACE_FROM=0x...     only trace PCs >= this address
+ *   NK_TRACE_AFTER=n        only start tracing after n instructions
+ *   NK_CALLS=1              print the interpreter shadow call stack at stop
  *   NK_INFER=0|1            mode inference on an undefined instruction (default 1)
  *   NK_CALL_INFER=1         repair Thumb<->ARM mode at BL/BLX call sites
  *   NK_CALL_POLICY=0|1|2|3  how to repair a call target:
@@ -107,7 +109,7 @@
  *   NK_WATCH_LOG=n          how many recent calls to print (default 16)
  *   NK_WATCH_MEM=rN[:len]   at a watch hit, dump len bytes at rN (default 0x40)
  *   NK_WRITE_WATCH=0x...    log stores to this guest word with the writing PC
- *                           (second watch slot; coexists with the B7e hook)
+ *                           (fourth watch slot; coexists with all live hooks)
  *   NK_WRITE_WATCH_MAX=n    stop reporting after n stores (default 8)
  *   NK_SPIN=1               enable the tight-loop watchdog
  *   NK_SPIN_MAX=n           visits to one PC before it is a spin (default 20000)
@@ -145,6 +147,12 @@
  *                           marker) and publish it at thread+0x3c.  This is
  *                           the user-side startup that the direct E32 entry
  *                           skips; without it CleanupStack::PushL panics 69.
+ *   NK_B7E_LIVE=1           keep live kernel objects: only fill a thread's
+ *                           +0x18 DProcess / +0x5c request semaphore / +0x64
+ *                           CObjectIx when the kernel has none.  Also enables
+ *                           status-completion scheduler wakes, low exception
+ *                           stacks, the HAL object-3 Request(0xd) stand-in and
+ *                           the live-mode HAL map stub.  Round 34.
  *   NK_BANKED=1             enable the banked r13/r14, FIQ r8-r12 and SPSR
  *                           model; the harness presets per-mode stacks
  *   NK_BANK_LOG=1           log every banked CPSR mode switch
@@ -641,6 +649,8 @@ typedef struct sched_thread {
     int      started;
 } sched_thread;
 
+static int      b7e_live;      /* keep kernel-created +0x18/+0x5c/+0x64 */
+
 static sched_thread sched_slot_tab[SCHED_SLOTS];
 static int      sched_on;
 static int      sched_log = 8;
@@ -695,6 +705,25 @@ static void sched_resume(nk_cpu_t* c, nk_interp_t* ip, sched_thread* s) {
  * implements exactly that, saving the NULL thread mid-startup so it can be
  * resumed when the supervisor next blocks. */
 static int sched_yield_hook(nk_cpu_t* c, nk_interp_t* ip) {
+    /* Round 34: a blocked thread is runnable again as soon as its pending
+     * TRequestStatus is completed, whoever completes it.  With the kernel's
+     * own request semaphore and CObjectIx preserved, the NULL thread's
+     * StartThread hand-off writes 0 straight into the supervisor's status and
+     * never touches the harness dummy page, so the old dummy-only wake missed
+     * it and the next hand-off panicked PLAT 0x73.  Poll the saved status at
+     * every instruction boundary; it is one word in frozen stack memory. */
+    if (sched_on && b7e_live && sched_supervisor) {
+        sched_thread* sup = sched_slot(sched_supervisor, 0);
+        if (sup && sup->state == 3 && sup->status &&
+            nk_r32(c, sup->status & ~3u) != 0x80000001u) {
+            sup->state = 1;
+            sched_need_yield = 1;
+            if (sched_log-- > 0)
+                printf("sched: supervisor status %#010x completed; "
+                       "runnable again (insns=%lu)\n",
+                       sup->status, ip->st.insns);
+        }
+    }
     if (!sched_need_yield) return 0;
     sched_need_yield = 0;
     if (!sched_on || !sched_supervisor) return 0;
@@ -711,7 +740,8 @@ static int sched_yield_hook(nk_cpu_t* c, nk_interp_t* ip) {
     sched_switches++;
     if (sched_log-- > 0)
         printf("sched: preempt %#010x -> supervisor %#010x at pc %#010x "
-               "(its wait returns 0)\n", cur->thread, sup->thread, c->r[15]);
+               "(its wait returns 0, insns=%lu)\n", cur->thread, sup->thread,
+               c->r[15], ip->st.insns);
     return 1;
 }
 
@@ -774,8 +804,8 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
     sched_blocks++;
     if (sched_log-- > 0)
         printf("sched: thread %#010x blocks on svc #0x%02x (status %#010x, "
-               "resume %#010x)\n", t, imm & 0x1ffu, cur->status,
-               cur->resume_pc);
+               "resume %#010x, insns=%lu)\n", t, imm & 0x1ffu, cur->status,
+               cur->resume_pc, ip->st.insns);
 
     /* Pick the next thread: the kernel's NULL thread is the only other one
      * this boot has created. */
@@ -820,8 +850,8 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
         next->started = 1;
         next->state = 1;
         printf("sched: first switch -> NULL thread %#010x, entry %#010x, "
-               "stack %#010x..%#010x\n", next->thread, next->r[15],
-               base, base + SCHED_STACK_SIZE);
+               "stack %#010x..%#010x (insns=%lu)\n", next->thread, next->r[15],
+               base, base + SCHED_STACK_SIZE, ip->st.insns);
     }
 
     /* Kernel hand-off (0x50318398): the first switch publishes the new
@@ -859,8 +889,8 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
     sched_switches++;
     if (sched_log-- > 0)
         printf("sched: switch #%u -> thread %#010x pc %#010x sp %#010x "
-               "cpsr %#010x\n", sched_switches, next->thread, c->r[15],
-               c->r[13], c->cpsr);
+               "cpsr %#010x (insns=%lu)\n", sched_switches, next->thread, c->r[15],
+               c->r[13], c->cpsr, ip->st.insns);
     return 1;
 }
 
@@ -889,6 +919,7 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
 
 #define B7E_ZERO_STUB  0xffff0300u   /* mov r0,#0; bx lr                  */
 #define B7E_HAL_STUB   0xffff0600u   /* HAL map/channel, see b7e_install() */
+#define B7E_HAL_REQ    0xffff0800u   /* stand-in device Request(), id 0xd  */
 #define B7E_ALLOC_STUB 0xffff0200u   /* bump allocator, see b7e_install() */
 #define B7E_ALLOC_LIT  0xffff0240u   /* -> guest bump cursor              */
 #define B7E_AT_STUB    0xffff0400u   /* CObjectIx element fetch            */
@@ -948,6 +979,15 @@ static int b7e_valid_ptr(uint32_t v) {
     return v >= b7e_valid_lo && v < b7e_valid_hi;
 }
 
+/* A live kernel object starts with a vtable pointer in kernel text.  This is
+ * what distinguishes a real DProcess/CObjectIx/request semaphore from a
+ * harness stand-in (whose first word is a data address or zero). */
+static int b7e_live_object(nk_cpu_t* c, uint32_t v) {
+    if (!b7e_valid_ptr(v)) return 0;
+    uint32_t vt = nk_r32(c, v);
+    return vt >= 0x50000000u && vt < 0x52000000u;
+}
+
 static void b7e_fill_vtable(nk_cpu_t* c, uint32_t vt, uint32_t stub) {
     for (int i = 0; i < B7E_VT_ENTRIES; i++)
         nk_w32(c, vt + 4u * (uint32_t)i, stub);
@@ -965,6 +1005,16 @@ static void b7e_process_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
          * Keep the live thread attached: the direct E32-entry boot has no
          * scheduler startup to recreate the graph. */
         nk_w32(c, addr, B7E_PROCESS);
+        return;
+    }
+    /* Round 34: the kernel builds a real DProcess (and, in it, a real
+     * CObjectIx) once the executive starts creating threads.  Only fill in
+     * the handle index when the process has none: replacing a live index
+     * makes CObjectIx::Remove/Close call a null vtable later. */
+    if (b7e_live && b7e_valid_ptr(nk_r32(c, value + 0x38))) {
+        if (b7e_installs <= 8)
+            printf("B7e: process %#010x keeps live object index %#010x\n",
+                   value, nk_r32(c, value + 0x38));
         return;
     }
     nk_w32(c, value + 0x38, B7E_OBJIDX);
@@ -1010,9 +1060,33 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     b7e_current_thread = t;
     /* Only the kernel's scheduler publishes current-thread pointers here.
      * Re-install on every switch so the graph survives a hand-off. */
-    nk_w32(c, t + 0x18, B7E_PROCESS);       /* thread -> process       */
-    nk_w32(c, t + 0x5c, B7E_TLS);           /* thread-local vtable obj */
-    nk_w32(c, t + 0x64, B7E_OBJIDX);        /* 0x40000000 branch       */
+    {
+        uint32_t p = nk_r32(c, t + 0x18);
+        uint32_t s = nk_r32(c, t + 0x5c);
+        uint32_t h = nk_r32(c, t + 0x64);
+        /* Round 34: a thread the kernel fully constructed already points at
+         * its DProcess (+0x18), request semaphore (+0x5c) and CObjectIx
+         * (+0x64).  Overwriting those with harness stand-ins is what made
+         * CObjectIx::Remove call a null vtable at round 33's frontier.  Keep
+         * real objects; fill in only missing ones. */
+        if (b7e_live && b7e_live_object(c, p)) {
+            if (b7e_installs <= 8)
+                printf("B7e: thread %#010x keeps live process %#010x\n", t, p);
+            if (!b7e_valid_ptr(nk_r32(c, p + 0x38)))
+                nk_w32(c, p + 0x38, B7E_OBJIDX);
+        } else {
+            nk_w32(c, t + 0x18, B7E_PROCESS);
+            p = B7E_PROCESS;
+        }
+        if (!(b7e_live && b7e_live_object(c, s)))
+            nk_w32(c, t + 0x5c, B7E_TLS);
+        else if (b7e_installs <= 8)
+            printf("B7e: thread %#010x keeps request semaphore %#010x\n", t, s);
+        if (!(b7e_live && b7e_live_object(c, h)))
+            nk_w32(c, t + 0x64, B7E_OBJIDX);
+        else if (b7e_installs <= 8)
+            printf("B7e: thread %#010x keeps object index %#010x\n", t, h);
+    }
     if (b7e_trapclean) {
         uint32_t base = b7e_trap_slot(t);
         if (base) {
@@ -1060,6 +1134,7 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     if (b7e_valid_hi < 0x80400000u) b7e_valid_hi = 0x80400000u;
     b7e_valid_hi = (uint32_t)env_ulong("NK_B7E_VALID_HI", b7e_valid_hi);
     b7e_trapclean = (int)env_ulong("NK_TRAPCLEAN", 0);
+    b7e_live = (int)env_ulong("NK_B7E_LIVE", 0);
     /* RHeap::Alloc treats word 0 of the heap object as a base added to the
      * allocator's result, and its caller rejects results >= 0x50000000.
      * The allocator therefore returns an *offset*; the bump cursor is
@@ -1078,13 +1153,38 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
      * A bare integer handle is not enough for the second call: the RTC
      * driver stores it and later reads its vtable.  Return a real guest
      * object whose vtable is the HAL stub table. */
-    nk_w32(c, B7E_HAL_STUB + 0x00, 0xe3510000u); /* cmp r1,#0 */
-    nk_w32(c, B7E_HAL_STUB + 0x04, 0x059f0008u); /* ldreq r0,[pc,#8] */
-    nk_w32(c, B7E_HAL_STUB + 0x08, 0x13a00000u); /* movne r0,#0 */
-    nk_w32(c, B7E_HAL_STUB + 0x0c, 0xe12fff1eu); /* bx lr */
+    if (b7e_live) {
+        /* Round 34: Kern::Init3's startup loop asks vtable+0x108 for object
+         * id 3 and retries until it gets a live DObject*; the old r1!=0
+         * zero return made that loop permanent.  Keep r1=1 as the
+         * map/create success code and hand back the stand-in device object
+         * for every other id (0 = channel, 3 = the object Init3 waits for). */
+        nk_w32(c, B7E_HAL_STUB + 0x00, 0xe3510001u); /* cmp r1,#1 */
+        nk_w32(c, B7E_HAL_STUB + 0x04, 0x159f0008u); /* ldrne r0,[pc,#8] */
+        nk_w32(c, B7E_HAL_STUB + 0x08, 0x03a00000u); /* moveq r0,#0 */
+        nk_w32(c, B7E_HAL_STUB + 0x0c, 0xe12fff1eu); /* bx lr */
+    } else {
+        nk_w32(c, B7E_HAL_STUB + 0x00, 0xe3510000u); /* cmp r1,#0 */
+        nk_w32(c, B7E_HAL_STUB + 0x04, 0x059f0008u); /* ldreq r0,[pc,#8] */
+        nk_w32(c, B7E_HAL_STUB + 0x08, 0x13a00000u); /* movne r0,#0 */
+        nk_w32(c, B7E_HAL_STUB + 0x0c, 0xe12fff1eu); /* bx lr */
+    }
     nk_w32(c, B7E_HAL_STUB + 0x14, B7E_HAL_CHAN);
     nk_w32(c, B7E_ONE_STUB, 0xe3a00001u);        /* mov r0,#1 */
     nk_w32(c, B7E_ONE_STUB + 4, 0xe12fff1eu);    /* bx lr     */
+    /* Round 34: Kern::Init3 gets object 3 from the HAL and issues Request
+     * 0xd, then polls [0x800004cc] until it is non-zero.  On the real phone
+     * the device driver completes that request (its DFC/ISR calls the
+     * kernel export at 0x50336284, which stores the owner).  The stand-in
+     * device has no driver behind it, so complete the request here: set the
+     * gate and return 1.  This is an explicit HAL HLE, not guest code. */
+    nk_w32(c, B7E_HAL_REQ + 0x00, 0xe3a03001u);  /* mov r3,#1           */
+    nk_w32(c, B7E_HAL_REQ + 0x04, 0xe59f2008u);  /* ldr r2,[pc,#8]      */
+    nk_w32(c, B7E_HAL_REQ + 0x08, 0xe5823000u);  /* str r3,[r2]         */
+    nk_w32(c, B7E_HAL_REQ + 0x0c, 0xe3a00001u);  /* mov r0,#1           */
+    nk_w32(c, B7E_HAL_REQ + 0x10, 0xe12fff1eu);  /* bx lr               */
+    nk_w32(c, B7E_HAL_REQ + 0x14, 0x800004ccu);  /* literal             */
+    nk_code_range_add(ip, B7E_HAL_REQ, B7E_HAL_REQ + 0x18);
     nk_code_range_add(ip, B7E_ZERO_STUB, B7E_ZERO_STUB + 8);
     nk_code_range_add(ip, B7E_ONE_STUB, B7E_ONE_STUB + 8);
     nk_code_range_add(ip, B7E_HAL_STUB, B7E_HAL_STUB + 0x18);
@@ -1156,6 +1256,8 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     for (int i = 0; i < 128; i++)
         nk_w32(c, B7E_VT_HAL + 4u * i, B7E_ZERO_STUB);
     nk_w32(c, B7E_VT_HAL + 0x108u, B7E_HAL_STUB);  /* HAL map/channel */
+    if (b7e_live)
+        nk_w32(c, B7E_VT_HAL + 0x48u, B7E_HAL_REQ); /* device Request */
     nk_w32(c, B7E_HAL, B7E_VT_HAL);
     /* The channel handle call (r1=0) must return a dereferenceable object. */
     nk_w32(c, B7E_HAL_CHAN, B7E_VT_HAL);
@@ -1987,16 +2089,36 @@ int main(int argc, char** argv) {
          * banks those writes all land on the SVC stack.  These tops are a
          * bring-up stand-in, not recovered firmware state. */
         uint32_t top = 0x80300000u;
-        nk_bank_init(&cpu, NK_MODE_SVC, top, cpu.r[14]);
-        nk_bank_init(&cpu, NK_MODE_UND, top - 0x4000u, cpu.r[14]);
-        nk_bank_init(&cpu, NK_MODE_ABT, top - 0x8000u, cpu.r[14]);
-        nk_bank_init(&cpu, NK_MODE_IRQ, top - 0xc000u, cpu.r[14]);
-        nk_bank_init(&cpu, NK_MODE_FIQ, top - 0x10000u, cpu.r[14]);
-        nk_bank_init(&cpu, NK_MODE_USR, top - 0x14000u, cpu.r[14]);
-        printf("banked mode stacks: svc=%#010x und=%#010x abt=%#010x "
-               "irq=%#010x fiq=%#010x usr=%#010x\n",
-               top, top - 0x4000u, top - 0x8000u, top - 0xc000u,
-               top - 0x10000u, top - 0x14000u);
+        if (b7e_live) {
+            /* Round 34: the supervisor's SVC stack legitimately grows past
+             * 0x30 KiB during Kern::Init2/Init3.  With the historical layout
+             * the exception banks sat *below* the SVC top, so an IRQ at
+             * sp=0x802f3fec pushed its frame over the interrupted function's
+             * saved LR and the return popped PC=6.  In the live-object model
+             * put the exception stacks low in the 3 MiB window; the SVC stack
+             * then has ~1 MiB of private room below 0x80300000. */
+            nk_bank_init(&cpu, NK_MODE_SVC, top, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_UND, 0x80140000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_ABT, 0x80180000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_IRQ, 0x801c0000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_FIQ, 0x80200000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_USR, 0x80240000u, cpu.r[14]);
+            printf("banked mode stacks: svc=%#010x und=%#010x abt=%#010x "
+                   "irq=%#010x fiq=%#010x usr=%#010x\n",
+                   top, 0x80140000u, 0x80180000u, 0x801c0000u,
+                   0x80200000u, 0x80240000u);
+        } else {
+            nk_bank_init(&cpu, NK_MODE_SVC, top, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_UND, top - 0x4000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_ABT, top - 0x8000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_IRQ, top - 0xc000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_FIQ, top - 0x10000u, cpu.r[14]);
+            nk_bank_init(&cpu, NK_MODE_USR, top - 0x14000u, cpu.r[14]);
+            printf("banked mode stacks: svc=%#010x und=%#010x abt=%#010x "
+                   "irq=%#010x fiq=%#010x usr=%#010x\n",
+                   top, top - 0x4000u, top - 0x8000u, top - 0xc000u,
+                   top - 0x10000u, top - 0x14000u);
+        }
     }
 
     ip.budget = (long)env_ulong("NK_BUDGET", 2000000);
@@ -2037,7 +2159,7 @@ int main(int argc, char** argv) {
     g_ww_max = (long)env_ulong("NK_WRITE_WATCH_MAX", 8);
     if (g_ww_addr) {
         if (g_ww_max <= 0) g_ww_max = 0;
-        nk_dbg_watch_write2(g_ww_addr, debug_write_hook);
+        nk_dbg_watch_write4(g_ww_addr, debug_write_hook);
         printf("write watch: %#010x (max %ld stores)\n", g_ww_addr, g_ww_max);
     }
     if (env_ulong("NK_BOOT_TIME", 0)) {
@@ -2097,6 +2219,7 @@ int main(int argc, char** argv) {
     if (getenv("NK_TRACE")) ip.trace = 1;
     ip.trace_limit = (long)env_ulong("NK_TRACE_N", 64);
     ip.trace_from = (uint32_t)env_ulong("NK_TRACE_FROM", 0);
+    ip.trace_after = (unsigned long)env_ulong("NK_TRACE_AFTER", 0);
     ip.return_pc = (uint32_t)env_ulong("NK_STOP_PC", cpu.r[14]);
     ip.return_thumb = (uint8_t)thumb_entry;
 
@@ -2156,6 +2279,12 @@ int main(int argc, char** argv) {
     for (int i = start; i < ip.last_n; i++)
         printf(" %08x", ip.last[i & 15]);
     printf("\n");
+    if (getenv("NK_CALLS")) {
+        printf("shadow calls (%d):", ip.calls_n);
+        for (int i = 0; i < ip.calls_n; i++)
+            printf(" %08x", ip.calls[i].lr);
+        printf("\n");
+    }
 
     if (ip.st.stop_reason == NK_STOP_UNDEFINED) {
         uint32_t pc = ip.st.stop_pc;

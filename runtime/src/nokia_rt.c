@@ -359,6 +359,14 @@ void nk_dbg_watch_write3(uint32_t addr, nk_write_hook_fn fn) {
     nk_dbg_write_hook3 = fn;
 }
 
+uint32_t         nk_dbg_write_watch4;
+nk_write_hook_fn nk_dbg_write_hook4;
+
+void nk_dbg_watch_write4(uint32_t addr, nk_write_hook_fn fn) {
+    nk_dbg_write_watch4 = addr;
+    nk_dbg_write_hook4 = fn;
+}
+
 uint32_t nk_read_slow(nk_cpu_t* c, uint32_t a, unsigned size) {
     /* Whole access in one unmapped page: let the bus answer as a unit. */
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - size && !nk_page_ptr(c, a))

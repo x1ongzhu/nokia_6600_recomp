@@ -206,6 +206,8 @@ typedef struct nk_interp {
     int      recover_max;   /* stop after this many skips (default 256) */
     int      recover_log;   /* log the first N skips (default 16) */
     uint32_t trace_from;    /* only trace PCs >= this (0 = all) */
+    long     trace_seen;    /* instructions printed by the trace window */
+    unsigned long trace_after; /* only trace once this many insns executed */
     uint32_t return_pc;     /* stop when PC reaches this address (0 = never) */
     uint8_t  return_thumb;
 

@@ -84,7 +84,14 @@ static void bank_load(nk_cpu_t* c) {
         b->lr = c->r[14];
         b->valid = 1;
     }
-    if (!b->preset || stack_in_ram(b->sp))
+    /* A preset bank's stack is authoritative.  The old test also required it
+     * to be inside the 3 MiB kernel window; when an exception stack lives
+     * outside that window (or a bank's saved sp was the 0xfffffffc sentinel)
+     * the code adopted the *current* sp instead, so an IRQ return could load
+     * the IRQ stack into the SVC bank and the next return popped a frame from
+     * the wrong stack.  bank_save() still follows a guest that switches to a
+     * new in-RAM stack, so using b->sp here cannot pin a stale stack. */
+    if (b->preset || stack_in_ram(b->sp))
         c->r[13] = b->sp;
     else
         b->sp = c->r[13];
@@ -304,8 +311,10 @@ static int swi_direct(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm, uint32_t pc) {
 
 static void trace_pc(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc, uint32_t insn) {
     if (!ip->trace || ip->trace_limit <= 0) return;
-    if (ip->st.insns >= (unsigned long)ip->trace_limit) return;
+    if (ip->trace_seen >= ip->trace_limit) return;
+    if (ip->st.insns < ip->trace_after) return;
     if (ip->trace_from && pc < ip->trace_from) return;
+    ip->trace_seen++;
     fprintf(stderr, "[interp] %c %08x  %08x  r0=%08x r1=%08x r2=%08x r3=%08x sp=%08x lr=%08x\n",
             thumb(c) ? 'T' : 'A', pc, insn, c->r[0], c->r[1], c->r[2], c->r[3],
             c->r[13], c->r[14]);

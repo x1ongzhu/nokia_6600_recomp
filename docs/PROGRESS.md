@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 33）
+最后更新：2026-10-26（round 34）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -97,22 +97,47 @@
   `RThread::Create`（`0x5032e300`）创建线程时，B7e 单线程
   `CObjectIx` 模型不足。
 
+- **保留 kernel 自己的 live 对象图**（round 34）：round-33 的 null call
+  是 B7e 自己造成的。每次发布 current thread 时，hook 都会覆盖
+  `DThread+0x18`（真实 `DProcess`）、`+0x5c`（真实请求信号量）、
+  `+0x64`（真实 `CObjectIx`）。`NK_B7E_LIVE=1` 只在字段为空时补
+  stand-in；于是 `0x80600d48 / 0x806019e0 / 0x806019c0` 保留下来，
+  `0x5033606c` 的 CObjectIx 关闭路径调用真实 vtable `0x503b36f8`，
+  `0x503360d4` 的 null call 消失。
+- **TRequestStatus 完成即唤醒**（round 34）：NULL 线程第二次
+  `Kern::StartThread` 交接直接把 0 写进 supervisor 的
+  `TRequestStatus`（`0x503183b4`），不再触碰 harness dummy 页。旧的
+  “只有 dummy 页被写才抢占”模型漏掉这次唤醒，NULL 线程于是用空
+  request 做第三次交接并 panic `PLAT 0x73`。scheduler 现在每条指令
+  边界轮询保存的 status，完成后立即把 supervisor 置为 runnable 并
+  抢占（日志 `supervisor status 0x802fff8c completed`）。
+- **`Kern::Init3` 的 HAL gate**（round 34）：Init3 取 HAL object 3，
+  发 `Request(0xd)`，然后轮询 `[0x800004cc]`。stand-in device 显式
+  完成该请求（真实驱动在 mask ROM 中），boot 通过该 gate。
+- **banked 异常栈不再与 SVC 栈重叠**（round 34）：supervisor 的 SVC
+  栈会超过 0x30 KiB；历史布局把 IRQ 栈放在它下面，IRQ frame 会覆盖
+  被中断函数的 saved LR，返回时 `PC=6`。live 模式把异常栈放在 RAM
+  低地址（`irq=0x801c0000`），并让 preset bank stack 保持权威。
+- **稳定 6M 指令运行**：`NK_B7E_LIVE=1 NK_SCHED=1 NK_BUDGET=6000000`
+  运行 **5,999,982 条、14 次 timer IRQ、0 undefined、0 unbound IAT、
+  0 recoveries**，停在 executive timing 循环 `0x5032211c`。
+
 ### 未完成
 
-- **run queue / 多线程对象图**：round 33 已完成一次真实上下文切换并跨过
-  KERN 6，但 Init2 继续创建线程时停在 `0x503360d4` 的 null call。
-  B7e 目前只发布一个 live thread 和它的 `CObjectIx`；新线程的
-  `CObjectIx` 仍取到同一个 harness 对象，随后调用空 vtable。需要按
-  `DThread` 对象分别建立对象索引/句柄图。
-- **完整 ready queue 与优先级**：当前只在 Init2 的 wait（LR
-  `0x50330a98`）和线程启动交接点切换，尚未实现真正的优先级队列、
+- **DFC / WSERV 线程启动**：boot 已进入稳定循环，但 display/UI server
+  线程还没有被创建和调度。当前 run queue 只真正跑 supervisor 与
+  NULL 两个线程；`Kern::StartThread` 余下的启动请求需要完整
+  ready queue 与每线程状态。
+- **完整 ready queue 与优先级**：当前在 Init2 的 wait（LR
+  `0x50330a98`）和线程启动交接点切换；尚未实现真正的优先级队列、
   抢占时间片与 DFC 线程。
 - **`svc #0x4d` 的通用语义**：Init2 的 wait 已按信号量阻塞实现；
   更早的 EUser wait 循环仍走 `NK_SWI_COMPLETE=0x4d` 的内联 HLE，
   尚未在每条等待路径上做真实的 TRequestStatus 完成。
 - **Timer unit 1 / DFC 队列**：IRQ 2 的 handler `0x503113d8` 已注册，
   但系统 tick 队列尚未启动（没有 pending timer）。
-- **显示/键盘/音频/文件服务/应用启动**（P3）。
+- **显示/键盘/音频/文件服务/应用启动**（P3）；display controller 与
+  第一帧是下一步的最终目标。
 - **Mask-ROM PeaK record codec**：当前 hand-off 是显式 stand-in，不是解包实现。
 - **真实硬件 HLE**：display controller、DSP/radio、RTC 仍是最小模型。
 
@@ -175,7 +200,21 @@
 | `0x503312d4` | `Kern::StartThread`（`svc #0x76`），调用 `[thread]->vtable+0x20` |
 | `0x5031f144` | kernel NULL 线程入口（`0x5032faf4` 字面量） |
 | `0x5032faf4` | 线程创建参数里的入口函数字面量 = `0x5031f144` |
-| `0x503360d4` | round-33 新 frontier：多线程 `CObjectIx`/B7e 路径的 null call（LR） |
+| `0x503360d4` | round-33 frontier：多线程 `CObjectIx`/B7e 路径的 null call（LR）；round 34 已关闭 |
+| `0x5033606c` | `CObjectIx` 关闭/移除路径（`0x50332cc0` 从 `DThread+0x64` 调用）；`[index]->vtable+8` |
+| `0x503b36f8` | 真实 `CObjectIx` vtable（`CObjectIx::NewL` `0x50384d24` 安装） |
+| `0x806019c0` | NULL 线程自己的 `CObjectIx`（round 34 保留，不再被 B7E_OBJIDX 覆盖） |
+| `0x806019e0` | NULL 线程的请求信号量（`0x503311c8` 创建；round 34 保留） |
+| `0x80600d48` | supervisor / NULL 线程的真实 `DProcess`（round 34 保留） |
+| `0x503183b4` | hand-off 真正完成 `TRequestStatus` 的 store（写 0 到 `[0x80001784]` 与 status） |
+| `0x50321a74` | `PLAT` panic 入口；`0x73` = thread-start 没有 pending request |
+| `0x5031f144` | NULL 线程入口；`Kern::Init3` 在其中运行 |
+| `0x5031f154` | Init3 轮询 HAL object 3 的循环 |
+| `0x800003ac` | `Kern::TheKernel`/HAL 全局；stand-in vtable `0x80003c00` |
+| `0x5031f19c` | 对 HAL device 调用 `vtable+0x48`（`Request(0xd,0,0)`） |
+| `0x800004cc` | Init3 gate：`Request(0xd)` 完成后置非零；round 34 由 HAL stub 置 1 |
+| `0x50336284` | kernel export 331（index；ordinal 332）：`[0x800004cc] = r0` setter |
+| `0x5032211c` | 6M 预算停止处的 executive timing 辅助（读 `[0x40000800]`） |
 | `0x80530000` | harness 线程启动 hand-off status 页（`NK_SCHED=1`） |
 | `0x80540000` | harness NULL 线程内核栈（0x2000，`NK_SCHED_STACK` 可改） |
 | `0x50330a8c` | 初始化 `TRequestStatus`（`0x80000001`）并挂到 `[0x80001784]` |
@@ -377,17 +416,16 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 |---|---|---|
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
-| P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；run queue 与 DFC 线程仍缺 |
+| P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
 | P3 | 显示/键盘/音频、文件服务、S60 app 启动 | 未开始 |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
 
-1. **修复新线程的 CObjectIx/句柄图**：round 33 的 stop 是
-   `0x503360d4` 的 null call。B7e 的 `B7E_AT_STUB` 对所有句柄都返回
-   同一个 harness CObject；Init2 继续创建线程后，新线程用该对象调用空
-   vtable。需要按 `DThread` 对象分配各自的 `CObjectIx` 元素（至少让
-   `At()` 按 handle 区分），再重跑 NK_SCHED。
+1. **启动 DFC / WSERV 线程**：boot 已停在 `0x5032211c` 的 executive
+   timing 循环。下一步从 `[0x800003b8]`/`[0x800003bc]` 等对象表取出
+   DFC 与 WSERV 线程对象，给 `NK_SCHED` 一个真正的 ready queue，让
+   NULL 线程继续 `Kern::Init3` 并创建 UI server。
 2. **实现真正的 ready queue/优先级**：当前只在 Init2 wait 与线程启动
    交接点切换；下一步把 `DThread+0x24` 状态、`+0x20` suspend 位、
    优先级 `+0x1c` 纳入 run queue，并允许 NULL 线程被抢占后继续其
@@ -397,7 +435,9 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    `NK_SWI_COMPLETE=0x4d` 内联 HLE。
 4. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
    IRQ 2 → `0x503113d8` → DFC 路径。
-5. 之后进入 display controller 与 UI 路径。
+5. **Display controller HLE**：`176x208` 16bpp framebuffer、LCD 控制
+   寄存器与 MBM/Sprite 读回；接上窗口后即可验证第一帧。
+6. 之后进入 WSERV / S60 app 启动与待机 UI。
 
 ---
 
@@ -413,15 +453,19 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 - B7e 的 live-pointer 上界（`NK_B7E_VALID_HI`，默认 `0x80a00000`）必须覆盖
   kernel 实际分配的堆；旧值 `0x80400000` 会把真实 `DThread` 当成
   transient，并把 boot-stack 上的 SThread 重新发布（round-31 control）。
-- round 32 的 **KERN 6** 已被 round 33 的调度切换关闭；当前 stop 是
-  `0x503360d4` 的 null call（多线程 CObjectIx/B7e 模型），不是 CPU fault。
+- round 32 的 **KERN 6**、round 33 的 `0x503360d4` null call 都已在
+  round 34 关闭；当前 stop 是 6M 预算边界（`0x5032211c`），不是 CPU fault。
+- `NK_B7E_LIVE=1` 才会保留 live 的 `DThread+0x18/+0x5c/+0x64`；不设该开关时
+  B7e 仍按历史模型覆盖它们，round-33 control 因此保持不变。
 - `NK_SCHED=1` 的 NULL 线程内核栈（0x80540000）和启动 hand-off status
   （0x80530000）是 harness 分配的；kernel 自己分配的栈尚未从对象字段解出。
 - `NK_SCHED=1` 只接管 Init2 wait（LR `0x50330a98`）；其他 `svc #0x4d`
   仍走 `NK_SWI_COMPLETE=0x4d` 内联 HLE。
-- B7e 的 current-thread hook 仍把 `+0x5c` 覆盖成 TLS stand-in（`0x80003f00`），
-  会替换掉本 round 识别出的请求信号量。round 33 不执行 NULL 线程自己的
-  真实 Wait，所以切换可用；下一轮必须停止覆盖已是 live 指针的 `+0x5c`。
+- Init3 的 HAL object 3 / `Request(0xd)` 由 `NK_B7E_LIVE=1` 的显式 stub
+  完成并把 `[0x800004cc]` 置 1；真实驱动在 mask ROM 中，尚未解出。
+- live 模式把 UND/ABT/IRQ/FIQ/USR 栈放在 `0x80140000..0x80240000`；
+  SVC 栈仍从 `0x80300000` 向下增长。这是 harness 布局，不是从
+  mask ROM 恢复的栈指针。
 - timer unit 1 / IRQ 2 / DFC 路径尚未被真实 pending timer 触发。
 - 显示/键盘/音频/文件服务均未实现；app 二进制已放置，但无法启动。
 - `references/` 与 `fw/` 是本地离线材料，不随仓库分发。

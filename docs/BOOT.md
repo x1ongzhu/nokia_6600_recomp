@@ -293,6 +293,61 @@ pending status；NULL 线程启动时也会走这条路径。
 
 结果：**440,623 条、1 IRQ、0 undefined/unbound/recovery**。
 
+### 2.10 round 34：保留 live 对象图、status 唤醒、Init3 HAL gate、异常栈
+
+round 34 先证明 round-33 的 `0x503360d4` 是 B7e stand-in 自己造成的。
+每次发布 current thread 时，hook 覆盖了 kernel 已经建好的三个字段：
+
+| 字段 | 真实值（NULL 线程） | 被覆盖成 |
+|---|---|---|
+| `DThread+0x18` `DProcess*` | `0x80600d48` | `0x80003200` (B7E_PROCESS) |
+| `DThread+0x5c` 请求信号量 | `0x806019e0` | `0x80003f00` (TLS) |
+| `DThread+0x64` `CObjectIx*` | `0x806019c0` | `0x80003300`（其 `[0]` 为 0） |
+
+`0x5033606c` 是 CObjectIx 的 close/remove 路径：循环 `At()` 后，
+在 `0x503360c4` 取 `[index]->vtable` 并调 `+8`。真实 index 的 vtable
+是 `0x503b36f8`（`CObjectIx::NewL` `0x50384d24` 安装）；stand-in 没有
+vtable，于是 `PC=0`。
+
+`NK_B7E_LIVE=1` 只在字段为空/不是 live object 时补 stand-in：
+
+```
+B7e: thread 0x80601830 keeps live process 0x80600d48
+B7e: thread 0x80601830 keeps request semaphore 0x806019e0
+B7e: thread 0x80601830 keeps object index 0x806019c0
+```
+
+之后还暴露了三个问题：
+
+1. **status 唤醒**：NULL 线程第二次 `Kern::StartThread` 交接在
+   `0x503183b4` 直接把 0 写进 supervisor 的 `TRequestStatus`，
+   不碰 harness dummy `0x80530000`。旧模型只在 dummy 被写时抢占，
+   漏掉这次唤醒，NULL 线程继续第三次交接，`[0x80001784] == 0`，
+   `0x503221e0` → `Kern::Panic("PLAT", 0x73)`。scheduler 现在每条
+   指令边界检查保存的 status（`sched: supervisor status ... completed`）。
+2. **Init3 HAL gate**：`0x5031f154` 取 HAL object 3（`[0x800003ac]`
+   vtable+0x108，`r1=3`），对返回对象调用 `vtable+0x48`
+   （`Request(0xd,0,0)`），然后轮询 `[0x800004cc]`。stand-in 在
+   `B7E_HAL_REQ` 里置 1 并返回，boot 才能继续。
+3. **异常栈重叠**：supervisor 的 SVC 栈会增长到 `0x802ff...`，历史
+   布局的 IRQ 栈顶是 `0x802f4000`，IRQ frame 覆盖被中断函数的
+   saved LR，返回时 `PC=6`。live 模式把 IRQ/UND/ABT/FIQ/USR 放到
+   `0x80140000..0x80240000`；同时 `bank_load()` 不再用“栈必须在
+   3 MiB 内”来否决 preset bank sp。
+
+随后 boot 进入 `Kern::Init3` 的 executive timing 循环：
+
+```
+0x503343cc  push {r4,lr}
+0x503343d0  bl 0x5032211c        ; 读 [0x40000800]
+...
+0x503343e4  ldr r2,[r0,#0x54]
+0x503343e8  tst r3,r2
+```
+
+结果：**5,999,982 条、14 IRQ、0 undefined/unbound/recovery**，
+`sp=0x802fffe0`，停在 `0x5032211c` 的预算边界。不是 CPU fault。
+
 ---
 
 ## 3. EUser 导入映射
@@ -370,6 +425,15 @@ round 33（NK_SCHED=1，其余同 round 32）:
   0x50318398 hand-off -> supervisor 恢复 @ 0x50330a98, [sp] == 0
   stop: null call @ 0x503360d4（多线程 CObjectIx/B7e；不再是 KERN 6）
 
+round 34（NK_B7E_LIVE=1 NK_SCHED=1，budget 6,000,000）:
+  5,999,982 insns, 14 IRQ, 14 timer expiry
+  0 undefined / 0 unbound IAT / 0 recoveries
+  保留 DProcess 0x80600d48 / semaphore 0x806019e0 / CObjectIx 0x806019c0
+  CObjectIx close -> vtable 0x503b36f8；0x503360d4 null call 消失
+  supervisor status 0x802fff8c completed -> 抢占回 supervisor
+  Init3 HAL object 3 Request(0xd) -> [0x800004cc]=1
+  stop: budget @ 0x5032211c（executive timing 循环；sp=0x802fffe0）
+
 round 31 control（NK_TIMERQ_MODE=ctor，仅基类 vtable）:
   430,945 insns, 1 IRQ
   vtable+0x1c = User::Panic -> panic halt @ 0x50312b88
@@ -416,50 +480,56 @@ round 30 control（NK_TIMER=1, NK_CPSR=0x400000d3, I=1）:
 | `NK_TIMERQ_MODE=ctor\|stub` | 仅基类 vtable / 全零返回 vtable |
 | `NK_TIMERQ_ADDR=0x...` | 注入对象页（默认 `0x80500000`） |
 | `NK_B7E_VALID_HI=0x...` | B7e 认为“活线程/进程”的地址上界（默认映射堆顶 `0x80a00000`；`0x80400000` 复现 round 31） |
+| `NK_B7E_LIVE=1` | 保留 kernel 自己创建的 `DThread+0x18/+0x5c/+0x64`，只补缺失字段；启用 status 唤醒、低地址异常栈、HAL object 3 Request(0xd) stub（round 34） |
 | `NK_SCHED=1` | 在 Init2 的 `svc #0x4d` 处阻塞并切换到 NULL 线程（round 33） |
 | `NK_SCHED_LOG=n` | 打印前 n 条调度/切换/交接日志（默认 8） |
 | `NK_SCHED_LR=0x...` | 触发切换的 wait 返回地址（默认 `0x50330a98`） |
 | `NK_SCHED_ENTRY=0x...` | NULL 线程入口（默认 `0x5031f144`） |
 | `NK_SCHED_STACK=0x...` | harness NULL 线程栈基址（默认 `0x80540000`） |
+| `NK_TRACE_AFTER=n` | 只从第 n 条指令后开始 trace（与 `NK_TRACE_FROM` 组合定位末期路径） |
+| `NK_CALLS=1` | 停止时打印解释器 shadow call stack（LR 序列） |
 | `NK_ENTRY` / `NK_STOP_PC` | 覆盖入口/停止地址 |
 
 ---
 
 ## 6. 当前 frontier
 
-Round 33 在 `0x50330a94` 的 wait 处真正阻塞，保存 supervisor 上下文，
-在 0x80540000 的 0x2000 字节栈上从 NULL 线程真实入口 `0x5031f144`
-运行；guest 自己走 `0x50321088` → `0x50318398` 的启动交接，完成
-`[0x80001784]` 的 request 并唤醒 supervisor，随后立刻抢占回 supervisor。
-**KERN 6 已消失**，supervisor 在 `0x50330a98` 以 `[sp]==0` 继续。新
-frontier：
+Round 34 从 round-33 的 `0x503360d4` 继续。保留 live 对象后，CObjectIx
+关闭路径调用真实 vtable；status 完成唤醒 supervisor；Init3 的 HAL
+object 3 / `Request(0xd)` 由显式 stub 完成；异常栈不再覆盖 SVC 栈。
+boot 现在稳定运行到 **5,999,982 条、14 IRQ**，停在 `0x5032211c` 的
+executive timing 循环（不是 fault）：
 
 ```
-0x50330a98  supervisor resumes; [sp] == 0
-0x50330aac  Init2: current thread -> 0x50334ef0
-0x50330ac0  EUser import -> trap push
-0x50330acc  bl 0x5033045c
-0x50330740  bl 0x5032e300            ; EUser RThread::Create
-0x5032d4b4  ...
-0x503360d4  null call -> stop
+0x503343cc  push {r4,lr}
+0x503343d0  bl 0x5032211c        ; 读 [0x40000800]
+0x503343d4  ldr r4,[r0,#4]
+0x503343d8  bl 0x5032211c
+0x503343dc  ldr r3,[r0,#0x58]
+...
+0x503343e8  tst r3,r2
+0x503343f0  mov r0,r4
+0x503343f4  pop {r4,pc}
 ```
 
-stop 时的寄存器：`r0=0x80003300`（B7e 对象索引）、`r4=0xffffffff`、
-`r6=0x80601830`、`r7=0x80003200`。B7e 的 `CObjectIx::At` stand-in 对
-每个 handle 都返回同一个 harness CObject；Init2 又创建新线程后，空
-vtable 被调用。这不是 CPU/解析错误。
+stop 时：`sp=0x802fffe0`、`cpsr=0x80000053`、`irqs=14`、
+`undefined=0`、`unbound IAT=0`、`recoveries=0`。这说明 kernel 已经
+进入可运行的 executive/DFC 等待，但还没有 display/UI server 线程。
 
 下一步：
 
-1. **按线程区分 CObjectIx 元素**：让 `At()` 至少对 `DThread` 句柄返回
-   各自的对象，重跑 `NK_SCHED=1`，越过 `0x503360d4`。
+1. **DFC / WSERV 线程启动**：从 `[0x800003b8]`/`[0x800003bc]` 等
+   对象表取出 DFC 与 WSERV 线程对象，给调度器真正的 ready queue，
+   让 NULL 线程继续 `Kern::Init3` 并创建 UI server。
 2. **真正的 ready queue/优先级**：把 `DThread+0x24` 状态、`+0x20`
-   suspend 位、`+0x1c` 优先级纳入队列，允许 NULL 线程被抢占后继续
-   `Kern::Init3`/DFC 创建。
+   suspend 位、`+0x1c` 优先级纳入队列，允许线程被抢占后继续。
 3. **`svc #0x4d` 的通用完成路径**：为请求信号量实现
    `RequestComplete` 的 signal，替换早期 wait 循环的
    `NK_SWI_COMPLETE=0x4d` 内联 HLE。
-4. 给 timer queue 一个 pending timer，验证 IRQ 2 → `0x503113d8` → DFC。
+4. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
+   IRQ 2 → `0x503113d8` → DFC。
+5. **Display controller HLE**：176×208 16bpp framebuffer、LCD 寄存器
+   与 MBM/Sprite 读回，接窗口后验证第一帧。
 
 kernel IRQ entry 的关键序列（round 30 已实际执行）：
 
@@ -482,8 +552,14 @@ kernel IRQ entry 的关键序列（round 30 已实际执行）：
 - 所有 `NK_*` 交接都是 harness 模型，不是真实 mask ROM 解密结果。
 - `[0x80001c34]` 由 `NK_TIMERQ=1` 注入；对象用 kernel 构造器
   0x5032aff8，但 `+0x1c` 的 HAL tick getter 是零返回 stub。
-- round 32 的 KERN 6 已被 round 33 关闭；当前 stop 是 `0x503360d4` 的
-  null call（多线程 CObjectIx/B7e），不是 CPU fault。
+- round 32 的 KERN 6、round 33 的 `0x503360d4` null call 均已关闭；
+  round 34 的 stop 是 6M 预算边界 `0x5032211c`，不是 CPU fault。
+- `NK_B7E_LIVE=1` 才保留 live 的 `DThread+0x18/+0x5c/+0x64`；不设该开关
+  时 B7e 仍按历史模型覆盖，round-33 control 保持不变。
+- Init3 的 HAL object 3 / `Request(0xd)` 由 `B7E_HAL_REQ` stub 完成并置
+  `[0x800004cc]=1`；真实驱动在 mask ROM 中，尚未解出。
+- live 模式异常栈位于 `0x80140000..0x80240000`；SVC 栈从 `0x80300000`
+  向下增长。这是 harness 布局，不是恢复的 mask-ROM 栈指针。
 - `NK_SCHED=1` 的 NULL 线程栈（`0x80540000`）和 hand-off status
   （`0x80530000`）由 harness 分配；kernel 线程创建时实际分配的栈尚未
   从对象字段解出。
