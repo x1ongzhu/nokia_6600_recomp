@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 54)
+## Status (2026-10-26, round 55)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -313,6 +313,16 @@ stable executive loop. What works:
   stable SplashScreen path writes the LCD; the window-server/app-loader
   layer is the missing piece.
 
+- [x] **ROM image / DLL ref table** (round 55): EwSrv's header at
+  `0x506a81a0` is a `TRomImageHeader` (entry `0x506a8205`, code
+  `0x506a8204`, data `0x506c4c80`, `iDllRefTable` `0x506c9290`,
+  `iExportDir` `0x506c928c`). The `TDllRefTable` has `iFlags=1`,
+  `iNumberOfEntries=7` and seven imported-DLL entry addresses
+  (`0x506980e5`, `0x506a815c`, `0x503c9485`, ...). The flat image never
+  applies the ROM loader's import fixups, so the veneer literals
+  (`0x4a7846c0`, `0x40b846c0`) are placeholders, not resolved IAT slots.
+  This is the architectural reason the window server cannot start.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -445,7 +455,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round51.sh` | EwSrv callmap redirect to its real prologue, then the packed-veneer literal frontier |
 | `tools/test_round52.sh` | EwSrv IAT is resolved but the veneer literal at `0x506c1dba` is padding (`0x40b846c0`) |
 | `tools/test_round53.sh` | real LCD base `0x59200000`, framebuffer `0x59800000` |
-| `tools/test_round54.sh` | **current acceptance**: the normal kernel boot also writes no LCD pixels (4 MiB all-zero) |
+| `tools/test_round54.sh` | the normal kernel boot also writes no LCD pixels |
+| `tools/test_round55.sh` | **current acceptance**: EwSrv is a `TRomImageHeader` with a 7-entry DLL ref table; the flat image never applies the ROM loader's import fixups |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

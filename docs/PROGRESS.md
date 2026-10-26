@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 54）
+最后更新：2026-10-26（round 55）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -272,6 +272,14 @@
 - **kernel boot 也不写 LCD**（round 54）：带 `NK_MAP_LCD=1` 跑满
   6M，`0x59800000` 仍全 0，停在 `0x50312720`。kernel bring-up 没有
   到达 display driver/UI 层；window-server/app-loader 是缺口。
+
+- **ROM image / DLL ref table**（round 55）：EwSrv header
+  `0x506a81a0` 是 `TRomImageHeader`（entry `0x506a8205`、code
+  `0x506a8204`、data `0x506c4c80`、iDllRefTable `0x506c9290`、
+  iExportDir `0x506c928c`）。`TDllRefTable` flags=1、count=7，7 个
+  imported-DLL entry 地址。flat image 没有应用 ROM loader 的 import
+  fixup，veneer literal 是 placeholder。这是 window server 起不来的
+  架构原因。
 
 ### 未完成
 

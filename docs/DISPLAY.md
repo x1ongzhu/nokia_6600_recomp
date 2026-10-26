@@ -289,6 +289,28 @@ round 54 又验证了 kernel boot 本身：带 `NK_MAP_LCD=1` 跑满 6M，
 `0x59800000` 仍然全 0，停在 `0x50312720`。说明 kernel bring-up 也
 没有到达 display driver/UI 层；window-server/app-loader 仍是缺口。
 
+round 55 找到了架构层原因：EwSrv 的 header `0x506a81a0` 是
+**TRomImageHeader**，不是 E32 file：
+
+```
++0x00 iUid1        0x1000007a
++0x04 iUid2        0x1000008c
++0x08 iUid3        0x10003b20
++0x10 iEntryPoint  0x506a8205
++0x14 iCodeAddress 0x506a8204
++0x18 iDataAddress 0x506c4c80
++0x1c iCodeSize    0x1ca80
++0x38 iDllRefTable 0x506c9290
++0x40 iExportDir   0x506c928c
+```
+
+`TDllRefTable` 在 `0x506c9290`：`iFlags=1`、`iNumberOfEntries=7`，
+后面是 7 个 imported-DLL entry 地址（`0x506980e5`、`0x506a815c`、
+`0x503c9485`...）。flat image **没有应用 ROM loader 的 import
+fixup**，所以 veneer literal（`0x4a7846c0`、`0x40b846c0`）只是
+placeholder，不是解析后的 IAT slot。这是 window server 起不来的
+架构原因。
+
 下一步是给 flat image 的 ROMFS app 加 literal-pool/relocation 处理，
 或 HLE window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 
