@@ -972,3 +972,11 @@ EStart 的 12 个 EFSrv 槽必须等 `EFile.exe` 起来；单独驱动 EStart
 **没有创建任何 DProcess/EFile/EStart**。缺的是 mask ROM 的 boot
 hand-off，方案 3 必须由 harness 自己执行。验收
 `tools/test_round92.sh`。
+
+### round 93：线程入口 Thumb 位修复，EFile 跑进 kernel
+
+首次切换原先固定把新线程设为 ARM 模式，忽略 E32 `iEntryPoint` bit 0。
+修复后 `EFile.exe`（entry `0x503b7105`）执行 **1,120 条 Thumb 指令**、
+访问 `0x40000400`/`0x40000418`，停在 kernel panic halt `0x50312b88`
+（修复前是 9 条 ARM 垃圾指令后的 null call）。下一 blocker 是该 panic。
+验收 `tools/test_round93.sh`。

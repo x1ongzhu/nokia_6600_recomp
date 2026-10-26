@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 92)
+## Status (2026-10-26, round 93)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -98,7 +98,8 @@ bug; round 86 shows a vtable pointer alone still leaves; round 87 shows a real
 vtable/method still fails; round 88 rules out the global CBase as `this`; round 89 traces the callback
 ABI mismatch; round 90 corrects that analysis from static evidence; round 91 maps the real
 ROM boot chain and the empty kernel object index; round 92 shows the kernel
-cannot start the next boot stage by itself. What works:
+cannot start the next boot stage by itself; round 93 fixes thread entry-mode
+selection so a real ROM image (EFile) runs to the kernel. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -677,6 +678,17 @@ cannot start the next boot stage by itself. What works:
   this route requires the harness to perform that hand-off.
   `tools/test_round92.sh` pins the measurement.
 
+- [x] **Thread entry instruction set** (round 93): the first switch forced
+  every new thread to ARM (`0x40000013`) and ignored bit 0 of E32
+  `iEntryPoint`. Running a Thumb image in ARM mode produced garbage state:
+  against `EFile.exe` (uid3 `0x100039e3`, code `0x503b7104`, entry
+  `0x503b7105`) the walker ran 9 ARM instructions with `r4=r5=0` and
+  null-called through the `bx r0` thunk `0x503c597c`. Honouring the entry
+  bit (`sched_resume` and the first switch) makes EFile execute 1,120 Thumb
+  instructions, touch `0x40000400`/`0x40000418`, and stop in a kernel panic
+  halt at `0x50312b88` instead of a null call. `tools/test_round93.sh` pins
+  this; rounds 78 and 92 still pass.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -845,7 +857,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round89.sh` | callback receives stack params instead of a CBase (superseded by round 90) |
 | `tools/test_round90.sh` | EStart main `0x503db29c`, 0x24-byte params block, 12 EFSrv import slots; EFSrv is the blocker |
 | `tools/test_round91.sh` | ROM boot chain `ekern->EFile->EStart->Starter->SplashScreen`; kernel object index is empty |
-| `tools/test_round92.sh` | **current acceptance**: kernel idles after one timer IRQ; no process is ever created; harness must do the boot hand-off |
+| `tools/test_round92.sh` | kernel idles after one timer IRQ; no process is ever created; harness must do the boot hand-off |
+| `tools/test_round93.sh` | **current acceptance**: thread entry-mode honours iEntryPoint bit 0; EFile runs 1,120 Thumb instructions into the kernel |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

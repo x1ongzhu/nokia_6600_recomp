@@ -1065,3 +1065,20 @@ DThread/DProcess 条目。验收 `tools/test_round91.sh`。
 结论：kernel 不会自己加载 EFile/EStart；缺的是 **mask ROM 的 boot
 hand-off**。方案 3 要求 **harness 自己执行这个 hand-off**。
 验收 `tools/test_round92.sh`。
+
+### 2.46 round 93：线程入口的 Thumb 位与 EFile 跑进 kernel
+
+首次切换原先把新线程 CPSR 固定为 `0x40000013`（ARM），忽略 E32
+`iEntryPoint` 的 bit 0。以 ARM 执行 Thumb 镜像 = 垃圾寄存器状态。
+
+对 `EFile.exe`（uid3 `0x100039e3`，code `0x503b7104`，entry
+`0x503b7105`）实测：
+
+- 修复前：9 条 ARM 指令，`r4=r5=0`，在 `0x503b7104` 经 `bx r0`
+  thunk `0x503c597c` 变 null call；
+- 修复后（`sched_resume`/首次切换按入口 bit0 置 T）：**1,120 条
+  Thumb 指令**，访问 `0x40000400`/`0x40000418`，停在 kernel panic
+  halt `0x50312b88`（halt 时 `r0=0x40`）。
+
+这是"真进程映像跑起来"的第一个里程碑。下一 blocker 是该 panic。
+验收 `tools/test_round93.sh`。

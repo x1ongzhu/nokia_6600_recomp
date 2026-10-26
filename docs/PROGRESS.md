@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 92）
+最后更新：2026-10-26（round 93）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -655,6 +655,23 @@
     boot hand-off**（创建并启动第一个用户进程）。所以方案 3 要求
     **harness 自己执行这个 hand-off**，而不是等 kernel 去做。
   - 验收 `tools/test_round92.sh`。
+
+- **线程入口的指令集（Thumb 位）修复 + EFile 跑进 kernel**（round 93）：
+  - 首次切换原来把新线程 CPSR 固定成 `0x40000013`（ARM），忽略了
+    E32 `iEntryPoint` 的 bit 0（Thumb 位）。以 ARM 模式执行 Thumb
+    镜像的前几条指令会得到垃圾寄存器状态。
+  - 对 `EFile.exe`（uid3 `0x100039e3`，code `0x503b7104`，
+    entry `0x503b7105`）实测：修复前只跑 9 条 ARM 指令，
+    `r4=r5=0`，在 `0x503b7104` 经 `bx r0` thunk `0x503c597c` 变成
+    null call。
+  - 修复（`sched_resume` 与首次切换都按入口 bit 0 置 `NK_CPSR_T`）后：
+    `EFile` 执行 **1,120 条 Thumb 指令**，访问硬件寄存器
+    `0x40000400`/`0x40000418`，最终停在 kernel panic halt
+    `0x50312b88`（不再是 null call）—— 也就是**真的进到 kernel 里**。
+  - 这是方案 3 第一个"真进程映像跑起来"的里程碑；下一 blocker 是
+    EFile 触发的 kernel panic（`0x50312b88`，halt 时 `r0=0x40`）。
+  - 验收 `tools/test_round93.sh`；`test_round78.sh` / `test_round92.sh`
+    仍 PASS。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

@@ -912,6 +912,8 @@ static void sched_resume(nk_cpu_t* c, nk_interp_t* ip, sched_thread* s) {
     memcpy(c->r, s->r, sizeof s->r);
     c->cpsr = s->cpsr;
     c->r[15] = s->r[15] & ~1u;
+    if (s->r[15] & 1u) c->cpsr |= NK_CPSR_T;
+    else               c->cpsr &= ~NK_CPSR_T;
     sched_load_calls(ip, s);
     s->state = 2;
     nk_w32(c, SCHED_CURRENT, s->thread);
@@ -1097,8 +1099,15 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
         next->r[13] = base + ssize - 0x10u;
         next->r[14] = 0xdead0000u;
         next->r[15] = (uint32_t)env_ulong("NK_SCHED_ENTRY", SCHED_NULL_ENTRY);
-        /* Kernel threads run in SVC mode; keep the caller's IRQ mask. */
-        next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u;
+        /* Kernel threads run in SVC mode; keep the caller's IRQ mask.  The
+         * entry address carries the Thumb bit in bit 0 (E32 iEntryPoint is
+         * always odd for Thumb images), so honour it: starting a Thumb image
+         * in ARM mode executes the first instructions as garbage and the
+         * resulting register state (r4=0, r5=0) sends the image into a null
+         * call.  Round 93 fixes that for the fake thread and the first real
+         * switch. */
+        next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u |
+                     ((next->r[15] & 1u) ? NK_CPSR_T : 0u);
         /* The kernel's resume path clears the suspend bits before a thread
          * runs; the direct switch bypasses it, so clear them here. */
         nk_w32(c, next->thread + 0x20u,
