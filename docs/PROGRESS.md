@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 106）
+最后更新：2026-10-27（round 107）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -934,6 +934,37 @@
     （`heap=0x80905ec4 ptr=0x510355e0 a1=0x503bfcf3 a2=0x503c7148`）。
   - 新增可复用工具 `tools/app_import_search.sh`（逐槽搜索 + 崩溃感知评分）。
   - 验收 `tools/test_round106.sh`。
+
+- **再次更正（静态证明）+ 补齐每线程清理栈指针**（round 107）：
+  - **round 106 的"三参数"更正本身是错的，撤回**。用 capstone 的
+    寄存器写信息做了严格静态证明：
+    ```
+    503bfcd8  ldr r1,[pc,#0x114]   ; 唯一一次写 r1（供下一行 str 用）
+    503bfcda  str r0,[r1]
+    503bfce6  ldr r0,[pc,#0x108]
+    503bfcea  bl 0x503c5dcc        ; 调用 1
+    503bfcee  bl 0x503bdc5c
+    503bfcf4  bl 0x503c5dcc        ; 调用 2
+    ```
+    `0x503bfce6..0x503bfcf4` 之间**没有任何指令写 r1/r2**，所以调用点的
+    `r1=0x80100c0c`、`r2=9` 都是残留值 —— **两个调用点都是单参数**。
+    round 103/104 的结论恢复。
+  - 由调用环确认：伪增长调用来自 **`0x503bfcf4`**（不是 `0x503bfcd0`）。
+  - **补齐缺失的每线程字段**：kernel 的清理栈服务读/写
+    `[current_thread+0x58]`：
+    ```
+    svc 0x74 -> 0x50318804:  r0 = [thread+0x58]   (取)
+    svc 0x75 -> 0x50318814:  [thread+0x58] = r0   (设)
+    ```
+    B7e 建了 `TCleanupTrapHandler → CCleanup` 图、也发布了
+    `thread+0x3c`，但**从未写 `thread+0x58`**，于是
+    `CleanupStack::PushL`（`0x5037fca0`）拿到空清理栈并 panic `0x2c`。
+    现在把 CCleanup 指针一并发布到 `+0x58`（可用
+    `NK_NO_CLEANUP58=1` 关闭做对照）。
+  - 效果：PushL 的 `0x2c` panic 消失；绑定 PushL 后 EFile 越过该调用，
+    停在 `pc left the image 0xf0009b06`（新的 frontier）；默认 ROM 值
+    的运行仍是干净退出（Thumb 1380）。
+  - 验收 `tools/test_round107.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

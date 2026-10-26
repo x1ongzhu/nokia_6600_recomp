@@ -1089,3 +1089,10 @@ watch `0x503bfcd0` 得 `r0=0x51035540 r1=0x80100c0c r2=0x9`，**三个参数
 显示 ROM 原值最干净（1380，干净退出），任何"变长"候选都是崩溃。剩余
 缺陷是干净地以 `KErrNoMemory` Leave。新增 `tools/app_import_search.sh`。
 验收 `tools/test_round106.sh`。
+
+### round 107：再更正 + 每线程清理栈指针
+
+round 106 的"三参数"更正撤回（静态证明：两处调用都只设 r0，r1/r2 是
+残留）。补齐 `[thread+0x58]`（清理栈指针，`svc 0x74/0x75`）：此前
+`CleanupStack::PushL` 拿到空清理栈 panic `0x2c`。发布后 panic 消失，
+EFile 在绑定 PushL 时停在 `0xf0009b06`。验收 `tools/test_round107.sh`。

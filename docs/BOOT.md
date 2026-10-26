@@ -1290,3 +1290,19 @@ pc=0x503bfcd0  r0=0x51035540  r1=0x80100c0c  r2=0x9  r3=0
 
 新增 `tools/app_import_search.sh`（逐槽搜索 + 崩溃感知评分）。
 验收 `tools/test_round106.sh`。
+
+### 2.60 round 107：再更正 + 每线程清理栈指针
+
+**round 106 的"三参数"更正撤回**。capstone 寄存器写信息证明：`r1` 只在
+`0x503bfcd8` 被写（供下一行 `str`），`0x503bfce6..0x503bfcf4` 之间没有
+任何指令写 `r1/r2` —— 两个 `bl 0x503c5dcc` 调用点都是**单参数**，
+round 103/104 结论恢复。伪增长调用来自 `0x503bfcf4`。
+
+补齐字段：kernel 清理栈服务读/写 `[thread+0x58]`
+（`svc 0x74` 取、`svc 0x75` 设）。B7e 从未写该字段，
+`CleanupStack::PushL` 因此拿到空清理栈并 panic `0x2c`。现在发布
+CCleanup 到 `+0x58`（`NK_NO_CLEANUP58=1` 可关闭对照）。
+
+效果：`0x2c` panic 消失；绑定 PushL 后 EFile 停在
+`pc left the image 0xf0009b06`；默认 ROM 值仍干净退出（Thumb 1380）。
+验收 `tools/test_round107.sh`。

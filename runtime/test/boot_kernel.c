@@ -1477,6 +1477,13 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
             nk_w32(c, clbase + 0x00, 0);
             nk_w32(c, clbase + 0x04, 1);
             nk_w32(c, t + 0x3c, handler);   /* SThread::iTrapHandler   */
+            /* Round 107: `svc 0x74` (0x50318804) returns [thread+0x58] and
+             * `svc 0x75` (0x50318814) stores it back; that is the cleanup
+             * stack pointer CleanupStack::PushL uses.  B7e built the CCleanup
+             * graph but never published it at +0x58, so PushL saw a null
+             * cleanup stack and panicked 0x2c. */
+            if (!env_ulong("NK_NO_CLEANUP58", 0))
+                nk_w32(c, t + 0x58, clean); /* SThread::iCleanup        */
             nk_w32(c, t + 0x38, 0);         /* SThread::iFrame         */
             /* Round 98: the kernel's UnTrap service (svc 0x73, 0x503187e8)
              * returns [thread+0x38] and pops the chain through [frame+0x40].

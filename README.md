@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 106)
+## Status (2026-10-27, round 107)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -880,6 +880,22 @@ works:
   `heap=0x80905ec4 ptr=0x510355e0 a1=0x503bfcf3 a2=0x503c7148`.
   `tools/test_round106.sh` pins it.
 
+- [x] **Withdraw the arity correction and add thread+0x58** (round 107): a
+  static register-write proof settles the arity question - `r1` is written only
+  at `0x503bfcd8` (for the following `str`) and nothing between `0x503bfce6`
+  and `0x503bfcf4` writes `r1`/`r2`, so both `bl 0x503c5dcc` sites pass a
+  single argument. Round 106's "three arguments" reading is withdrawn and
+  rounds 103/104 stand; the bogus grow call comes from `0x503bfcf4`.
+  Separately, the kernel's cleanup-stack services read and write
+  `[current_thread+0x58]` (`svc 0x74` get, `svc 0x75` set). B7e built the
+  TCleanupTrapHandler -> CCleanup graph and published the trap handler at
+  `+0x3c`, but never wrote `+0x58`, so `CleanupStack::PushL` (0x5037fca0)
+  resolved a null cleanup stack and panicked `0x2c`. Publishing the CCleanup
+  at `+0x58` removes that panic: with the PushL binding EFile passes the call
+  and stops at `pc left the image 0xf0009b06`, while the default ROM run still
+  exits cleanly at 1,380 Thumb instructions. `NK_NO_CLEANUP58=1` suppresses the
+  fix for comparison. `tools/test_round107.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -1062,7 +1078,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round103.sh` | app-time import rebinds; the app/ROM EUser mismatch is broader than one slot |
 | `tools/test_round104.sh` | first mapping of the EUser table shift (slot 0x503b37c4 -> export 9) |
 | `tools/test_round105.sh` | the shift is real but not a uniform rotation |
-| `tools/test_round106.sh` | **current acceptance**: correction - the disputed call passes three arguments; `tools/app_import_search.sh` |
+| `tools/test_round106.sh` | static proof: the disputed call takes one argument; `tools/app_import_search.sh` |
+| `tools/test_round107.sh` | **current acceptance**: per-thread cleanup stack pointer at `thread+0x58` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
