@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 41)
+## Status (2026-10-26, round 42)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -202,6 +202,13 @@ stable executive loop. What works:
   before a null callback. The next blocker is the kernel executive/thread
   state the wait loop expects, not the app's C++ objects.
 
+- [x] **Return-context corruption** (round 42): at the first watched pop
+  (`0x5039ee14`) the stack still holds the correct saved `LR` `0x5039edc8`;
+  the final pop returns 0 only after the executive call `0x5039b05c`. The
+  failure is therefore a thread/context (stack) switch, not a push/pop or
+  vtable bug. Completing the EUser wait SWIs (`0x76..0x7b`) inline does not
+  fix the direct path either; it still stops at 3,360 instructions.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -321,7 +328,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round38.sh` | direct Thumb FbServ startup, 3,612 instructions, uninitialized-vtable blocker at `0x5068a572` |
 | `tools/test_round39.sh` | exact FbServ vtable write/overwrite sequence; byte/halfword write watches |
 | `tools/test_round40.sh` | FbServ descriptor/object overlap call chain and 20-byte allocation |
-| `tools/test_round41.sh` | **current acceptance**: FbServ on the real banked SVC path, 1,499,521 instructions, EUser wait chain |
+| `tools/test_round41.sh` | FbServ on the real banked SVC path, 1,499,521 instructions, EUser wait chain |
+| `tools/test_round42.sh` | **current acceptance**: the 1.5M blocker is a post-executive stack/context switch, not the vtable or wait SWIs |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

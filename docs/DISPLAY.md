@@ -133,7 +133,17 @@ kernel process loader。
 
 这说明 direct-SWI gate 很可能没有保存 callee-saved `r4-r11`，而真实
 SVC entry 会保存。当前 blocker 变成 kernel executive/thread 状态，
-不是 app 的 C++ 对象。这条路径是目前离第一帧最近的路线。
+不是 app 的 C++ 对象。
+
+round 42 进一步确认：最终返回 0 **不是** vtable 调用。第一次在
+`0x5039ee14` 观察 pop 时，栈上仍有正确的 saved LR `0x5039edc8`；只有
+经过 executive call `0x5039b05c` 后，最终 pop 才读到 0。也就是说，
+push/pop 本身没错，失败发生在 **thread/context（栈）切换** 上。
+把 EUser wait SWI `0x76..0x7b` 用 direct gate 内联完成也不能修复：
+direct 路径仍停在 3,360 条 / `0x068a0688`。
+
+这条路径是目前离第一帧最近的路线，但下一步必须补 EUser thread/
+executive 上下文，或改回 kernel scheduler。
 
 这条路径绕过了 kernel 死锁，是目前离第一帧最近的路线。
 

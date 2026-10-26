@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 41）
+最后更新：2026-10-26（round 42）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -182,6 +182,13 @@
   `5039eddc -> 5039d9d0 -> 503998b4 -> 50392e00 -> 50392ec0`，
   最后 null callback。说明 direct-SWI gate 可能未保存 `r4-r11`；当前
   blocker 是 kernel executive/thread 状态。
+
+- **FbServ 返回上下文损坏**（round 42）：第一次 watch `0x5039ee14`
+  的 pop 时，栈上仍有正确的 saved LR `0x5039edc8`；最终经过
+  `0x5039b05c` executive call 后，pop 才读到 0。失败点是
+  thread/context（栈）切换，不是 push/pop 或 vtable。把 wait SWI
+  `0x76..0x7b` 内联完成也不能修复 direct 路径（仍 3,360 条 /
+  `0x068a0688`）。
 
 ### 未完成
 
