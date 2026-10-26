@@ -152,6 +152,17 @@
  *                           (implies NK_BANKED; guest writes arm the timer)
  *   NK_TIMER_LOG=n          log the first n timer register writes/expiries
  *   NK_IRQ_LOG=n            log the first n IRQ exception entries
+ *   NK_TIMERQ=1             inject the mask-ROM/HAL timer-queue object at
+ *                           [0x80001c34] at 0x5031ef40 (after the first timer
+ *                           IRQ wakes Kern::Init1).  The default ("override")
+ *                           calls the kernel's own constructor (export 451,
+ *                           0x5032aff8) and substitutes a zero-return HAL
+ *                           tick getter for the pure-virtual vtable slot;
+ *                           NK_TIMERQ_MODE=ctor keeps the abstract base vtable
+ *                           and NK_TIMERQ_MODE=stub installs an all-zero
+ *                           vtable.  NK_TIMERQ_ADDR=0x... selects the guest
+ *                           object page (default 0x80500000).  This is a
+ *                           boot-state model, not recovered firmware.
  *   NK_CPSR=0x...           override the initial CPSR.  The mask-ROM IRQ
  *                           hand-off needs I=0 (0x40000053 for SVC/ARM);
  *                           the default 0x400000d3 keeps IRQs masked.
@@ -430,6 +441,146 @@ static void install_extension_stub(nk_cpu_t* c, nk_interp_t* ip) {
     nk_code_range_add(ip, EXT_STUB_CODE, EXT_STUB_CODE + 0x14);
     printf("extension stub: export 1 -> %#010x (HAL object %#010x)\n",
            EXT_STUB_CODE, 0x80003a40u);
+}
+
+/* ------------------------------------------------------------------ */
+/* Round 31: the kernel timer/queue singleton at [0x80001c34]          */
+/*                                                                     */
+/* After the round-30 timer IRQ wakes the idle loop, Kern::Init1        */
+/* continues at 0x5031ef40 with `[0x80001c34] -> vtable+0xc`.  Nothing */
+/* in the E32 image writes that global: the object is created by the    */
+/* mask-ROM/HAL boot state that a direct E32-entry boot skips.  Kernel  */
+/* export 451 (0x5032aff8) is the class constructor and export 344      */
+/* (0x5032b33c) the setter, but no image imports either.               */
+/*                                                                     */
+/* NK_TIMERQ=1 injects the boot-state object at the exact instruction   */
+/* that consumes it, using the kernel's own constructor.  The default   */
+/* ("override") also substitutes the pure-virtual HAL tick slot; "ctor" */
+/* keeps the abstract base vtable (control) and "stub" builds an        */
+/* all-zero vtable.  This is an explicit boot-state model, not a        */
+/* recovered mask-ROM implementation.                                  */
+#define TIMERQ_CTOR       0x5032aff8u
+#define TIMERQ_SENTINEL   0xdead0100u
+
+static int g_timerq_state;
+
+/* Call one guest function with a private interpreter, preserving the CPU
+ * state of the interrupted boot.  The constructor calls EUser imports and
+ * must see the same executive-call model as the main run. */
+static int timerq_nested_call(nk_cpu_t* c, nk_interp_t* parent,
+                              uint32_t target, uint32_t ret) {
+    nk_interp_t sub;
+    nk_interp_init(&sub);
+    sub.budget = 400000;
+    sub.return_pc = ret;
+    sub.return_thumb = 0;
+    sub.infer_mode = 0;
+    sub.infer_calls = 0;
+    sub.recover = 0;
+    sub.require_code = 0;
+    sub.swi_direct = parent->swi_direct;
+    sub.swi_table = parent->swi_table;
+    sub.swi_log = 0;
+    memcpy(sub.swi_complete, parent->swi_complete, sizeof sub.swi_complete);
+    sub.banked = parent->banked;
+    sub.alloc_hle = parent->alloc_hle;
+    sub.alloc_pc = parent->alloc_pc;
+    sub.realloc_pc = parent->realloc_pc;
+    sub.free_pc = parent->free_pc;
+    sub.alloc_base = parent->alloc_base;
+    sub.alloc_cur = parent->alloc_cur;
+    sub.alloc_end = parent->alloc_end;
+    sub.hle_heap = parent->hle_heap;
+    sub.hle_heap_end = parent->hle_heap_end;
+    sub.stop_selfb = 1;
+    c->cpsr &= ~NK_CPSR_T;
+    c->r[15] = target & ~1u;
+    nk_interp_run(c, &sub);
+    parent->alloc_cur = sub.alloc_cur;
+    return (c->r[15] & ~1u) == (ret & ~1u);
+}
+
+static void timerq_pc_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
+    (void)pc;
+    ip->pc_hook = NULL;
+    if (g_timerq_state) return;
+    g_timerq_state = 1;
+
+    uint32_t obj   = (uint32_t)env_ulong("NK_TIMERQ_ADDR", 0x80500000u);
+    uint32_t page  = obj & ~(NK_PAGE_SIZE - 1u);
+    uint32_t stack = page + 0x1800u;
+    const char* mode = getenv("NK_TIMERQ_MODE");
+
+    if (!nk_page_ptr(c, obj)) {
+        if (nk_alloc_ram(c, page, 0x2000u) != 0) {
+            printf("timerq: cannot map %#010x..%#010x\n", page, page + 0x2000u);
+            return;
+        }
+        for (uint32_t i = 0; i < 0x2000u; i += 4) nk_w32(c, page + i, 0);
+    }
+
+    int ctor_ok = 0;
+    if (!mode || strcmp(mode, "stub") != 0) {
+        nk_cpu_t saved = *c;
+        c->r[0] = obj;
+        c->r[13] = stack;
+        c->r[14] = TIMERQ_SENTINEL;
+        c->cpsr = saved.cpsr & ~NK_CPSR_T;
+        ctor_ok = timerq_nested_call(c, ip, TIMERQ_CTOR, TIMERQ_SENTINEL);
+        *c = saved;
+        printf("timerq: ctor %#010x -> %s", TIMERQ_CTOR,
+               ctor_ok ? "ok" : "failed");
+        if (ctor_ok)
+            printf(" (vtable %#010x, +4=%#010x, +0xc=%#010x, +0x10=%#010x)",
+                   nk_r32(c, obj), nk_r32(c, obj + 4),
+                   nk_r32(c, obj + 0xc), nk_r32(c, obj + 0x10));
+        printf("\n");
+    }
+
+    /* The kernel constructor installs the abstract base vtable at
+     * 0x503383bc.  Its +0x1c slot is the pure-virtual `User::Panic`
+     * placeholder: the concrete timer implementation (the mask-ROM/HAL
+     * object) overrides it with the hardware tick/time getter.  Copy the
+     * base vtable and substitute a zero-return getter so the kernel's own
+     * 0x5032b024 runs instead of hitting the pure-virtual panic. */
+    int override_vt = ctor_ok && (!mode || strcmp(mode, "ctor") != 0);
+    if (override_vt) {
+        uint32_t vt = obj + 0x100u, code = 0xffff0a00u;
+        for (int i = 0; i < 64; i++)
+            nk_w32(c, vt + 4u * (uint32_t)i,
+                   nk_r32(c, 0x503383bcu + 4u * (uint32_t)i));
+        nk_w32(c, code + 0, 0xe3a00000u);   /* mov r0,#0 */
+        nk_w32(c, code + 4, 0xe12fff1eu);   /* bx lr     */
+        nk_w32(c, vt + 0x1c, code);
+        for (uint32_t off = 0x20; off <= 0x2c; off += 4) nk_w32(c, vt + off, code);
+        nk_w32(c, obj + 0x00, vt);
+        nk_code_range_add(ip, code, code + 8);
+        printf("timerq: HAL override vtable %#010x (base 0x503383bc, "
+               "+0x1c -> %#010x)\n", vt, code);
+    }
+
+    if (!ctor_ok) {
+        /* Zero-return vtable stand-in: every virtual call returns 0.  The
+         * object still has the timer-queue field layout inferred from
+         * constructor 0x5032aff8 (vtable at +0, refcount +4, flags +0xc,
+         * TDblQue at +0x10, element size 4). */
+        uint32_t vt = obj + 0x100u, code = 0xffff0a00u;
+        nk_w32(c, code + 0, 0xe3a00000u);   /* mov r0,#0 */
+        nk_w32(c, code + 4, 0xe12fff1eu);   /* bx lr     */
+        for (int i = 0; i < 64; i++) nk_w32(c, vt + 4u * (uint32_t)i, code);
+        nk_w32(c, obj + 0x00, vt);
+        nk_w32(c, obj + 0x04, 1);
+        nk_w32(c, obj + 0x0c, 0);
+        nk_w32(c, obj + 0x10, obj + 0x10);
+        nk_w32(c, obj + 0x14, obj + 0x10);
+        nk_w32(c, obj + 0x18, 4);
+        nk_code_range_add(ip, code, code + 8);
+        printf("timerq: stub object %#010x (vtable %#010x)\n", obj, vt);
+    }
+
+    nk_w32(c, 0x80001c34u, obj);
+    printf("timerq: [0x80001c34] = %#010x -> vtable+0xc = %#010x\n",
+           obj, nk_r32(c, nk_r32(c, obj) + 0x0c));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1648,6 +1799,17 @@ int main(int argc, char** argv) {
     ip.trace_from = (uint32_t)env_ulong("NK_TRACE_FROM", 0);
     ip.return_pc = (uint32_t)env_ulong("NK_STOP_PC", cpu.r[14]);
     ip.return_thumb = (uint8_t)thumb_entry;
+
+    /* Round 31: inject the mask-ROM/HAL timer-queue singleton at the exact
+     * instruction after the first timer IRQ wakes Kern::Init1.  The default
+     * mode calls the kernel's own constructor (export 451); NK_TIMERQ_MODE=
+     * stub falls back to a zero-return vtable. */
+    if (env_ulong("NK_TIMERQ", 0)) {
+        ip.pc_hook_addr = 0x5031ef40u;
+        ip.pc_hook = timerq_pc_hook;
+        printf("timerq: will inject [0x80001c34] before %#010x\n",
+               ip.pc_hook_addr);
+    }
 
     printf("run: sp=%#010x cpsr=%#010x budget=%ld infer=%d call-infer=%d policy=%d\n",
            cpu.r[13], cpu.cpsr, ip.budget, ip.infer_mode, ip.infer_calls,

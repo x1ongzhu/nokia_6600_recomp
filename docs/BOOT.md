@@ -154,25 +154,69 @@ CPU: CP15.V=1, CPSR.I=0, 当前 mode UND
 `NK_CPSR=0x400000d3`（I=1）是 control：timer 仍到期（7 次），但不进 IRQ，
 idle 停在 `0x5031252c` 的预算边界。
 
-### 2.6 idle 之后的新 frontier
+### 2.6 idle 之后的 timer-queue 对象（round 31 已解）
 
 ```
 0x5031ef20  ldr r0,=0x80001714
 0x5031ef24  bl 0x50320aa8
 0x5031ef28  bl 0x5031ece8
 0x5031ef40  ldr r3,=0x80001c34
-0x5031ef44  ldr r0,[r3]            ; 当前为 0
-0x5031ef48  ldr r3,[r0]            ; 读 0 -> 0
+0x5031ef44  ldr r0,[r3]            ; object pointer
+0x5031ef48  ldr r3,[r0]            ; vtable 0x503383bc
 0x5031ef4c  mov lr,pc
-0x5031ef50  ldr pc,[r3,#0xc]       ; null call
+0x5031ef50  ldr pc,[r3,#0xc]       ; 0x5032b024
 ```
 
-`0x80001c34` 是 kernel 的 **timer-queue 全局**：kernel export 344
-（setter `0x5032b33c`）负责安装它，export 5 / 286（`0x5032b368` /
-`0x5032b37c`）是队列操作。本 ROM 没有任何 image import export 344，
-所以它必须由 mask-ROM/ASSP 启动状态创建。当前没有代码写它
-（`NK_WRITE_WATCH=0x80001c34` 无命中），boot 停在 `0x5031ef50` 的
-**null call**，不是 CPU fault。这是 round 31 的第一个目标。
+`0x80001c34` 是 kernel 的 timer-queue 单例。kernel export 451
+（`0x5032aff8`）是抽象基类构造，安装 vtable `0x503383bc`；export 344
+（setter `0x5032b33c`）负责安装单例，但本 ROM 没有任何 image import
+这两个 export，所以具体对象来自 mask-ROM/ASSP 启动状态。
+`0x5032b024` 先调用 vtable `+0x1c` 取硬件 tick，再处理 `+0x10` 队列。
+`+0x1c` 在基类里是纯虚函数（K=1610 → `0x50389848`，`User::Panic`），
+必须由具体 HAL 子类覆盖；直接用基类 vtable 会在 430,945 条处 panic halt。
+
+### 2.7 round 31：注入 timer-queue 并跨过 null call
+
+harness 用 one-shot PC hook 在 `0x5031ef40` 之前执行注入：
+
+```
+NK_TIMERQ=1（默认 mode = override）
+  1. 在 0x80500000 分配对象页和 scratch stack
+  2. nk_interp_call(0x5032aff8)，r0=object
+     -> 对象 vtable = 0x503383bc，+0x10 = TDblQue head
+  3. 复制 0x503383bc 到 0x80500100
+  4. vtable+0x1c -> 0xffff0a00（mov r0,#0; bx lr）
+  5. [0x80001c34] = object
+```
+
+结果：**439,177 条、1 IRQ、0 undefined/unbound/recovery**。
+`Kern::Init1` 返回后进入 kernel-start 路径（`0x50330a5c` 调用 EUser
+K=1163），新的 frontier 是：
+
+```
+0x503a6120  push {lr}
+0x503a6124  bl 0x50392ba0          ; SVC 0x73
+0x503a6128  ldr r0,[r0,#0x48]      ; [frame+0x48] = 0xe21440ff
+0x503a6138  ldr r3,[r0]            ; reads 0
+0x503a613c  ldr ip,[r3,#0xc]       ; 0
+0x503a6144  bx ip                  ; null call
+```
+
+`SVC 0x73` 的 service `0x503187e8` 从 `[current_thread+0x38]` 弹出一个
+trap/cleanup frame，next 写回 `+0x38`。当前 frame 指针是 `0x503a43c4`
+——一个 ROM text 地址，不是可写栈 frame；它的 `+0x48` 读到该处指令字
+`0xe21440ff`，所以下一次 `vtable+0xc` 落到 0。
+
+该值来自 EUser 的一次 0x108 字节线程块复制：`0x5038d750` 的
+`stmdb` 块写把 `[0x802ffd38]` 覆盖成 `0x503a43c4`（源块
+`0x802ffc14`，目标 `0x802ffd54`）。也就是说 kernel 从某个
+`SThread` 模板恢复 `iTrapHandler/iTrapFrame` 时，把 ROM 地址当成了
+可写 frame。round 32 需要定位这个模板的来源和 `DThread` 的
+`+0x38/+0x3c/+0x48` 真实布局。
+
+control：`NK_TIMERQ_MODE=ctor` 只用基类 vtable，停在 `0x50312b88`
+的 panic halt；`NK_TIMERQ_MODE=stub` 跳过 `+0xc` 方法，停在 438,731
+条处的 KERN 6 panic。
 
 ---
 
@@ -229,6 +273,21 @@ round 30（NK_TIMER=1, NK_CPSR=0x40000053, I=0）:
   IRQ 0xffff0018 -> 0x50310ee0 -> [0x8000000c]=1 -> idle 退出
   stop: null call @ 0x5031ef50（caller lr=0x5031ef54）
 
+round 31（NK_TIMERQ=1, 默认 HAL override）:
+  439,177 insns, 1 IRQ, 1 timer expiry
+  0 undefined / 0 unbound IAT / 0 recoveries
+  ctor 0x5032aff8 -> object @ 0x80500000, vtable 0x503383bc
+  vtable+0x1c（纯虚）-> 0xffff0a00 零返回 tick getter
+  stop: null call @ 0x503a6148（[frame+0x48] invalid）
+
+round 31 control（NK_TIMERQ_MODE=ctor，仅基类 vtable）:
+  430,945 insns, 1 IRQ
+  vtable+0x1c = User::Panic -> panic halt @ 0x50312b88
+
+round 31 control（NK_TIMERQ_MODE=stub，跳过 +0xc 方法）:
+  438,731 insns, 1 IRQ
+  KERN 6 panic @ 0x50330aa8
+
 round 30 control（NK_TIMER=1, NK_CPSR=0x400000d3, I=1）:
   3,000,000 insns, 7 timer expiries, 0 IRQ
   idle 仍停在 0x5031252c
@@ -263,31 +322,40 @@ round 30 control（NK_TIMER=1, NK_CPSR=0x400000d3, I=1）:
 | `NK_TIMER_LOG=n` | 打印 timer 寄存器写与到期 |
 | `NK_IRQ_LOG=n` | 打印前 n 次 IRQ 入口（PC/LR/vector/CPSR） |
 | `NK_CPSR=0x...` | 覆盖初始 CPSR；IRQ 测试用 `0x40000053`（I=0） |
+| `NK_TIMERQ=1` | 在 `0x5031ef40` 注入 `[0x80001c34]` timer-queue 对象 |
+| `NK_TIMERQ_MODE=ctor\|stub` | 仅基类 vtable / 全零返回 vtable |
+| `NK_TIMERQ_ADDR=0x...` | 注入对象页（默认 `0x80500000`） |
 | `NK_ENTRY` / `NK_STOP_PC` | 覆盖入口/停止地址 |
 
 ---
 
 ## 6. 当前 frontier
 
-Round 30 已经验证 timer/IRQ：timer 0 在 guest 设定的 reload 到期后经
-`0xffff0018` 进入 `0x50315258`，`Kern::Irq` 查表调用 `0x50310ee0`，
-置 `[0x8000000c]=1`，idle 退出。当前唯一阻塞点是 idle 之后的对象：
+Round 30 验证了 timer/IRQ；round 31 用 kernel 自己的构造器
+`0x5032aff8` 注入 `[0x80001c34]`，并把抽象基类 vtable `0x503383bc`
+的纯虚 `+0x1c` 覆盖为零返回 HAL tick getter。`Kern::Init1` 因此跨过
+`0x5031ef50`，进入 kernel-start 路径。新 frontier：
 
 ```
-0x5031ef40  ldr r3,=0x80001c34
-0x5031ef44  ldr r0,[r3]            ; 0
-0x5031ef48  ldr r3,[r0]            ; 0
-0x5031ef4c  mov lr,pc
-0x5031ef50  ldr pc,[r3,#0xc]       ; null call
+0x503a6120  push {lr}
+0x503a6124  bl 0x50392ba0          ; SVC 0x73
+0x503a6128  ldr r0,[r0,#0x48]      ; [frame+0x48] = 0xe21440ff
+0x503a6138  ldr r3,[r0]            ; 0
+0x503a613c  ldr ip,[r3,#0xc]       ; 0
+0x503a6144  bx ip                  ; null call @ 0x503a6148
 ```
+
+`SVC 0x73` service `0x503187e8` 从 `[current_thread+0x38]` 弹出
+trap/cleanup frame，next 写回 `+0x38`。当前 frame 的 `+0x48` 不是对象
+指针，因此 `vtable+0xc` 落到 0。
 
 下一步：
 
-1. 解出 `[0x80001c34]`（kernel timer queue，export 344 setter
-   `0x5032b33c`）由谁创建；variant `ecust.dll`、ASSP 或 super page 交接。
-   用 `NK_WRITE_WATCH=0x80001c34` 已确认当前没有代码写它。
-2. 建立一个最小 timer-queue 对象（vtable `+0xc`、refcount `+4`、
-   wait/status `+0xc/+0x10`），或补齐 HAL channel，让 kernel 自己注册。
+1. **对齐 `TTrap`/`CTrapCleanup` frame 布局**：确认 `+0x38` 是 cleanup
+   stack top 还是 trap handler，`+0x48` 应指向什么对象；`Kern::Init2`
+   在 kernel-server 线程上构造该 frame 时补上有效对象。
+2. **补全 kernel-server 线程的 trap graph**：B7e 只为已发布线程建
+   handler，kernel-server 线程的 `TTrap` 栈 frame 仍缺字段。
 3. 观察 scheduler 是否切换到初始 thread，记录第一次上下文切换。
 4. 给 timer queue 一个 pending timer，验证 IRQ 2 → `0x503113d8` → DFC。
 
@@ -310,8 +378,10 @@ kernel IRQ entry 的关键序列（round 30 已实际执行）：
 ## 7. 限制
 
 - 所有 `NK_*` 交接都是 harness 模型，不是真实 mask ROM 解密结果。
-- `[0x80001c34]` 在启动结束时仍为 0；stop 是 `0x5031ef50` 的 null call，
-  不是 CPU fault。对象来源未解出。
+- `[0x80001c34]` 由 `NK_TIMERQ=1` 注入；对象用 kernel 构造器
+  0x5032aff8，但 `+0x1c` 的 HAL tick getter 是零返回 stub。
+- 当前 stop 是 `0x503a6148` 的 null call（trap/cleanup frame `+0x48`
+  无效），不是 CPU fault。
 - CP15.V=1 由 harness 以 mask-ROM 语义设置；低地址 `0x0` 在 kernel 启动中
   被覆盖，因此 IRQ 必须走 `0xffff0000`。
 - timer unit 1 / IRQ 2 / DFC 路径尚未被真实 pending timer 触发。

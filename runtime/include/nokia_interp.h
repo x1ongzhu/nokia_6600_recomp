@@ -231,6 +231,14 @@ typedef struct nk_interp {
     int         irq_log;         /* log the first N IRQ entries (0 = off) */
     uint32_t    watch_mem_len;   /* bytes to dump around that register */
 
+    /* One-shot PC hook.  The boot harness uses it to inject a mask-ROM/HAL
+     * boot-state object at the exact instruction that would consume it
+     * (e.g. [0x80001c34] at 0x5031ef40), without patching the image or
+     * stopping the run.  The hook runs with the live CPU state and must
+     * either preserve PC or leave it at the address it wants to execute. */
+    void      (*pc_hook)(nk_cpu_t* c, struct nk_interp* ip, uint32_t pc);
+    uint32_t    pc_hook_addr;
+
     /* Bring-up watchdog: a tight loop that keeps executing the same few
      * addresses (typically a descriptor scan with a bogus argument) is treated
      * as a fault and rolled back through the recovery frame.  spin_max is the

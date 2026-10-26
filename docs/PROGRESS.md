@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 30）
+最后更新：2026-10-26（round 31）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -51,15 +51,28 @@
   `0xffff0018` → `Kern::Irq`（`0x50311194`）→ handler 表 `0x5d`
   （对象 `0x80000b5c`）→ `0x50310ee0` 置 `[0x8000000c]=1`。
   idle 在 **430,557 条**退出，**1 次 IRQ、0 fault**。
+- **timer-queue 单例 `[0x80001c34]`**（round 31）：kernel export 451
+  （`0x5032aff8`）是抽象基类构造，安装 vtable `0x503383bc`；`+0x1c`
+  是纯虚槽（`User::Panic`，K=1610 → `0x50389848`），由 mask-ROM/HAL 的
+  具体子类覆盖为硬件 tick getter。harness 在 `0x5031ef40` 之前用 kernel
+  自己的构造器创建对象，并把 `+0x1c` 覆盖为零返回 getter；`Kern::Init1`
+  因此跨过 round-30 的 null call，继续 **439,177 条**（1 IRQ、0
+  undefined/unbound/recovery），停在新的 frontier。
 
 ### 未完成
 
-- **idle 之后的 timer-queue 对象 `[0x80001c34]`**：idle 返回后
-  `Kern::Init1` 在 `0x5031ef40` 执行 `[0x80001c34] -> vtable+0xc`；该对象
-  仍为 null，于是停在 **`0x5031ef50` 的 null call**。kernel export 344
-  （setter `0x5032b33c`）负责安装它，但本 ROM 没有任何 image import 这个
-  export，说明它来自 mask ROM/ASSP 启动状态。这是当前的 exact frontier，
-  不是 CPU/解析错误。
+- **新的 frontier：trap/cleanup frame `+0x48`**（round 31）：`Kern::Init1`
+  返回后，kernel-start 路径调用 EUser K=1163（`0x503a6120`）：
+  `SVC 0x73` → `0x503187e8` 从 `[current_thread+0x38]` 弹出一个
+  trap/cleanup frame，`[frame+0x48]` 作为对象指针再取 `vtable+0xc`。
+  本 boot 状态下该字段是 `0xe21440ff`（不是指针），于是停在
+  **`0x503a6148` 的 null call**（`caller lr=0x503a6148`）。这是当前
+  exact frontier，不是 CPU/解析错误。
+- **trap/cleanup frame 的布局**：弹出的 frame 指针是 `0x503a43c4`
+  （ROM text），不是可写栈 frame。它由 EUser 的 0x108 字节线程块复制
+  `0x5038d750` 写入 `[thread+0x38]`（源块 `0x802ffc14`，目标
+  `0x802ffd54`）。需要定位该 `SThread` 模板的来源，以及
+  `DThread +0x38/+0x3c/+0x48` 的真实含义。
 - **Timer unit 1 / DFC 队列**：IRQ 2 的 handler `0x503113d8` 已注册，
   但系统 tick 队列尚未启动（没有 pending timer）。
 - **显示/键盘/音频/文件服务/应用启动**（P3）。
@@ -101,9 +114,18 @@
 | `0x58120a20` | UPP timer 1（`IrqTimer1`，IRQ 2）；`+8` status/ack，`+0x10` compare |
 | `0x58120114` | UPP ICU current-IRQ register |
 | `0x5031ef40` | idle 返回后的 `[0x80001c34] -> vtable+0xc` 调用点 |
-| `0x80001c34` | **缺失的 timer-queue 对象**（当前为 0） |
+| `0x80001c34` | timer-queue 单例指针；round 31 由 harness 在 `0x5031ef40` 注入 |
 | `0x5032b33c` | kernel export 344：`[0x80001c34]` 的 setter（已存在则 panic 0x22） |
-| `0x5032b368` / `0x5032b37c` | kernel export 5 / 286：timer 队列操作 |
+| `0x5032aff8` | kernel export 451：timer-queue 抽象基类构造；安装 vtable `0x503383bc` |
+| `0x503383bc` | 抽象基类 vtable；`+0xc` = `0x5032b024`，`+0x1c` = 纯虚 `User::Panic` |
+| `0x5032b024` | vtable `+0xc`：先调 `+0x1c` 取 tick，再处理 `+0x10` 队列 |
+| `0x5032b3c8` | Init1 在 timer 对象之后调用的队列/定时器启动辅助 |
+| `0x50336858` | K=1610 的 IAT stub（纯虚槽）；boot profile 实际指向 `0x50389848`（`User::Panic`） |
+| `0x503a6120` | EUser K=1163：`SVC 0x73` 弹 trap/cleanup frame，再调 `[frame+0x48]->vtable+0xc` |
+| `0x503187e8` | SVC 0x73 service：弹 `[current_thread+0x38]`，next 写回 `+0x38` |
+| `0x503a6148` | round 31 新 frontier：`[frame+0x48]` 无效导致的 null call 点 |
+| `0x80500000` | harness 注入的 timer-queue 对象（默认；`NK_TIMERQ_ADDR` 可改） |
+| `0xffff0a00` | 覆盖纯虚 `+0x1c` 的零返回 HAL tick stub |
 
 ### 时间簇（EUser `edata[K-3]`）
 
@@ -140,7 +162,13 @@ CPU (CP15.V=1, CPSR.I=0)
   0x80000b5c  handler object -> vtable[0x50338a40]+8 = 0x50310ee0
   0x50310ee0  ack timer0 (write 0 to 0x58120a08); [0x8000000c] = 1
   0x50310f84  idle sees 1, returns to 0x5031ef20
-  0x5031ef40  [0x80001c34] -> null -> stop "null call" at 0x5031ef50
+  0x5031ef40  [0x80001c34] -> vtable+0xc = 0x5032b024 (round 31)
+  0x5032b024  HAL tick getter (vtable+0x1c, overridden) -> queue at +0x10
+  0x5031ef54  starts the queue/timer helper 0x5032b3c8
+  0x50330a5c  kernel-start path: EUser K=1163 (0x503a6120)
+  0x503a6124  SVC 0x73 -> 0x503187e8 pops [thread+0x38]
+  0x503a6128  [frame+0x48] = 0xe21440ff (not a pointer)
+  0x503a6148  [frame+0x48]->vtable+0xc -> null call
 ```
 
 - timer 单元 stride `0x20`：`+0x00` counter、`+0x04` control、
@@ -153,6 +181,29 @@ CPU (CP15.V=1, CPSR.I=0)
 - `NK_TIMER=1` 才启用设备模型；默认关闭，round-29 的 3,000,000 条
   control 保持不变。`NK_CPSR=0x40000053` 提供 mask-ROM 的 I=0 hand-off；
   `NK_CPSR=0x400000d3`（I=1）是“timer 到期但不进 IRQ”的 control。
+
+### timer-queue / kernel-start（round 31）
+
+```
+Kern::Init1 (continued after idle)
+  0x5031ef40  ldr r0,[0x80001c34]      ; harness-injected object
+  0x5031ef50  ldr pc,[vtable+0xc]      ; 0x5032b024
+  0x5032b034  ldr pc,[vtable+0x1c]     ; abstract base: User::Panic
+                                       ; concrete HAL: tick getter
+  0x5031ef54  bl 0x5032b3c8            ; queue/timer helper
+  0x50318768  current-thread field update
+  0x50330a5c  bl 0x503a6120            ; EUser K=1163 (cleanup/trap pop)
+```
+
+- export 451 `0x5032aff8` 的构造器只安装抽象基类 vtable `0x503383bc`；
+  `+0x1c` 槽是纯虚函数 `User::Panic`（K=1610 stub `0x50336858`，
+  boot profile 实际指向 `0x50389848`），所以直接使用基类 vtable 会在
+  **430,945 条**处 halt 到 `0x50312b88`。
+- round 31 复制基类 vtable 到 `0x80500100`，把 `+0x1c` 换成高地址
+  `0xffff0a00` 的零返回 stub，模拟具体 HAL 子类的 tick getter。kernel
+  自己的 `0x5032b024` 因此能运行，boot 前进到 **439,177 条**。
+- `NK_TIMERQ_MODE=ctor` 是上面的 control；`NK_TIMERQ_MODE=stub` 则跳过
+  整个 `+0xc` 方法，停在 438,731 条处的 KERN 6 panic（另一条路径）。
 
 ---
 
@@ -189,7 +240,22 @@ NK_TIMER=1 NK_TIMER_LOG=8 NK_CPSR=0x40000053 NK_IRQ_LOG=4 \
   ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin
 
+# round 31: 在 round-30 命令上加 timer-queue 注入
+NK_TIMERQ=1 \
+  NK_TIMER=1 NK_TIMER_LOG=0 NK_CPSR=0x40000053 NK_IRQ_LOG=0 \
+  NK_IMPORTMAP=config/imports-r29-6600.txt \
+  NK_SYSTEM_TIME=1 NK_BOOT_HANDOFF=1 NK_SUPERPAGE=1 NK_B7E=1 \
+  NK_TRAPCLEAN=1 NK_EXT_STUB=1 NK_HAL_TIMER_HZ=4 NK_PRIMARY_RAM=0x80900000 \
+  NK_ALLOC_HLE=1 NK_ALLOC_PC=0x5038e2ec NK_CALLMAP=config/callmap-rtc-6600.txt \
+  NK_SWI_DIRECT=1 NK_SWI_COMPLETE=0x4d NK_BUDGET=3000000 \
+  ./out/boot_kernel 6600_mcu.bin fw/6600_kernel.bin \
+    --rom-image out/6600_runtime.bin
+
+# round 31 control: 只用抽象基类 vtable（+0x1c 纯虚 -> panic halt）
+NK_TIMERQ=1 NK_TIMERQ_MODE=ctor ...（其余同上）
+
 # 验收
+tools/test_round31.sh
 tools/test_round30.sh
 tools/test_round29.sh
 for t in tools/test_*.sh; do sh "$t" || exit 1; done
@@ -203,20 +269,22 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 |---|---|---|
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
-| P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；调度器对象缺失，进行中 |
+| P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；调度器仍未运行 |
 | P3 | 显示/键盘/音频、文件服务、S60 app 启动 | 未开始 |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
 
-1. **解出 `[0x80001c34]` 的 boot-state 对象**：idle 返回后
-   `Kern::Init1` 必须通过 `[0x80001c34]->vtable+0xc`。优先确认它是否由
-   variant `ecust.dll`（当前未加载）、HAL channel 或 mask-ROM super page
-   创建；这是当前唯一阻塞点。
-2. **让 scheduler/timer 对象真正创建**：如果它来自 HAL timer channel，
-   补齐 vtable（不仅 `+0x5c` 频率），让 kernel 自己 new/注册。
+1. **解出 trap/cleanup frame 的 `+0x48`**：round 31 的新 frontier。
+   `SVC 0x73` 服务 `0x503187e8` 从 `[current_thread+0x38]` 弹出 frame；
+   当前 frame 的 `+0x48` 是 `0xe21440ff`，不是对象指针。需要对齐
+   `TTrap`/`CTrapCleanup` 布局，或在 `Kern::Init2` 构造该 frame 时补上
+   有效对象。
+2. **让 kernel-server 线程的 trap graph 完整**：B7e 只为已发布线程建
+   handler；`Kern::Init2` 在 kernel-server 线程上创建 `TTrap`，需要按
+   真实 `DThread` 布局填 `+0x38/+0x3c/+0x48`。
 3. **验证 scheduler 切换到初始 thread**：记录第一次线程运行/上下文切换，
-   而不是停在 null call。
+   而不是停在 cleanup null call。
 4. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
    IRQ 2 → `0x503113d8` → DFC 路径。
 5. 之后进入 display controller 与 UI 路径。
@@ -229,8 +297,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
   **显式的 mask-ROM/HLE 状态模型**，不是从 mask ROM 解出的真实初始化。
 - `[0x8000000c]` 的语义已在 round 30 验证：它由 IRQ 1 的 handler
   `0x50310ee0` 置位，idle 随即退出；I=1 时同一到期事件不会进 IRQ。
-- `[0x80001c34]` 在启动结束时仍为 0；当前 stop 是 `0x5031ef50` 的
-  null call，不是 CPU fault。该对象应由 mask-ROM/HAL/variant 启动状态创建。
+- `[0x80001c34]` 已由 round 31 的 `NK_TIMERQ=1` 在 `0x5031ef40` 注入；
+  对象使用 kernel 自己的构造器 0x5032aff8，但 `+0x1c` 的 HAL tick getter
+  是零返回 stub，不是真实硬件实现。当前 stop 是 `0x503a6148` 的
+  null call（trap/cleanup frame `+0x48` 无效），不是 CPU fault。
 - timer unit 1 / IRQ 2 / DFC 路径尚未被真实 pending timer 触发。
 - 显示/键盘/音频/文件服务均未实现；app 二进制已放置，但无法启动。
 - `references/` 与 `fw/` 是本地离线材料，不随仓库分发。

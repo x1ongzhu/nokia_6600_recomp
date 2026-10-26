@@ -69,7 +69,8 @@ cross-page or unmapped accesses go through `nokia_rt.c`, where MMIO shims live.
 - an instruction-driven UPP timer/ICU model at `0x58120a00` / `0x58120100`
   (`NK_TIMER=1`); guest writes arm a unit, expiry raises the IRQ line;
 - crash recovery, per-call-site repair (`NK_CALLMAP`), code-range guard,
-  spin watchdog, PC watch, `b .` panic halt, null-call stop;
+  spin watchdog, PC watch, one-shot PC hook for boot-state injection,
+  `b .` panic halt, null-call stop;
 - EKA1 executive call gate (`NK_SWI_DIRECT`): `svc #N` → kernel service table
   `0x50314aec` with the caller's LR live.
 
@@ -118,6 +119,10 @@ The runtime answers hardware the phone expects:
   the guest programs control/reload, expiry raises the IRQ line and sets the
   ICU current-IRQ register (`NK_TIMER=1`);
 - HAL timer frequency (`NK_HAL_TIMER_HZ`), RTC/allocator stand-ins;
+- timer-queue boot state (`NK_TIMERQ=1`): the kernel's own abstract base
+  constructor `0x5032aff8` plus a zero-return override of the pure-virtual
+  HAL tick getter at vtable `+0x1c`; this is an explicit stand-in for the
+  mask-ROM/ASSP concrete timer object;
 - framebuffer/keypad/audio are **not implemented yet**.
 
 The rule is: keep the guest's own logic; only replace hardware and OS services
@@ -132,8 +137,9 @@ success.
 | interpreter + EUser relocation | done (round 29 fixed long multiply and non-S flags) |
 | faithful kernel boot | reaches idle loop `0x50310f84` (3,000,000 insns, 0 faults) |
 | timer/IRQ + idle exit | **done (round 30)**: first IRQ at 430,557 insns, idle exits |
-| scheduler / timer boot-state object | **next**: `[0x80001c34]` is null, stop at `0x5031ef50` |
+| timer-queue boot state | **done (round 31)**: ctor 0x5032aff8 + HAL `+0x1c` override, 439,177 insns |
+| trap/cleanup frame `+0x48` | **next**: null call at `0x503a6148` |
 | display/keypad/audio/file server/apps | not started |
 
 Acceptance tests and the current frontier:
-[`PROGRESS.md`](PROGRESS.md), [`tools/test_round30.sh`](../tools/test_round30.sh).
+[`PROGRESS.md`](PROGRESS.md), [`tools/test_round31.sh`](../tools/test_round31.sh).

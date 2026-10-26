@@ -1773,6 +1773,11 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
                             c->r[15] + 4u, c->cpsr);
             continue;
         }
+        if (ip->pc_hook && (c->r[15] & ~1u) == ip->pc_hook_addr) {
+            uint32_t before = c->r[15];
+            ip->pc_hook(c, ip, c->r[15]);
+            if (c->r[15] != before) continue;
+        }
         if (spin_tick(ip, c->r[15])) {
             if (recover_call(ip, c, NK_STOP_SPIN)) continue;
             ip->st.stop_reason = NK_STOP_SPIN;

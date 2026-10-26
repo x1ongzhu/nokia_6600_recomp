@@ -61,10 +61,11 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 30)
+## Status (2026-10-26, round 31)
 
-The **real kernel boots from the flat image to its idle loop** under the native
-interpreter, and the **first hardware interrupt now wakes it**. What works:
+The **real kernel boots from the flat image to its idle loop**, the **first
+hardware interrupt wakes it**, and the **timer-queue singleton is now created
+with the kernel's own constructor**. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -86,14 +87,25 @@ interpreter, and the **first hardware interrupt now wakes it**. What works:
   IRQ 1, the vector at `0xffff0018` dispatches `0x50310ee0`, that handler sets
   `[0x8000000c]`, and the idle loop at `0x50310f84` exits after **430,557
   instructions** with **1 IRQ** and **0 faults**.
+- [x] **Timer-queue singleton `[0x80001c34]`**: kernel export 451
+  (`0x5032aff8`) builds the abstract base object and installs vtable
+  `0x503383bc`; its `+0x1c` slot is the pure-virtual `User::Panic` (K=1610),
+  which the mask-ROM/HAL concrete subclass overrides with the hardware tick
+  getter. Round 31 calls the kernel constructor at `0x5031ef40`, copies the
+  base vtable and substitutes a zero-return tick getter, so the kernel's own
+  `0x5032b024` runs. `Kern::Init1` crosses the old null call and reaches
+  **439,177 instructions** (1 IRQ, 0 undefined/unbound/recoveries) before the
+  next gap: an invalid trap/cleanup frame `+0x48` at `0x503a6148`.
 
 Not implemented yet:
 
-- [ ] **Scheduler/timer boot-state object** — after idle, `Kern::Init1`
-  continues at `0x5031ef40` and calls `[0x80001c34]->vtable+0xc`; that object
-  is still null, so the boot stops at a **null call at `0x5031ef50`**. This is
-  the next frontier (the object is normally created by the mask-ROM/HAL boot
-  state, not by the E32 entry).
+- [ ] **Trap/cleanup frame `+0x48`** — after `Kern::Init1` returns, the
+  kernel-start path calls EUser K=1163 (`0x503a6120`): SVC 0x73 service
+  `0x503187e8` pops a trap/cleanup frame from `[current_thread+0x38]`, and
+  `[frame+0x48]` is `0xe21440ff` instead of an object pointer, so
+  `vtable+0xc` becomes a **null call at `0x503a6148`**. This is the new
+  frontier.
+- [ ] Scheduler/first thread context switch.
 - [ ] UI/display, keypad, audio, file server, app launching (P3).
 - [ ] Mask-ROM PeaK record codec (the hand-off is an explicit stand-in).
 - [ ] Real hardware HLE (display controller, DSP/radio, RTC).
@@ -138,6 +150,11 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
 #    NK_TIMER=1 NK_CPSR=0x40000053 NK_IRQ_LOG=4
 # ... 430,557 insns, irqs=1, timer expiry at the guest reload, [0x8000000c]=1,
 # ... idle exits, then a null call at 0x5031ef50 ([0x80001c34] object)
+
+# 6. round 31: inject the timer-queue singleton and cross that null call
+#    NK_TIMERQ=1 ... (same command plus the timer/IRQ hand-off)
+# ... 439,177 insns, ctor 0x5032aff8, vtable 0x503383bc, HAL +0x1c override,
+# ... new null call at 0x503a6148 (trap/cleanup frame +0x48)
 ```
 
 Without `NK_SYSTEM_TIME=1` the same boot stops at 133,950 instructions with
@@ -160,7 +177,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_imports.sh` | IAT/stub scan and ELocl hole binding |
 | `tools/test_loader.sh` | EKA1 packed-record loader and first import binding |
 | `tools/test_round29.sh` | previous acceptance: interpreter fixes, r29 map, idle loop |
-| `tools/test_round30.sh` | **current acceptance**: UPP timer/ICU, IRQ entry, idle exit, null-call frontier |
+| `tools/test_round30.sh` | UPP timer/ICU, IRQ entry, idle exit, round-30 null call |
+| `tools/test_round31.sh` | **current acceptance**: timer-queue ctor, HAL vtable override, kernel-start frontier |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -202,22 +220,30 @@ model raises **IRQ 1** and reports it in the ICU current-IRQ register at
 and its vtable method `0x50310ee0` sets `[0x8000000c] = 1`.  The idle loop
 exits at instruction **430,557**.
 
-The next gap is the boot-state object `[0x80001c34]`.  After idle,
-`Kern::Init1` continues:
+Round 31 closes the next gap: the boot-state object `[0x80001c34]` is the
+kernel timer-queue singleton.  Kernel export 451 (`0x5032aff8`) is its
+abstract base constructor and installs vtable `0x503383bc`; `+0x1c` is the
+pure-virtual `User::Panic` slot, which the mask-ROM/HAL concrete subclass
+overrides with the hardware tick getter.  The harness calls the kernel's own
+constructor at `0x5031ef40`, copies the base vtable and substitutes a
+zero-return tick getter:
 
 ```
-0x5031ef40  ldr r3, [0x80001c34]   ; object (currently null)
-0x5031ef44  ldr r0, [r3]           ; vtable
+0x5031ef40  ldr r3, [0x80001c34]   ; harness-created object @ 0x80500000
+0x5031ef44  ldr r0, [r3]           ; vtable 0x503383bc
 0x5031ef48  ldr r3, [r0]
-0x5031ef4c  mov lr, pc
-0x5031ef50  ldr pc, [r3, #0xc]     ; -> null call at 0x5031ef50
+0x5031ef50  ldr pc, [r3, #0xc]     ; 0x5032b024 (kernel timer code)
+0x5032b034  ldr pc, [vtable, #0x1c]; HAL tick getter override
 ```
 
-That object is the kernel's timer-queue global: kernel export 344
-(`0x5032b33c`) is its setter, and no image in this ROM imports that export, so
-the mask-ROM/ASSP boot state must install it.  The frontier is therefore a
-**null call at `0x5031ef50`**, not a CPU fault.  See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for
-the roadmap.
+`Kern::Init1` now returns into the kernel-start path.  The new frontier is a
+**null call at `0x503a6148`**: SVC 0x73 service `0x503187e8` pops a
+trap/cleanup frame from `[current_thread+0x38]`, and `[frame+0x48]` is
+`0xe21440ff` instead of an object pointer, so `vtable+0xc` is zero.  Boot
+reaches **439,177 instructions** with 1 IRQ and 0
+undefined/unbound/recoveries.
+
+See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for the roadmap.
 
 ## Legal
 
