@@ -752,6 +752,14 @@ block，不是 class 实例；需要真实对象实例（连同字段）。验�
 无 framebuffer。global CBase 也不是所需对象；必须恢复真实 class
 instance/server response。验收 `tools/test_round88.sh`。
 
+### 2.42 round 89：callback 收到 stack params，不是 CBase
+
+watch `0x503da6f0`：`0x503db2dc -> 0x503da6f0`，`r0=0x8057ffc8`
+（EStart stack params），`r1=0xd`。该函数期望 `this`，但回调传的是
+params，后续 EUser 把 `[this+0x14]` 当 vtable，落到
+`0x00a04d08`。callback/object ABI 不匹配；需要真实
+server/class instance。验收 `tools/test_round89.sh`。
+
 ---
 
 ## 3. EUser 导入映射

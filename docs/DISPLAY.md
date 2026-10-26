@@ -848,6 +848,21 @@ null-call。两者都无 framebuffer 像素。global CBase 也不是所需对象
 必须恢复真实 class instance/server response。验收：
 `tools/test_round88.sh`。
 
+### round 89：callback 收到 stack params，不是 CBase
+
+watch `0x503da6f0`：
+
+```
+0x503db2dc -> 0x503da6f0
+r0 = 0x8057ffc8, r1 = 0xd
+[0x8057ffc8] = 0, 0x28e59ff0, 0x28e59ff0, 9, ...
+```
+
+该函数期望 `this`，但回调传的是 EStart 的 stack params block，于是
+后续 EUser 把 `[this+0x14]` 当 vtable，落到 `0x00a04d08`。
+callback/object ABI 不匹配；需要真实 server/class instance。
+验收：`tools/test_round89.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -910,6 +925,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 恢复 supervisor 的真实 class instance/server response：round 87/88
-   已排除 vtable、global CBase、stack params。下一步从 ROM 恢复该
-   class 的构造路径，或改走 kernel process loader。
+8. callback/object ABI 不匹配（round 89）：`0x503da6f0` 期望
+   CBase，但 `0x503db2dc` 传 stack params。需要真实
+   server/class instance，或改走 kernel process loader。

@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 88)
+## Status (2026-10-26, round 89)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -95,8 +95,8 @@ real StartThread frame; round 82 completes the server run/return cycle; round 83
 supervisor's `0x00a04d08` cannot be zero-return HLE'd; round 84 rules out the
 adjacent EUser slot targets; round 85 diagnoses the stack-params-as-CBase
 bug; round 86 shows a vtable pointer alone still leaves; round 87 shows a real
-vtable/method still fails; round 88 rules out the global CBase as `this`.
-What works:
+vtable/method still fails; round 88 rules out the global CBase as `this`; round 89 traces the callback
+ABI mismatch. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -628,6 +628,13 @@ What works:
   instance/server response is still missing.
   `tools/test_round88.sh` pins the result.
 
+- [x] **Callback receives stack params, not a CBase** (round 89): watching
+  `0x503da6f0` shows `0x503db2dc -> 0x503da6f0` with `r0=0x8057ffc8`
+  (EStart's stack params block) and `r1=0xd`. The callback expects `this`,
+  so the later EUser dispatch treats `[this+0x14]` as a vtable and lands
+  on `0x00a04d08`. The callback/object ABI needs the real server/class
+  instance. `tools/test_round89.sh` pins the diagnosis.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -792,7 +799,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round85.sh` | supervisor passes stack params as a CBase; `[this+0x14]` is a return address |
 | `tools/test_round86.sh` | vtable pointer alone still enters TTrap/leave; real class vtable/method needed |
 | `tools/test_round87.sh` | real vtable/method still fails on the stack params; real class instance needed |
-| `tools/test_round88.sh` | **current acceptance**: global CBase as `this` also fails; real class instance/server response needed |
+| `tools/test_round88.sh` | global CBase as `this` also fails; real class instance/server response needed |
+| `tools/test_round89.sh` | **current acceptance**: callback receives stack params instead of a CBase; callback/object ABI mismatch |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
