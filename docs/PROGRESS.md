@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 36）
+最后更新：2026-10-26（round 37）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -142,6 +142,14 @@
   `0x41000000`，复制到 `0x41080000`；写入点是 `0x503164cc`（来自
   `0x503163f4` 的扫描）。这条线索被排除，display driver 仍需从真正的
   UI/显示路径找。
+
+- **显示链静态清单**（round 37）：ROMFS 的显示链已经固定：
+  `FbServ.exe` @ `0x50689770`（uid3 `0x10003a16`）、
+  `FbsCli.dll` @ `0x5068c150`、`BitGdi.dll` @ `0x50698080`、
+  variant 驱动 `ecust.dll` @ `0x50339750`。`ecust.dll` 代码引用
+  `0x59E00010` 与 `0x59200000` 两个硬件窗口，仍需确认是 LCD/DMA/
+  audio/keypad。第一帧需要先启动 FbServ 进程，再做 LCD HLE；详见
+  [DISPLAY.md](DISPLAY.md)。
 
 ### 未完成
 

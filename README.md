@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 36)
+## Status (2026-10-26, round 37)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -161,6 +161,13 @@ stable executive loop. What works:
   written at `0x503164cc` from `0x503163f4` (`0x41000000` source,
   `0x41080000` copied entries), not an LCD framebuffer. This rules out that
   lead and keeps the display hunt on the real UI path.
+
+- [x] **Static display-chain inventory** (round 37): the ROMFS display
+  chain is pinned: `FbServ.exe` @ `0x50689770` (uid3 `0x10003a16`),
+  `FbsCli.dll` @ `0x5068c150`, `BitGdi.dll` @ `0x50698080`, and the variant
+  driver `ecust.dll` @ `0x50339750` with hardware constants `0x59E00010` /
+  `0x59200000`. The first frame needs a launched FbServ process plus the
+  LCD HLE; see [DISPLAY.md](docs/DISPLAY.md).
 
 Not implemented yet:
 
@@ -276,7 +283,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round33.sh` | WaitForAnyRequest block, first switch to the NULL thread, start hand-off, KERN 6 closed (historical control) |
 | `tools/test_round34.sh` | live DThread/CObjectIx graph, status-completion wake, Init3 HAL gate, banked stacks, 6M-instruction run (historical control) |
 | `tools/test_round35.sh` | hand-off returns before preemption, supervisor runs to 464k, Init3 deadlock pinned to the handle-`0x32`/DFC path |
-| `tools/test_round36.sh` | **current acceptance**: MMIO write PC/LR provenance; `0x41000000`/`0x41080000` is the boot-region table, not the LCD framebuffer |
+| `tools/test_round36.sh` | MMIO write PC/LR provenance; `0x41000000`/`0x41080000` is the boot-region table, not the LCD framebuffer |
+| `tools/test_round37.sh` | **current acceptance**: static display-chain inventory (`FbServ.exe`, `FbsCli.dll`, `BitGdi.dll`, `ecust.dll` hardware constants) |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -290,7 +298,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 
 ```
 config/        target config, import maps, call maps
-docs/          architecture, boot model, firmware format, progress
+docs/          architecture, boot model, display chain, firmware format, progress
 recompiler/    offline extraction / layout / lifting / relocation tools
 runtime/       ARMv4T interpreter, sparse memory, boot harness
 tools/         build and acceptance scripts
