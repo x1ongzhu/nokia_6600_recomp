@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 70）
+最后更新：2026-10-26（round 71）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -432,6 +432,17 @@
   `0x503a35b4`）；把这个 slot 也重绑到 `0x50383c84` 仍不改变，
   所以它不是 CBase-style constructor。framebuffer 仍 0 像素。
   验收 `tools/test_round70.sh`。
+
+- **EStart global CBase rebind**（round 71）：`0x503b4338` 是 EStart
+  的 global-object/CBase getter，ROM slot 是 `operator new`
+  （`0x503963dc`），返回 zero-vtable 内存。把它也重绑到
+  `0x50383c84` 后，EStart 从 12,136 推进到 **13,162 条**，越过
+  zero-vtable 对象；新 frontier 是 `0x503ce69c` 的
+  `bx r1`，`r1=0x00a04d08`（不是代码），`lr=0x503ce6a1`。说明
+  forced generic CBase vtable 不是 EStart 真实 class vtable。
+  `config/imports-estart-6600.txt` 现在含两个 rebind；
+  `config/imports-estart-nocbase-6600.txt` 保留 round-70 历史路径。
+  验收 `tools/test_round71.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -745,7 +756,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70 加 wait HLE 后 EStart 推进到 12k 条并暴露 zero-vtable constructor frontier |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 加 wait HLE + CBase rebind 后 EStart 推进到 13k 条，当前卡在 bad virtual dispatch `0x00a04d08` |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -778,10 +789,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. EStart + wait HLE 已推进到 12,136 条（round 70），当前停在
-    zero-vtable 对象 `0x80600000`（`vtable+8 -> 0xe59ff028`）。
-    下一步找 EStart 真正的对象 constructor（slot `0x5034c638` 的
-    正确 target），而不是继续 wait/scheduler。
+11. EStart + wait HLE + CBase rebind 已推进到 13,162 条
+    （round 71），当前卡在 `0x503ce69c` 的 `bx r1`，
+    `r1=0x00a04d08`。下一步找 EStart 真实 class vtable（不是
+    `0x503b359c` 这个 generic CBase vtable），修掉该虚拟调用。
 
 ---
 

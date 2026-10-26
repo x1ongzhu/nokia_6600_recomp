@@ -599,6 +599,17 @@ lr = 0x503dac83
 不是 CBase-style constructor。framebuffer 仍 0 像素。验收
 `tools/test_round70.sh`。
 
+### 2.24 round 71：EStart global CBase rebind
+
+`0x503b4338` 是 EStart 的 global-object/CBase getter。ROM slot 是
+`operator new`（`0x503963dc`），返回 zero-vtable 内存。把它也重绑到
+`0x50383c84` 后，EStart 从 12,136 推进到 **13,162 条**，越过
+zero-vtable 对象；新 frontier 是 `0x503ce69c` 的 `bx r1`，
+`r1=0x00a04d08`（不是代码），`lr=0x503ce6a1`。`r1` 来自
+`[r0+0xc]`，而 `r0=[r4+0x14]`；说明 generic CBase vtable
+`0x503b359c` 不是 EStart 真实 class vtable。验收：
+`tools/test_round71.sh`。
+
 ---
 
 ## 3. EUser 导入映射

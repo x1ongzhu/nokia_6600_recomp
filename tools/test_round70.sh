@@ -49,7 +49,7 @@ env NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 \
     NK_TIMERQ=1 NK_B7E_VALID_HI=0x80a00000 NK_BANKED=1 \
     NK_ENTRY=0x503da4a5 NK_SP=0x80580000 NK_MAP_LCD=1 \
     NK_START_HLE=1 NK_USER_SVC_KERNEL=1 NK_WAIT_HLE=1 \
-    NK_APP_IMPORTMAP=config/imports-estart-6600.txt \
+    NK_APP_IMPORTMAP=config/imports-estart-nocbase-6600.txt \
     NK_DUMP=0x59800000:0x400000 NK_DUMP_FILE=out/round70_fb.bin \
     ./out/boot_kernel "$ROM" fw/6600_kernel.bin \
     --rom-image out/6600_runtime.bin >out/round70_estart.log 2>&1

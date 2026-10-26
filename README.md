@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 70)
+## Status (2026-10-26, round 71)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -83,8 +83,8 @@ vtable. Round 64 rebinds the app's TTrap wrapper too, which takes the real
 removing the null-descriptor `0xe59ff028` writes. Round 68 proves the direct
 SplashScreen entry path only initializes and never draws, so the splash driver
 must come from EStart or the kernel process loader. Round 69 binds EStart's
-first unresolved import; round 70 adds wait completion and drives EStart to
-its next zero-vtable object. What works:
+first unresolved import; round 70 adds wait completion; round 71 rebinds the
+global CBase slot and advances EStart past the zero-vtable object. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -483,6 +483,15 @@ its next zero-vtable object. What works:
   slot to `0x50383c84` also did not change it. Framebuffer remains
   untouched. `tools/test_round70.sh` pins the frontier.
 
+- [x] **EStart global CBase rebind** (round 71): EStart's `0x503b4338` getter
+  is ROM `operator new`; binding it to `0x50383c84` gives the global object
+  vtable `0x503b359c` and moves EStart from 12,136 to 13,162 instructions.
+  The next frontier is a bad virtual dispatch at `0x503ce69c`
+  (`bx r1`, `r1=0x00a04d08`, `lr=0x503ce6a1`), so the generic CBase vtable
+  is not EStart's real class vtable. `config/imports-estart-6600.txt` holds
+  both rebinds; `config/imports-estart-nocbase-6600.txt` preserves the
+  round-70 path. `tools/test_round71.sh` pins the new frontier.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -629,7 +638,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round66.sh` | low allocator rebind removes `0xe59ff028`; banked SVC loop remains; direct dispatch reaches EwSrv |
 | `tools/test_round68.sh` | direct SplashScreen entry only initializes; EStart route opens at slot `0x503b6b38` |
 | `tools/test_round69.sh` | EStart import bind; full 200k budget; stops in SVC/pre-handler at `0x50314f68` |
-| `tools/test_round70.sh` | **current acceptance**: EStart wait HLE; 12,136 insns; zero-vtable object at `0x80600000` |
+| `tools/test_round70.sh` | EStart wait HLE; 12,136 insns; zero-vtable object at `0x80600000` (historical map) |
+| `tools/test_round71.sh` | **current acceptance**: EStart CBase rebind; 13,162 insns; bad virtual dispatch at `0x00a04d08` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

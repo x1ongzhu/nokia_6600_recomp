@@ -1,12 +1,16 @@
-# imports-estart-6600.txt - EStart's first unresolved import (round 69)
+# imports-estart-6600.txt - EStart app-side imports (round 71)
 #
-# EStart.exe (entry 0x503da4a5) null-calls after 119 instructions through the
-# stub at 0x503db628 -> slot 0x503b6b38.  The slot belongs to uid3
-# 0x100039e8; its real export table is at 0x503b6b30 (two entries, both
-# 0x503b53f5), while the header's export_dir 0x503b6b38/ordinal 2 is zero.
+# 0x503b6b38: EStart's first unresolved import.  The slot belongs to uid3
+# 0x100039e8; the image's real export table is at 0x503b6b30 (0x503b53f5
+# twice), while the header's export_dir 0x503b6b38/ordinal 2 is zero.
 #
-# Bind the slot to the image's actual export 0x503b53f5 so EStart can run
-# past its static init.  This is an explicit ROM-loader export fixup.
+# 0x503b4338: the app's global-object/CBase getter.  The ROM slot holds
+# operator new (0x503963dc), which returns raw memory with a zero vtable.
+# EStart then calls vtable+8 and lands on 0xe59ff028.  Rebind it to the
+# same CBase constructor used by SplashScreen (0x50383c84) so the object has
+# a real vtable; this advances EStart past the zero-vtable object to the
+# next virtual-dispatch frontier.
 #
 # Format: <slot> <target>
+0x503b4338 0x50383c84
 0x503b6b38 0x503b53f5

@@ -613,6 +613,28 @@ lr = 0x503dac83
 所以它不是 CBase-style constructor。framebuffer 仍 0 像素。验收：
 `tools/test_round70.sh`。
 
+### round 71：EStart global CBase rebind
+
+`0x503b4338` 是 EStart 的 global-object/CBase getter。ROM slot 是
+`operator new`（`0x503963dc`），返回 zero-vtable 内存。把它也重绑到
+`0x50383c84` 后：
+
+```
+app import rebind: 0x503b4338 0x503963dc -> 0x50383c84
+stop: pc left the image (5) at 0x00a04d08
+insns=13162
+mmio: 1720 reads, 0 writes
+```
+
+EStart 越过 zero-vtable 对象，新 frontier 是 `0x503ce69c` 的
+`bx r1`，`r1=0x00a04d08`（不是代码），`lr=0x503ce6a1`。
+`r1` 来自 `[r0+0xc]`，而 `r0=[r4+0x14]`；说明 forced generic CBase
+vtable `0x503b359c` 不是 EStart 真实 class vtable。
+
+`config/imports-estart-6600.txt` 现在含两个 rebind；
+`config/imports-estart-nocbase-6600.txt` 保留 round-70 历史路径。
+验收：`tools/test_round71.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -675,7 +697,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 找 EStart 真正的对象 constructor：round 70 加 wait HLE 后已推进到
-   12,136 条，当前停在 zero-vtable 对象 `0x80600000`（slot
-   `0x5034c638`）。先确认该 slot 的正确 target，再看它是否开始
-   SplashScreen/window server。
+8. 找 EStart 真实 class vtable：round 71 已推进到 13,162 条，当前
+   卡在 `0x503ce69c` 的 `bx r1`（`r1=0x00a04d08`）。generic
+   CBase vtable `0x503b359c` 不匹配；下一步确认该对象真实 vtable/class。

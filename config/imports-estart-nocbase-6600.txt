@@ -1,0 +1,9 @@
+# imports-estart-nocbase-6600.txt - historical round-70 EStart map
+#
+# Only the first unresolved import is bound; slot 0x503b4338 still holds the
+# ROM operator new, so EStart stops on the zero-vtable global object at
+# 0x80600000 after 12,136 instructions.  tools/test_round70.sh uses this map;
+# config/imports-estart-6600.txt adds the CBase rebind for round 71.
+#
+# Format: <slot> <target>
+0x503b6b38 0x503b53f5
