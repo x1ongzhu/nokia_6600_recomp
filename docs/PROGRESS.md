@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 47）
+最后更新：2026-10-26（round 48）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -229,6 +229,12 @@
   **2,000,000 条**、0 undefined/unbound/recovery，停在
   request-semaphore Wait service `0x503244e4..f4`。下一步是完成该 request
   或 HLE window-server draw 路径。
+
+- **Splash wait / EwSrv blocker**（round 48）：`NK_WAIT_HLE=1` 完成
+  `[r5]` 后，SplashScreen 离开 `WaitForAnyRequest`，但进入
+  `0x5038d2d4` 的 wild descriptor copy（8-word expansion），跑到预算
+  也没有显示绘制。直接跑 `EwSrv.exe`（`0x506a8205`）在
+  `lr=0x506c0b15` null-call。下一步是 window-server/surface 状态。
 
 ### 未完成
 

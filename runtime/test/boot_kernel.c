@@ -978,6 +978,7 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
 #define B7E_TLS         0x80003f00u   /* thread-local object [thread+0x5c]  */
 #define B7E_VT_TLS      0x80003e00u
 #define B7E_ONE_STUB    0xffff0500u   /* mov r0,#1; bx lr                  */
+#define B7E_WAIT_STUB   0xffff0c00u   /* complete [r5], return 0           */
 #define B7E_VT_ENTRIES  64
 
 /* Round 25: the user-side runtime normally installs a CTrapCleanup before it
@@ -1230,6 +1231,12 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_w32(c, B7E_HAL_STUB + 0x14, B7E_HAL_CHAN);
     nk_w32(c, B7E_ONE_STUB, 0xe3a00001u);        /* mov r0,#1 */
     nk_w32(c, B7E_ONE_STUB + 4, 0xe12fff1eu);    /* bx lr     */
+    /* App wait HLE: the EUser WaitForAnyRequest wrapper keeps its
+     * TRequestStatus in r5.  Complete that status and return 0 so the
+     * wrapper's "still pending?" loop exits.  Opt-in (NK_WAIT_HLE=1). */
+    nk_w32(c, B7E_WAIT_STUB, 0xe3a00000u);       /* mov r0,#0 */
+    nk_w32(c, B7E_WAIT_STUB + 4, 0xe5850000u);   /* str r0,[r5] */
+    nk_w32(c, B7E_WAIT_STUB + 8, 0xe12fff1eu);   /* bx lr     */
     /* Round 34: Kern::Init3 gets object 3 from the HAL and issues Request
      * 0xd, then polls [0x800004cc] until it is non-zero.  On the real phone
      * the device driver completes that request (its DFC/ISR calls the
@@ -1245,6 +1252,7 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_code_range_add(ip, B7E_HAL_REQ, B7E_HAL_REQ + 0x18);
     nk_code_range_add(ip, B7E_ZERO_STUB, B7E_ZERO_STUB + 8);
     nk_code_range_add(ip, B7E_ONE_STUB, B7E_ONE_STUB + 8);
+    nk_code_range_add(ip, B7E_WAIT_STUB, B7E_WAIT_STUB + 12);
     nk_code_range_add(ip, B7E_HAL_STUB, B7E_HAL_STUB + 0x18);
     nk_code_range_add(ip, B7E_ALLOC_STUB, B7E_ALLOC_STUB + 0x20);
     nk_code_range_add(ip, B7E_AT_STUB, B7E_AT_STUB + 0x20);
@@ -1326,6 +1334,8 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
      * return is treated as failure and raises USER-EXEC 3, so report success. */
     b7e_fill_vtable(c, B7E_VT_TLS, B7E_ZERO_STUB);
     nk_w32(c, B7E_VT_TLS + 0x24, B7E_ONE_STUB);
+    if (env_ulong("NK_WAIT_HLE", 0))
+        nk_w32(c, B7E_VT_TLS + 0x20, B7E_WAIT_STUB);
     nk_w32(c, B7E_TLS, B7E_VT_TLS);
 
     printf("B7e boot state: thread %#010x, process %#010x, objidx %#010x, "

@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 47)
+## Status (2026-10-26, round 48)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -257,6 +257,15 @@ stable executive loop. What works:
   pointer. The next step is to complete that request or HLE the window-server
   draw path so the splash pixels reach a framebuffer.
 
+- [x] **Splash wait and EwSrv blockers** (round 48): `NK_WAIT_HLE=1`
+  completes the EUser `TRequestStatus` in `r5`, so SplashScreen leaves
+  `WaitForAnyRequest` — but it then enters a wild descriptor copy at
+  `0x5038d2d4` (8-word expansion loop, source/destination around `0x80da....`)
+  and runs to the budget without a display draw. Direct `EwSrv.exe`
+  (`0x506a8205`) null-calls at pc=0, lr=`0x506c0b15`, so its own
+  imports/vtables are also uninitialised. Both point at the missing
+  window-server/surface state, not the CPU.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -382,7 +391,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round44.sh` | FbServ's first `svc #0x6c`, user/kernel bit-23 selector, and the dispatch-table frontier |
 | `tools/test_round45.sh` | stable real-SVC FbServ, full 2M budget in the EUser wait loop |
 | `tools/test_round46.sh` | splash-screen route; SplashScreen reaches EwSrv and stops on the bad pointer `0x506cbf1c` |
-| `tools/test_round47.sh` | **current acceptance**: EwSrv export snap; SplashScreen runs the full 2M budget in the wait service |
+| `tools/test_round47.sh` | EwSrv export snap; SplashScreen runs the full 2M budget in the wait service |
+| `tools/test_round48.sh` | **current acceptance**: wait-completion exposes a wild descriptor copy; direct EwSrv null-calls at `0x506c0b15` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -212,8 +212,17 @@ Thumb prologue 在 `0x506cbf1e`（`20 1c 10 bc 02 bc 08 47...`）。也就是
 
 修正后 SplashScreen 跑满 **2,000,000 条**预算、0 undefined/unbound/
 recovery，停在 request-semaphore 的 Wait service `0x503244e4..f4`，
-在等客户端/消息，而不是崩溃。下一步是完成该 request，或 HLE
-window-server 的 draw 路径，把 splash 像素送进 framebuffer。
+在等客户端/消息，而不是崩溃。
+
+round 48 用 `NK_WAIT_HLE=1`（semaphore Wait 完成 `[r5]` 并返回 0）让
+它离开 Wait，但 app 立刻进入 `0x5038d2d4` 的 **wild descriptor copy**
+（8-word expansion loop，source/dest 约 `0x80da....`），跑到预算也没有
+显示绘制。直接运行 `EwSrv.exe`（entry `0x506a8205`）也在
+`lr=0x506c0b15` 处 null-call。两个路径都指向缺失的
+window-server/surface 状态，而不是 CPU。
+
+下一步是补齐 EwSrv/FbsCli 的 surface/descriptor 初始化，或 HLE
+window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 
 另外，direct 路径对 `0x600000` 的 400 KB+ 写入不是 framebuffer，而是
 一次**长度错误的数据 copy**；`NK_MAP_APP_LOW=1` 把
