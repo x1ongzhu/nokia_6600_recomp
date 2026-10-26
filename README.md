@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 38)
+## Status (2026-10-26, round 39)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -177,6 +177,14 @@ stable executive loop. What works:
   the uninitialized object vtable `0x50680000` (`[vtable+8]=0x068a0689`), so
   PC escapes to `0x068a0688`.  The next step is running FbServ's constructors
   / DLL imports (or the kernel process loader).
+
+- [x] **FbServ vtable overwrite** (round 39): byte/halfword stores now hit
+  the write watch. FbServ's constructor writes vtable `0x5068c0a4` at
+  `0x5068a5c8`, then EUser descriptor code at `0x5038bc6c` writes a zero byte
+  at `[object+1]`, leaving `0x50680000`; `[0x50680008]=0x068a0689` and the
+  call escapes to `0x068a0688`. The object is being reused as a
+  `TDes8`-style buffer after construction, so the direct-entry path lacks the
+  C++/descriptor state a real process would have.
 
 Not implemented yet:
 
@@ -294,7 +302,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round35.sh` | hand-off returns before preemption, supervisor runs to 464k, Init3 deadlock pinned to the handle-`0x32`/DFC path |
 | `tools/test_round36.sh` | MMIO write PC/LR provenance; `0x41000000`/`0x41080000` is the boot-region table, not the LCD framebuffer |
 | `tools/test_round37.sh` | static display-chain inventory (`FbServ.exe`, `FbsCli.dll`, `BitGdi.dll`, `ecust.dll` hardware constants) |
-| `tools/test_round38.sh` | **current acceptance**: direct Thumb FbServ startup, 3,612 instructions, uninitialized-vtable blocker at `0x5068a572` |
+| `tools/test_round38.sh` | direct Thumb FbServ startup, 3,612 instructions, uninitialized-vtable blocker at `0x5068a572` |
+| `tools/test_round39.sh` | **current acceptance**: exact FbServ vtable write/overwrite sequence; byte/halfword write watches |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

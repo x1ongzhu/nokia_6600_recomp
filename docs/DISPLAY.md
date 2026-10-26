@@ -90,6 +90,20 @@ harness 会把 Thumb prologue 当 ARM 解码，只在函数中途才恢复。现
 FbServ 的 C++ 构造函数/DLL import 初始化；下一步是补 constructors/
 imports，或改用 kernel 的 process loader。
 
+写 watch 现在也覆盖 byte/halfword store，能看到完整序列：
+
+```
+5038e2ec  allocator zeroes the 0x18-byte block
+503993c8  EUser sets [object] = 0
+5068a5c8  FbServ constructor sets [object] = 0x5068c0a4
+5038bc6c  EUser descriptor code writes byte [object+1] = 0
+```
+
+最后一笔把 `0x5068c0a4` 变成 `0x50680000`；`[0x50680008]=0x068a0689`，
+于是调用逃到 `0x068a0688`。对象在构造后被当作 `TDes8` 风格的缓冲区
+使用，说明直接入口还缺真实进程的 C++/descriptor 状态。下一步要么
+补齐 constructors/descriptor 初始化，要么改用 kernel process loader。
+
 这条路径绕过了 kernel 死锁，是目前离第一帧最近的路线。
 
 ---

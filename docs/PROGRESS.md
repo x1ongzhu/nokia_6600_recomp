@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 38）
+最后更新：2026-10-26（round 39）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -159,6 +159,13 @@
   `0x50680000`，`[vtable+8]=0x068a0689`，PC 逃到 `0x068a0688`。
   这说明直接入口没有跑 FbServ 的 constructors/DLL imports。下一步补
   这部分，或改用 kernel process loader。详见 [DISPLAY.md](DISPLAY.md)。
+
+- **FbServ vtable 被覆盖**（round 39）：byte/halfword store 现在也进
+  write watch。FbServ 构造函数在 `0x5068a5c8` 写入 vtable `0x5068c0a4`，
+  随后 EUser descriptor 代码在 `0x5038bc6c` 写 `[object+1]=0`，把值变成
+  `0x50680000`；`[0x50680008]=0x068a0689`，调用逃到 `0x068a0688`。
+  对象构造后被当作 `TDes8` 缓冲区复用，直接入口仍缺真实进程的
+  C++/descriptor 状态。
 
 ### 未完成
 

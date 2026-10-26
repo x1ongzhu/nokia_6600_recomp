@@ -105,13 +105,16 @@ static inline void nk_w16(nk_cpu_t* c, uint32_t a, uint16_t v) {
     if ((a & NK_PAGE_MASK) <= NK_PAGE_SIZE - 2) {
         uint8_t* p = nk_page_ptr(c, a);
         if (p) { p += a & NK_PAGE_MASK;
-                 p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); return; }
+                 p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8);
+                 nk_dbg_note_write(c, a, v); return; }
     }
     nk_write_slow(c, a, v, 2);
+    nk_dbg_note_write(c, a, v);
 }
 static inline void nk_w8(nk_cpu_t* c, uint32_t a, uint8_t v) {
     uint8_t* p = nk_page_ptr(c, a);
-    if (p) p[a & NK_PAGE_MASK] = v; else nk_write_slow(c, a, v, 1);
+    if (p) { p[a & NK_PAGE_MASK] = v; nk_dbg_note_write(c, a, v); }
+    else { nk_write_slow(c, a, v, 1); nk_dbg_note_write(c, a, v); }
 }
 
 /* ---- NZCV flags (in cpsr) ---- */
