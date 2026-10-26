@@ -653,6 +653,19 @@ static int      b7e_installs;
 static uint32_t b7e_heap_cur, b7e_heap_end;
 static uint32_t b7e_current_thread;
 static uint32_t b7e_trap_owner[B7E_TRAP_SLOTS];
+/* Round 32: the kernel's real DThread lands in the bring-up heap
+ * (NK_ALLOC_BASE, 0x80600000 by default), not inside the 3 MiB kernel-RAM
+ * window.  The old 0x80400000 bound treated that pointer as transient and
+ * re-published the stack-allocated bootstrap SThread at 0x802ffd00 instead:
+ * a later EUser TFullName buffer on the boot stack then overwrote the live
+ * thread (+0x38 iFrame / +0x3c iTrapHandler), so TTrap::UnTrap popped a ROM
+ * text address.  Follow the heap bound the harness actually mapped. */
+static uint32_t b7e_valid_lo = NK_RAM_BASE;
+static uint32_t b7e_valid_hi = 0x80a00000u;
+
+static int b7e_valid_ptr(uint32_t v) {
+    return v >= b7e_valid_lo && v < b7e_valid_hi;
+}
 
 static void b7e_fill_vtable(nk_cpu_t* c, uint32_t vt, uint32_t stub) {
     for (int i = 0; i < B7E_VT_ENTRIES; i++)
@@ -666,7 +679,7 @@ static void b7e_fill_vtable(nk_cpu_t* c, uint32_t vt, uint32_t stub) {
  * the stand-in object index to whatever DProcess the kernel installs. */
 static void b7e_process_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     if (!b7e_enabled) return;
-    if (value < NK_RAM_BASE || value >= 0x80400000u) {
+    if (!b7e_valid_ptr(value)) {
         /* The kernel clears the process field while tearing down a thread.
          * Keep the live thread attached: the direct E32-entry boot has no
          * scheduler startup to recreate the graph. */
@@ -703,7 +716,7 @@ static uint32_t b7e_trap_slot(uint32_t t) {
 static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     (void)addr;
     if (!b7e_enabled) return;
-    if (value < NK_RAM_BASE || value >= 0x80400000u) {
+    if (!b7e_valid_ptr(value)) {
         /* A scheduler transient clears the current-thread slot before the
          * next switch.  The E32-entry boot has no real scheduler startup, so
          * a handle lookup in that window would dereference a null process.
@@ -760,6 +773,11 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
 static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
                         uint32_t heap_base, uint32_t heap_size) {
     if (heap_size < 0x4000u) heap_size = 0x4000u;
+    /* The kernel's real DThread/DProcess are allocated from this heap, so a
+     * pointer there is live, not a scheduler transient. */
+    b7e_valid_hi = heap_base + heap_size;
+    if (b7e_valid_hi < 0x80400000u) b7e_valid_hi = 0x80400000u;
+    b7e_valid_hi = (uint32_t)env_ulong("NK_B7E_VALID_HI", b7e_valid_hi);
     b7e_trapclean = (int)env_ulong("NK_TRAPCLEAN", 0);
     /* RHeap::Alloc treats word 0 of the heap object as a base added to the
      * allocator's result, and its caller rejects results >= 0x50000000.
@@ -870,9 +888,10 @@ static void b7e_install(nk_cpu_t* c, nk_interp_t* ip,
     nk_w32(c, B7E_TLS, B7E_VT_TLS);
 
     printf("B7e boot state: thread %#010x, process %#010x, objidx %#010x, "
-           "bump %#010x..%#010x\n",
+           "bump %#010x..%#010x, live pointers %#010x..%#010x\n",
            B7E_THREAD, B7E_PROCESS, B7E_OBJIDX,
-           heap_base + b7e_heap_cur, heap_base + b7e_heap_end);
+           heap_base + b7e_heap_cur, heap_base + b7e_heap_end,
+           b7e_valid_lo, b7e_valid_hi);
 }
 
 /* ------------------------------------------------------------------ */

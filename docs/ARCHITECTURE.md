@@ -137,9 +137,10 @@ success.
 | interpreter + EUser relocation | done (round 29 fixed long multiply and non-S flags) |
 | faithful kernel boot | reaches idle loop `0x50310f84` (3,000,000 insns, 0 faults) |
 | timer/IRQ + idle exit | **done (round 30)**: first IRQ at 430,557 insns, idle exits |
-| timer-queue boot state | **done (round 31)**: ctor 0x5032aff8 + HAL `+0x1c` override, 439,177 insns |
-| trap/cleanup frame `+0x48` | **next**: null call at `0x503a6148` |
+| timer-queue boot state | **done (round 31)**: ctor 0x5032aff8 + HAL `+0x1c` override |
+| live thread identity / TTrap | **done (round 32)**: heap DThread 0x80601078, TTrap::UnTrap succeeds, 439,534 insns |
+| scheduler / first blocking executive call | **next**: `svc #0x4d` wait on [0x80001784] -> KERN 6 at 0x50330aa8 |
 | display/keypad/audio/file server/apps | not started |
 
 Acceptance tests and the current frontier:
-[`PROGRESS.md`](PROGRESS.md), [`tools/test_round31.sh`](../tools/test_round31.sh).
+[`PROGRESS.md`](PROGRESS.md), [`tools/test_round32.sh`](../tools/test_round32.sh).

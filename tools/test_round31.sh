@@ -32,7 +32,12 @@ if [ ! -f "$ROM" ]; then
 fi
 mkdir -p out
 
-echo "== round 31: timer-queue boot-state object"
+# Round 32 found that the null cleanup object this test pins was caused by
+# B7e rejecting the real heap DThread (0x80601078) and keeping the bootstrap
+# SThread at 0x802ffd00 live.  Pin the historical model explicitly so this
+# acceptance stays reproducible; tools/test_round32.sh covers the fixed
+# thread identity and the next frontier.
+echo "== round 31: timer-queue boot-state object (historical thread model)"
 tools/build_rom_image.sh >/dev/null
 clang -std=c11 -O2 -Wall -Wextra -Iruntime/include \
     runtime/test/boot_kernel.c runtime/src/nokia_rt.c runtime/src/nokia_interp.c \
@@ -49,6 +54,7 @@ run_boot() {
         NK_SYSTEM_TIME=1 NK_TIMER=1 NK_TIMER_LOG=0 \
         NK_IMPORTMAP=config/imports-r29-6600.txt \
         NK_CPSR=0x40000053 NK_IRQ_LOG=0 NK_TIMERQ=1 \
+        NK_B7E_VALID_HI=0x80400000 \
         "$@"
 }
 

@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 31）
+最后更新：2026-10-26（round 32）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -57,22 +57,39 @@
   具体子类覆盖为硬件 tick getter。harness 在 `0x5031ef40` 之前用 kernel
   自己的构造器创建对象，并把 `+0x1c` 覆盖为零返回 getter；`Kern::Init1`
   因此跨过 round-30 的 null call，继续 **439,177 条**（1 IRQ、0
-  undefined/unbound/recovery），停在新的 frontier。
+  undefined/unbound/recovery）。这是 round-31 的历史 frontier；round 32
+  修正线程身份后继续到 439,534 条。
+
+- **live thread 身份与 TTrap**（round 32）：`TTrap` 布局已对齐
+  （`iState[0x10]` +0x00、`iNext` +0x40、`iResult` +0x44、`iHandler` +0x48），
+  `0x503a6120` 是 `TTrap::UnTrap`。round-31 的 null call 根因不是布局，而是
+  **线程对象选错**：bootstrap `SThread` 在 boot stack 的 `0x802ffd00`；
+  `0x5031e594`（现有文档称 `Kern::Init1`）返回堆上的真实 `DThread`
+  `0x80601078`，但 B7e 的
+  live-pointer 上界硬编码为 `0x80400000`，把堆线程判成 transient，
+  继续发布 `0x802ffd00`。随后 EUser 的 0x108 字节 `TFullName`
+  （"Supervisor"，`0x802ffcec`）覆盖了栈上 SThread 的 `+0x38/+0x3c`，
+  UnTrap 才弹出 ROM 文本 `0x503a43c4`。把上界改为实际映射堆顶
+  `0x80a00000` 后，`[0x800017d4] = 0x80601078`，handler 为
+  `0x80004200`，UnTrap 弹真实栈 frame `0x802fff94` 并成功返回。
+- **第一个阻塞 executive call**（round 32）：cleanup frame 之后，
+  kernel-start 路径把 `[0x80001784]` 指向栈上的 `TRequestStatus`
+  （`KRequestPending = 0x80000001`），调用 EUser K=1208
+  （`0x50398644`，`svc #0x4d`）等待任意 request。harness 的 SWI 0x4d
+  完成 HLE 只是清 slot、不写状态，request 仍 pending；kernel 在
+  `0x50330aa8` 触发 **KERN 6** panic，halt 于 `0x50312b88`。
+  这是新的 exact frontier：没有 scheduler 去运行 `0x5032fa10` 创建的
+  NULL 线程（对象 `0x80601830`）。
 
 ### 未完成
 
-- **新的 frontier：trap/cleanup frame `+0x48`**（round 31）：`Kern::Init1`
-  返回后，kernel-start 路径调用 EUser K=1163（`0x503a6120`）：
-  `SVC 0x73` → `0x503187e8` 从 `[current_thread+0x38]` 弹出一个
-  trap/cleanup frame，`[frame+0x48]` 作为对象指针再取 `vtable+0xc`。
-  本 boot 状态下该字段是 `0xe21440ff`（不是指针），于是停在
-  **`0x503a6148` 的 null call**（`caller lr=0x503a6148`）。这是当前
-  exact frontier，不是 CPU/解析错误。
-- **trap/cleanup frame 的布局**：弹出的 frame 指针是 `0x503a43c4`
-  （ROM text），不是可写栈 frame。它由 EUser 的 0x108 字节线程块复制
-  `0x5038d750` 写入 `[thread+0x38]`（源块 `0x802ffc14`，目标
-  `0x802ffd54`）。需要定位该 `SThread` 模板的来源，以及
-  `DThread +0x38/+0x3c/+0x48` 的真实含义。
+- **scheduler / 第一次线程上下文切换**：等待中的 NULL 线程由
+  `0x5032fa10` 创建（对象 `0x80601830`，name `"NULL"`，栈 0x2000），
+  需要运行它来完成 `[0x80001784]` 的 request；当前没有 run queue、
+  没有上下文切换、没有 DFC 线程。
+- **SWI 0x4d 的真实语义**：当前 HLE 是“清零 slot 并返回”，只够
+  早期 `WaitForRequest` 前进；对 K=1208 的 wait-any-request 不成立，
+  需要按 `TRequestStatus`/等待队列实现，或由 scheduler 完成 request。
 - **Timer unit 1 / DFC 队列**：IRQ 2 的 handler `0x503113d8` 已注册，
   但系统 tick 队列尚未启动（没有 pending timer）。
 - **显示/键盘/音频/文件服务/应用启动**（P3）。
@@ -121,9 +138,21 @@
 | `0x5032b024` | vtable `+0xc`：先调 `+0x1c` 取 tick，再处理 `+0x10` 队列 |
 | `0x5032b3c8` | Init1 在 timer 对象之后调用的队列/定时器启动辅助 |
 | `0x50336858` | K=1610 的 IAT stub（纯虚槽）；boot profile 实际指向 `0x50389848`（`User::Panic`） |
-| `0x503a6120` | EUser K=1163：`SVC 0x73` 弹 trap/cleanup frame，再调 `[frame+0x48]->vtable+0xc` |
-| `0x503187e8` | SVC 0x73 service：弹 `[current_thread+0x38]`，next 写回 `+0x38` |
-| `0x503a6148` | round 31 新 frontier：`[frame+0x48]` 无效导致的 null call 点 |
+| `0x503a6120` | EUser K=1163：`TTrap::UnTrap()`；`SVC 0x73` 弹 frame，再调 `[frame+0x48]->vtable+0xc` |
+| `0x503187e8` | SVC 0x73 service：`r0=[thread+0x38]`，`[thread+0x38]=[r0+0x40]` |
+| `0x503187c8` | SVC 0x72 service（push）：新 frame `+0x40`=old frame，`+0x48`=old handler |
+| `0x802ffd00` | bootstrap `SThread`（boot stack 内，`0x5031edc8` 的 `sp+0x58`） |
+| `0x802ffcec` | EUser `TFullName`（"Supervisor"，0x108 字节）覆盖 SThread 的缓冲区 |
+| `0x80601078` | `0x5031e594`（Kern::Init1）返回的真实堆 `DThread`；`+0x38` frame，`+0x3c` handler |
+| `0x80004200` | round 32 为 `0x80601078` 安装的 `TCleanupTrapHandler`（slot 1） |
+| `0x80004240` | 对应的 `CCleanup`（slot 1） |
+| `0x80001784` | kernel-start 的 wait-any-request 状态槽（初始指向栈上的 `TRequestStatus`） |
+| `0x50330a8c` | 初始化 `TRequestStatus`（`0x80000001`）并挂到 `[0x80001784]` |
+| `0x50330a94` | 调 EUser K=1208（`0x50398644`，`svc #0x4d`） |
+| `0x50330aa8` | `[sp] == KRequestPending` 时的 **KERN 6** panic 调用点 |
+| `0x5032fa10` | kernel-start 创建 NULL 线程（对象 `0x80601830`，栈 0x2000） |
+| `0x80601830` | NULL 线程对象；vtable `0x503385b4`，name 描述符 `0x806019a8`（"NULL"） |
+| `0x50312b88` | panic halt 自跳转点（round 32 的停止位置） |
 | `0x80500000` | harness 注入的 timer-queue 对象（默认；`NK_TIMERQ_ADDR` 可改） |
 | `0xffff0a00` | 覆盖纯虚 `+0x1c` 的零返回 HAL tick stub |
 
@@ -167,9 +196,41 @@ CPU (CP15.V=1, CPSR.I=0)
   0x5031ef54  starts the queue/timer helper 0x5032b3c8
   0x50330a5c  kernel-start path: EUser K=1163 (0x503a6120)
   0x503a6124  SVC 0x73 -> 0x503187e8 pops [thread+0x38]
-  0x503a6128  [frame+0x48] = 0xe21440ff (not a pointer)
-  0x503a6148  [frame+0x48]->vtable+0xc -> null call
+  0x503a6128  [frame+0x48] = handler -> vtable+0xc = UnTrap (round 32)
+  0x50330a8c  TRequestStatus = KRequestPending; [0x80001784] = &status
+  0x50330a94  EUser K=1208 -> svc #0x4d (wait any request)
+  0x50330aa8  request still pending -> KERN 6 panic
+  0x50312b88  panic halt (no scheduler to complete the request)
 ```
+
+### TTrap / 线程身份（round 32）
+
+`TTrap`（SDK `e32std.h`，0x4c 字节）：
+
+| 偏移 | 字段 |
+|---|---|
+| `+0x00..+0x3f` | `iState[0x10]`（EUser 保存的上下文） |
+| `+0x40` | `iNext`（前一个 TTrap） |
+| `+0x44` | `iResult`（`TInt*`） |
+| `+0x48` | `iHandler`（`TTrapHandler*`） |
+
+`SVC 0x72`（`0x503187c8`）把新 frame 的 `+0x40/+0x48` 设成线程当前的
+frame/handler，再把 `[thread+0x38]` 指向新 frame；`SVC 0x73`
+（`0x503187e8`）弹出 `[thread+0x38]` 并把 `[frame+0x40]` 写回。
+`vtable 0x503b3518`：`+8` Trap `0x50383c38`、`+0xc` UnTrap
+`0x50383c40`、`+0x10` Leave `0x50383c48`。
+
+round-31 的 frame `0x503a43c4` 不是 frame，而是 SThread 被覆盖后的字段。
+bootstrap `SThread` 位于 `0x5031edc8` 的 `sp+0x58`（即 boot stack 顶附近），
+`0x5031e594` 在 `0x5031ee7c` 返回堆上的真实 `DThread 0x80601078`；
+`0x5031ee90` 本应把它写回 `[0x800017d4]`。B7e 旧的 live-pointer 上界
+`0x80400000` 拒绝了 `0x80601078`，把 `0x802ffd00` 重新发布，于是后续
+TFullName 缓冲区覆盖了“当前线程”。
+
+修复后 `[0x800017d4] = 0x80601078`，`+0x38` 的 frame `0x802fff94` 是
+真实栈 frame，handler `0x80004200` 走 EUser 自己的 UnTrap 实现。
+control：`NK_B7E_VALID_HI=0x80400000` 精确复现 round 31（439,177 条，
+`0x503a6148` null call）。
 
 - timer 单元 stride `0x20`：`+0x00` counter、`+0x04` control、
   `+0x08` status/ack、`+0x0c` mode、`+0x10` compare、`+0x14` reload2、
@@ -201,7 +262,8 @@ Kern::Init1 (continued after idle)
   **430,945 条**处 halt 到 `0x50312b88`。
 - round 31 复制基类 vtable 到 `0x80500100`，把 `+0x1c` 换成高地址
   `0xffff0a00` 的零返回 stub，模拟具体 HAL 子类的 tick getter。kernel
-  自己的 `0x5032b024` 因此能运行，boot 前进到 **439,177 条**。
+  自己的 `0x5032b024` 因此能运行，boot 前进到 **439,177 条**（round-31
+  历史值；round 32 修正线程身份后为 **439,534 条**）。
 - `NK_TIMERQ_MODE=ctor` 是上面的 control；`NK_TIMERQ_MODE=stub` 则跳过
   整个 `+0xc` 方法，停在 438,731 条处的 KERN 6 panic（另一条路径）。
 
@@ -254,7 +316,16 @@ NK_TIMERQ=1 \
 # round 31 control: 只用抽象基类 vtable（+0x1c 纯虚 -> panic halt）
 NK_TIMERQ=1 NK_TIMERQ_MODE=ctor ...（其余同上）
 
+# round 32: 让 B7e 跟随堆上真实 DThread（0x80601078）
+NK_B7E_VALID_HI=0x80a00000 ...（其余同 round 31）
+# ... 439,534 条，1 IRQ；svc #0x4d 等待未完成 -> KERN 6 @ 0x50312b88
+
+# round 32 control: 旧上界拒绝堆线程，复现 round 31
+NK_B7E_VALID_HI=0x80400000 ...（其余同 round 31）
+# ... 439,177 条，null call @ 0x503a6148
+
 # 验收
+tools/test_round32.sh
 tools/test_round31.sh
 tools/test_round30.sh
 tools/test_round29.sh
@@ -269,22 +340,21 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 |---|---|---|
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
-| P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；调度器仍未运行 |
+| P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；调度器仍未运行 |
 | P3 | 显示/键盘/音频、文件服务、S60 app 启动 | 未开始 |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
 
-1. **解出 trap/cleanup frame 的 `+0x48`**：round 31 的新 frontier。
-   `SVC 0x73` 服务 `0x503187e8` 从 `[current_thread+0x38]` 弹出 frame；
-   当前 frame 的 `+0x48` 是 `0xe21440ff`，不是对象指针。需要对齐
-   `TTrap`/`CTrapCleanup` 布局，或在 `Kern::Init2` 构造该 frame 时补上
-   有效对象。
-2. **让 kernel-server 线程的 trap graph 完整**：B7e 只为已发布线程建
-   handler；`Kern::Init2` 在 kernel-server 线程上创建 `TTrap`，需要按
-   真实 `DThread` 布局填 `+0x38/+0x3c/+0x48`。
-3. **验证 scheduler 切换到初始 thread**：记录第一次线程运行/上下文切换，
-   而不是停在 cleanup null call。
+1. **实现 scheduler 的第一次切换**：`0x5032fa10` 已创建 NULL 线程
+   （对象 `0x80601830`，栈 0x2000）。需要在 kernel-start 的 wait
+   （`0x50330a94`，K=1208 / `svc #0x4d`）处让出 CPU，切到该线程；
+   记录第一次 thread run / context switch。
+2. **把 SWI 0x4d 的 HLE 提升为真实语义**：区分 `WaitForRequest`
+   与 `RequestComplete(TRequestStatus*&, TInt)`；对后者写 reason、
+   清 slot，并唤醒等待者。当前“清 slot 后返回”只够早期调用。
+3. **让 NULL 线程完成 `[0x80001784]` 的 request**：验证
+   `Kern::Init3` 的 `[sp] != KRequestPending` 分支，而不是 KERN 6。
 4. **Timer unit 1 / DFC**：给 timer queue 一个 pending timer，验证
    IRQ 2 → `0x503113d8` → DFC 路径。
 5. 之后进入 display controller 与 UI 路径。
@@ -299,8 +369,12 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
   `0x50310ee0` 置位，idle 随即退出；I=1 时同一到期事件不会进 IRQ。
 - `[0x80001c34]` 已由 round 31 的 `NK_TIMERQ=1` 在 `0x5031ef40` 注入；
   对象使用 kernel 自己的构造器 0x5032aff8，但 `+0x1c` 的 HAL tick getter
-  是零返回 stub，不是真实硬件实现。当前 stop 是 `0x503a6148` 的
-  null call（trap/cleanup frame `+0x48` 无效），不是 CPU fault。
+  是零返回 stub，不是真实硬件实现。
+- B7e 的 live-pointer 上界（`NK_B7E_VALID_HI`，默认 `0x80a00000`）必须覆盖
+  kernel 实际分配的堆；旧值 `0x80400000` 会把真实 `DThread` 当成
+  transient，并把 boot-stack 上的 SThread 重新发布（round-31 control）。
+- 当前 stop 是 `0x50330aa8` 的 **KERN 6** panic（`svc #0x4d` 的 wait
+  未完成），不是 CPU fault；根因是没有 scheduler 运行 NULL 线程。
 - timer unit 1 / IRQ 2 / DFC 路径尚未被真实 pending timer 触发。
 - 显示/键盘/音频/文件服务均未实现；app 二进制已放置，但无法启动。
 - `references/` 与 `fw/` 是本地离线材料，不随仓库分发。

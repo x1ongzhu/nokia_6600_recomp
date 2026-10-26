@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 31)
+## Status (2026-10-26, round 32)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, and the **timer-queue singleton is now created
@@ -91,21 +91,31 @@ with the kernel's own constructor**. What works:
   (`0x5032aff8`) builds the abstract base object and installs vtable
   `0x503383bc`; its `+0x1c` slot is the pure-virtual `User::Panic` (K=1610),
   which the mask-ROM/HAL concrete subclass overrides with the hardware tick
-  getter. Round 31 calls the kernel constructor at `0x5031ef40`, copies the
+  getter. The harness calls the kernel constructor at `0x5031ef40`, copies the
   base vtable and substitutes a zero-return tick getter, so the kernel's own
-  `0x5032b024` runs. `Kern::Init1` crosses the old null call and reaches
-  **439,177 instructions** (1 IRQ, 0 undefined/unbound/recoveries) before the
-  next gap: an invalid trap/cleanup frame `+0x48` at `0x503a6148`.
+  `0x5032b024` runs.
+- [x] **Live thread identity / TTrap** (round 32): `TTrap` is 0x4c bytes
+  (`iState[0x10]` +0x00, `iNext` +0x40, `iResult` +0x44, `iHandler` +0x48).
+  The kernel's bootstrap `SThread` at `0x802ffd00` lives inside the boot
+  stack; the init call at `0x5031e594` returns the real heap `DThread` at
+  `0x80601078`, but B7e's live-pointer bound (`0x80400000`) rejected it and
+  kept the stack object. A later EUser `TFullName` buffer at `0x802ffcec` then overwrote the
+  published SThread's `+0x38`/`+0x3c`. Following the mapped heap bound
+  (`0x80a00000`) keeps `0x80601078` live, `TTrap::UnTrap` pops a real stack
+  frame, and the boot advances to **439,534 instructions** (1 IRQ, 0
+  undefined/unbound/recoveries).
 
 Not implemented yet:
 
-- [ ] **Trap/cleanup frame `+0x48`** — after `Kern::Init1` returns, the
-  kernel-start path calls EUser K=1163 (`0x503a6120`): SVC 0x73 service
-  `0x503187e8` pops a trap/cleanup frame from `[current_thread+0x38]`, and
-  `[frame+0x48]` is `0xe21440ff` instead of an object pointer, so
-  `vtable+0xc` becomes a **null call at `0x503a6148`**. This is the new
-  frontier.
-- [ ] Scheduler/first thread context switch.
+- [ ] **Scheduler / first blocking executive call** — after the cleanup
+  frame succeeds, the kernel-start path calls EUser K=1208 (`0x50398644`,
+  `svc #0x4d`) with `[0x80001784]` pointing at a `TRequestStatus` initialised
+  to `KRequestPending` (`0x80000001`). The harness completes SWI 0x4d as a
+  no-op and the request stays pending, so the kernel's own check panics
+  **KERN 6** at `0x50330aa8` (halt `0x50312b88`). No scheduler runs the
+  thread created at `0x5032fa10` (name `"NULL"`, 0x2000-byte stack, object
+  `0x80601830`), which would complete the request. This is the new frontier.
+- [ ] First context switch / run queue / DFC thread.
 - [ ] UI/display, keypad, audio, file server, app launching (P3).
 - [ ] Mask-ROM PeaK record codec (the hand-off is an explicit stand-in).
 - [ ] Real hardware HLE (display controller, DSP/radio, RTC).
@@ -154,7 +164,12 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
 # 6. round 31: inject the timer-queue singleton and cross that null call
 #    NK_TIMERQ=1 ... (same command plus the timer/IRQ hand-off)
 # ... 439,177 insns, ctor 0x5032aff8, vtable 0x503383bc, HAL +0x1c override,
-# ... new null call at 0x503a6148 (trap/cleanup frame +0x48)
+# ... null call at 0x503a6148 (with the old thread bound; see step 7)
+
+# 7. round 32: follow the real heap DThread instead of the boot-stack SThread
+#    NK_B7E_VALID_HI=0x80a00000 ... (same command)
+# ... 439,534 insns, [0x800017d4]=0x80601078, TTrap::UnTrap succeeds,
+# ... KERN 6 panic at 0x50330aa8 while waiting on [0x80001784]
 ```
 
 Without `NK_SYSTEM_TIME=1` the same boot stops at 133,950 instructions with
@@ -178,7 +193,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_loader.sh` | EKA1 packed-record loader and first import binding |
 | `tools/test_round29.sh` | previous acceptance: interpreter fixes, r29 map, idle loop |
 | `tools/test_round30.sh` | UPP timer/ICU, IRQ entry, idle exit, round-30 null call |
-| `tools/test_round31.sh` | **current acceptance**: timer-queue ctor, HAL vtable override, kernel-start frontier |
+| `tools/test_round31.sh` | historical control: timer-queue ctor, HAL vtable override, round-31 thread model |
+| `tools/test_round32.sh` | **current acceptance**: live heap DThread, TTrap/UnTrap, first blocking executive call |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -220,7 +236,7 @@ model raises **IRQ 1** and reports it in the ICU current-IRQ register at
 and its vtable method `0x50310ee0` sets `[0x8000000c] = 1`.  The idle loop
 exits at instruction **430,557**.
 
-Round 31 closes the next gap: the boot-state object `[0x80001c34]` is the
+Round 31 closed the next gap: the boot-state object `[0x80001c34]` is the
 kernel timer-queue singleton.  Kernel export 451 (`0x5032aff8`) is its
 abstract base constructor and installs vtable `0x503383bc`; `+0x1c` is the
 pure-virtual `User::Panic` slot, which the mask-ROM/HAL concrete subclass
@@ -236,12 +252,34 @@ zero-return tick getter:
 0x5032b034  ldr pc, [vtable, #0x1c]; HAL tick getter override
 ```
 
-`Kern::Init1` now returns into the kernel-start path.  The new frontier is a
-**null call at `0x503a6148`**: SVC 0x73 service `0x503187e8` pops a
-trap/cleanup frame from `[current_thread+0x38]`, and `[frame+0x48]` is
-`0xe21440ff` instead of an object pointer, so `vtable+0xc` is zero.  Boot
-reaches **439,177 instructions** with 1 IRQ and 0
-undefined/unbound/recoveries.
+The round-31 frontier looked like a missing `TTrap` field: `SVC 0x73`
+(`0x503187e8`) popped `[thread+0x38]` = `0x503a43c4` (ROM text) and
+`TTrap::UnTrap` (`0x503a6120`) called `[frame+0x48]->vtable+0xc`.  Round 32
+showed the layout was fine (`iNext` +0x40, `iResult` +0x44, `iHandler` +0x48);
+the pointer in `[thread+0x38]` was the **wrong thread**.  The init call at
+`0x5031e594` returns the real heap `DThread` at `0x80601078`, but B7e's
+live-pointer bound ended at `0x80400000`, so it re-published the bootstrap
+`SThread` at `0x802ffd00` - an object inside the boot stack.  An EUser `TFullName`
+("Supervisor", 0x108 bytes) at `0x802ffcec` then overwrote that object,
+including `+0x38`/`+0x3c`.
+
+With the bound following the mapped heap to `0x80a00000`,
+`[0x800017d4] = 0x80601078`, the trap handler is `0x80004200`, and
+`TTrap::UnTrap` pops a real stack frame (stack `0x802fff94`).  The kernel-start
+path then reaches the first blocking executive call:
+
+```
+0x50330a8c  TRequestStatus at sp -> KRequestPending (0x80000001)
+0x50330a90  [0x80001784] = &status
+0x50330a94  EUser K=1208 -> svc #0x4d      ; wait for any request
+0x50330a9c  [sp] == KRequestPending?
+0x50330aa8  yes -> Kern::Panic("KERN", 6)  ; no scheduler completed it
+0x50312b88  panic halt
+```
+
+Boot reaches **439,534 instructions** with 1 IRQ and 0
+undefined/unbound/recoveries.  The control `NK_B7E_VALID_HI=0x80400000`
+reproduces round 31 exactly (439,177, null call at `0x503a6148`).
 
 See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for the roadmap.
 
