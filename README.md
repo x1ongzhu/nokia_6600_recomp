@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 42)
+## Status (2026-10-26, round 43)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -209,6 +209,16 @@ stable executive loop. What works:
   vtable bug. Completing the EUser wait SWIs (`0x76..0x7b`) inline does not
   fix the direct path either; it still stops at 3,360 instructions.
 
+- [x] **Real SVC exception model** (round 43): `NK_SWI_DIRECT=0` was
+  treating every `svc` as a no-op, so the round-41 1.5M FbServ run never
+  entered the kernel. `NK_SWI_EXCEPTION=1` now takes a real SVC exception,
+  enters the kernel vector `0xffff0008`, and dispatches through the kernel's
+  own handler at `0x50314f30`. The handler needs the mask-ROM pre-handler at
+  `[0x80000f34]`; a zero-return hook object in the high-vector page supplies
+  it. The kernel boot with real SVCs stops at the boot sentinel
+  `0xdead0000` after 11,114 instructions; direct FbServ stops at 56 because
+  its user-SVC return path still needs the current-thread state.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -329,7 +339,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round39.sh` | exact FbServ vtable write/overwrite sequence; byte/halfword write watches |
 | `tools/test_round40.sh` | FbServ descriptor/object overlap call chain and 20-byte allocation |
 | `tools/test_round41.sh` | FbServ on the real banked SVC path, 1,499,521 instructions, EUser wait chain |
-| `tools/test_round42.sh` | **current acceptance**: the 1.5M blocker is a post-executive stack/context switch, not the vtable or wait SWIs |
+| `tools/test_round42.sh` | the 1.5M blocker is a post-executive stack/context switch, not the vtable or wait SWIs |
+| `tools/test_round43.sh` | **current acceptance**: real SVC exception model; the 1.5M FbServ run was no-op SWIs, not a kernel path |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

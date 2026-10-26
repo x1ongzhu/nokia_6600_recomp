@@ -120,9 +120,10 @@ user-side descriptor/thread context。下一步要么补齐这部分，要么改
 kernel process loader。
 
 直接 SWI gate（`NK_SWI_DIRECT=1`）只到 3,612 条：格式化调用会破坏
-`0x80600018` 的 vtable。改用**真实 banked SVC 异常路径**
-（`NK_SWI_DIRECT=0 NK_BANKED=1`）后，vtable 破坏消失，FbServ 跑到
-**1,499,521 条**：
+`0x80600018` 的 vtable。把 `NK_SWI_DIRECT=0` 后，vtable 破坏消失，
+FbServ 跑到 **1,499,521 条**。但 round 43 发现：**这不是真实 SVC
+路径**——`NK_SWI_DIRECT=0` 且没有 exception 模型时，`svc` 被当成
+no-op，内核从未进入。1.5M 条是“所有系统调用被忽略”的运行：
 
 ```
 - 切换到 kernel 分配的用户栈，sp 约 0x7fef....
@@ -131,9 +132,19 @@ kernel process loader。
 - 最后 null callback（lr=0, pc=0）
 ```
 
-这说明 direct-SWI gate 很可能没有保存 callee-saved `r4-r11`，而真实
-SVC entry 会保存。当前 blocker 变成 kernel executive/thread 状态，
-不是 app 的 C++ 对象。
+新增 `NK_SWI_EXCEPTION=1` 后才真正进入 SVC vector `0xffff0008` 和
+kernel handler `0x50314f30`。handler 需要一个 mask-ROM 安装的
+pre-handler `[0x80000f34]`；direct E32 entry 下它是 0，所以
+`ldr pc,[r12,#-4]` 跳到 0。用 high-vector page 的零返回 hook 对象补上
+后：
+
+- kernel boot 跑 11,114 条，返回 boot sentinel `0xdead0000`（kernel 的
+  EUser import stub 是 user-style SVC，需要 user-mode caller）；
+- direct FbServ 只跑 56 条并 null-return，user-SVC 返回路径仍缺
+  current-thread 状态。
+
+所以 round 41 的 “1.5M 真实 SVC” 结论需要修正：它是 no-op SWI 运行。
+真实 SVC 模型已经加入，但还没接到完整的 user thread/executive 上下文。
 
 round 42 进一步确认：最终返回 0 **不是** vtable 调用。第一次在
 `0x5039ee14` 观察 pop 时，栈上仍有正确的 saved LR `0x5039edc8`；只有

@@ -404,6 +404,23 @@ static void boot_time_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     boot_time_raw_w32(c, NK_BOOT_TIME_GLOBAL + 4u, nk_r32(c, 0x50000084u));
 }
 
+/* The kernel SVC handler calls the mask-ROM-installed pre-handler at
+ * [0x80000f34] before dispatching the service table.  A direct E32-entry boot
+ * leaves that global zero, so `ldr pc,[r12,#-4]` reads from 0 and jumps to 0.
+ * Install a zero-return hook object in the high-vector page as boot state. */
+static void install_svc_hook(nk_cpu_t* c, nk_interp_t* ip) {
+    if (!env_ulong("NK_SWI_EXCEPTION", 0)) return;
+    uint32_t slot = 0xffff0b00u;       /* [slot] = hook entry              */
+    uint32_t code = 0xffff0b10u;       /* mov r0,#0; bx lr                 */
+    nk_w32(c, slot, code);
+    nk_w32(c, code, 0xe3a00000u);
+    nk_w32(c, code + 4, 0xe12fff1eu);
+    nk_w32(c, 0x80000f34u, slot + 4u); /* handler loads [obj-4]            */
+    nk_code_range_add(ip, slot, code + 8u);
+    printf("svc hook: [0x80000f34] = %#010x -> %#010x (zero return)\n",
+           slot + 4u, code);
+}
+
 static void debug_write_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
     if (g_ww_hits >= g_ww_max) return;
     if (g_ww_hits == 0)
@@ -2264,6 +2281,7 @@ int main(int argc, char** argv) {
                ip.alloc_cur, ip.alloc_end, ip.alloc_pc, ip.realloc_pc,
                ip.free_pc);
     }
+    if (env_ulong("NK_SWI_EXCEPTION", 0)) ip.swi_exception = 1;
     if (getenv("NK_TRACE")) ip.trace = 1;
     ip.trace_limit = (long)env_ulong("NK_TRACE_N", 64);
     ip.trace_from = (uint32_t)env_ulong("NK_TRACE_FROM", 0);
@@ -2311,6 +2329,7 @@ int main(int argc, char** argv) {
         printf("app stack cleared: %#010x..%#010x\n", base, cpu.r[13]);
     }
 
+    install_svc_hook(&cpu, &ip);
     printf("run: sp=%#010x cpsr=%#010x budget=%ld infer=%d call-infer=%d policy=%d\n",
            cpu.r[13], cpu.cpsr, ip.budget, ip.infer_mode, ip.infer_calls,
            ip.call_policy);

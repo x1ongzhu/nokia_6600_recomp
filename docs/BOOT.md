@@ -406,6 +406,31 @@ descriptor 控制字。display driver 还要从真正的 UI/显示路径找。
 
 ---
 
+### 2.13 round 43：真实 SVC exception 模型
+
+`NK_SWI_DIRECT=0` 之前不是“真实 SVC”：解释器把 `svc` 打印后当
+no-op，所以 1.5M 的 FbServ 运行没有进入 kernel。`NK_SWI_EXCEPTION=1`
+现在调用 `exception_enter(NK_MODE_SVC, vector, lr=pc+4, spsr=cpsr)`，
+进入 `0xffff0008`（CP15.V=1）或 `0x8`。kernel 的 SVC handler
+`0x50314f30` 读 `[lr-4]` 的指令、索引 service table 并分发。
+
+handler 先调 `[0x80000f34]` 的 mask-ROM pre-handler；direct E32 entry
+下该全局为 0，`ldr pc,[r12,#-4]` 会跳 0。harness 在 high-vector page
+安装一个零返回 hook 对象作为 boot state：
+
+```
+[0x80000f34] = 0xffff0b04
+[0xffff0b00] = 0xffff0b10   ; ldr pc,[r12,#-4] 取到的函数指针
+[0xffff0b10] = mov r0,#0; bx lr
+```
+
+结果：kernel boot 跑 **11,114 条**，返回 boot sentinel `0xdead0000`
+（kernel 的 EUser import stub 是 user-style SVC，需要 user-mode caller）；
+direct FbServ 只跑 **56 条**并 null-return，user-SVC 返回路径仍缺
+current-thread 状态。
+
+---
+
 ## 3. EUser 导入映射
 
 EKA1 import stub：

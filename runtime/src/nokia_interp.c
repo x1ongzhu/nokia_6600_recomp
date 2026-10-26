@@ -272,6 +272,19 @@ static int in_code(const nk_interp_t* ip, uint32_t a) {
  * The interpreter does not model the banked SVC exception yet, so this
  * explicit direct dispatcher keeps the same observable convention.  It is a
  * bring-up aid: NK_SWI_DIRECT=1, not the final CPU model. */
+/* Real SVC exception entry.  The kernel's own handler at the SVC vector
+ * reads the instruction at LR-4, indexes the service table and restores the
+ * caller's CPSR through SPSR.  This preserves r4-r11/stack exactly like the
+ * hardware, unlike the direct dispatch model. */
+static int swi_exception(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
+                         uint32_t pc, uint32_t insn_size) {
+    (void)imm;
+    if (!ip->swi_exception) return 0;
+    uint32_t vector = (c->cp15_c1 & 0x2000u) ? 0xffff0008u : 0x8u;
+    exception_enter(c, NK_MODE_SVC, vector, pc + insn_size, c->cpsr);
+    return 1;
+}
+
 static int swi_direct(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm, uint32_t pc) {
     /* A bring-up scheduler gets first refusal: it may block the caller and
      * install another thread's context. */
@@ -950,6 +963,7 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
             uint32_t imm = op & 0x00ffffffu;
             if (ip->stop_on_swi) { ip->st.stop_reason = NK_STOP_SWI; ip->st.stop_pc = pc; return 1; }
             if (swi_direct(c, ip, imm, pc)) return 0;
+            if (swi_exception(c, ip, imm, pc, 4)) return 0;
             fprintf(stderr, "[interp] SWI %#x at %#010x (r0=%#x r1=%#x)\n",
                     imm, pc, c->r[0], c->r[1]);
             return 0;
@@ -1348,6 +1362,7 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
             uint32_t imm = op & 0xffffffu;
             if (ip->stop_on_swi) { ip->st.stop_reason = NK_STOP_SWI; ip->st.stop_pc = pc; return 1; }
             if (swi_direct(c, ip, imm, pc)) return 0;
+            if (swi_exception(c, ip, imm, pc, 4)) return 0;
             fprintf(stderr, "[interp] SWI %#x at %#010x\n", imm, pc);
             return 0;
         }
@@ -1610,6 +1625,7 @@ static int thumb_step(nk_cpu_t* c, nk_interp_t* ip) {
             uint32_t imm = h & 0xffu;
             if (ip->stop_on_swi) { ip->st.stop_reason = NK_STOP_SWI; ip->st.stop_pc = pc; return 1; }
             if (swi_direct(c, ip, imm, pc)) return 0;
+            if (swi_exception(c, ip, imm, pc, 2)) return 0;
             fprintf(stderr, "[interp] SWI %u at %#010x (r0=%#x r1=%#x)\n",
                     imm, pc, c->r[0], c->r[1]);
             return 0;

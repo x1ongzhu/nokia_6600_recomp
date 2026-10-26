@@ -129,6 +129,7 @@ typedef struct nk_interp {
     long     budget;        /* instructions to execute; <=0 means 10,000,000 */
     long     trace_limit;   /* trace this many instructions; 0 = off */
     int      trace;         /* print each executed instruction */
+    int      swi_exception; /* take a real SVC exception instead of direct dispatch */
     int      infer_mode;    /* try the other instruction set on a bad decode */
     int      infer_calls;   /* fix Thumb/ARM mode at BL/BLX call sites */
     /* How to repair an unlinked/interworking call target:

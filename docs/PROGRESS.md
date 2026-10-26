@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 42）
+最后更新：2026-10-26（round 43）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -189,6 +189,14 @@
   thread/context（栈）切换，不是 push/pop 或 vtable。把 wait SWI
   `0x76..0x7b` 内联完成也不能修复 direct 路径（仍 3,360 条 /
   `0x068a0688`）。
+
+- **真实 SVC exception 模型**（round 43）：`NK_SWI_DIRECT=0` 之前把
+  `svc` 当 no-op，round-41 的 1.5M FbServ 实际从未进入 kernel。
+  `NK_SWI_EXCEPTION=1` 现在真的进入 SVC vector `0xffff0008`，由 kernel
+  handler `0x50314f30` 分发；handler 需要 `[0x80000f34]` 的 mask-ROM
+  pre-handler，用 high-vector page 的零返回 hook 补上。kernel boot 跑
+  11,114 条后返回 boot sentinel `0xdead0000`；direct FbServ 只跑 56 条，
+  user-SVC 返回仍缺 current-thread 状态。
 
 ### 未完成
 
