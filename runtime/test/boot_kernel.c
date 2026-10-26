@@ -187,6 +187,11 @@
  *   NK_SCHED_R0=0x...       initial r0 for that fake thread (round 78).
  *   NK_SCHED_STACK_FILL=0x. fill the fake thread stack with this word
  *                           instead of zero (round 81).
+ *   NK_SCHED_STACK_SIZE=n   mapped fake stack size (default 0x2000)
+ *   NK_SCHED_STACK_EXTRA=n  extra mapped/filled words above the initial sp,
+ *                           for epilogues whose frame sits above it (round 82)
+ *   NK_SCHED_EXIT=1         when the fake thread returns to 0xdead0000,
+ *                           retire it and resume the supervisor (round 82).
  *   NK_SCHED_AUTOCOMPLETE=1  after a switch, complete the blocked thread's
  *                           status and make it runnable again (round 79).
  *   NK_MEMCOPY_CLAMP=1      at Mem::Copy 0x5038cfe0, zero copies whose
@@ -878,6 +883,22 @@ static void sched_resume(nk_cpu_t* c, nk_interp_t* ip, sched_thread* s) {
  * implements exactly that, saving the NULL thread mid-startup so it can be
  * resumed when the supervisor next blocks. */
 static int sched_yield_hook(nk_cpu_t* c, nk_interp_t* ip) {
+    if (sched_on && env_ulong("NK_SCHED_EXIT", 0) &&
+        (c->r[15] & ~1u) == 0xdead0000u) {
+        uint32_t t = nk_r32(c, SCHED_CURRENT);
+        sched_thread* cur = sched_slot(t, 0);
+        sched_thread* sup = sched_slot(sched_supervisor, 0);
+        if (cur && sup && cur != sup) {
+            cur->state = 0;              /* thread returned; retire it */
+            sched_resume(c, ip, sup);
+            sched_switches++;
+            if (sched_log-- > 0)
+                printf("sched: thread %#010x returned; resume supervisor "
+                       "%#010x pc %#010x (insns=%lu)\n",
+                       cur->thread, sup->thread, c->r[15], ip->st.insns);
+            return 1;
+        }
+    }
     /* Round 34: a blocked thread is runnable again as soon as its pending
      * TRequestStatus is completed, whoever completes it.  With the kernel's
      * own request semaphore and CObjectIx preserved, the NULL thread's
@@ -1017,20 +1038,23 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
 
     if (!next->started) {
         uint32_t base = (uint32_t)env_ulong("NK_SCHED_STACK", SCHED_STACK_BASE);
+        uint32_t ssize = (uint32_t)env_ulong("NK_SCHED_STACK_SIZE", SCHED_STACK_SIZE);
+        uint32_t extra = (uint32_t)env_ulong("NK_SCHED_STACK_EXTRA", 0);
+        if (ssize < 0x1000u) ssize = 0x1000u;
         if (!nk_page_ptr(c, base)) {
-            if (nk_alloc_ram(c, base, SCHED_STACK_SIZE) != 0) {
+            if (nk_alloc_ram(c, base, ssize + extra) != 0) {
                 printf("sched: cannot map NULL-thread stack %#010x\n", base);
                 return 0;
             }
         }
         {
             uint32_t fill = (uint32_t)env_ulong("NK_SCHED_STACK_FILL", 0);
-            for (uint32_t o = 0; o < SCHED_STACK_SIZE; o += 4)
+            for (uint32_t o = 0; o < ssize + extra; o += 4)
                 nk_w32(c, base + o, fill);
         }
         memset(next->r, 0, sizeof next->r);
         next->r[0] = (uint32_t)env_ulong("NK_SCHED_R0", 0);
-        next->r[13] = base + SCHED_STACK_SIZE - 0x10u;
+        next->r[13] = base + ssize - 0x10u;
         next->r[14] = 0xdead0000u;
         next->r[15] = (uint32_t)env_ulong("NK_SCHED_ENTRY", SCHED_NULL_ENTRY);
         /* Kernel threads run in SVC mode; keep the caller's IRQ mask. */
@@ -1044,7 +1068,7 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
         next->state = 1;
         printf("sched: first switch -> NULL thread %#010x, entry %#010x, "
                "stack %#010x..%#010x (insns=%lu)\n", next->thread, next->r[15],
-               base, base + SCHED_STACK_SIZE, ip->st.insns);
+               base, base + ssize, ip->st.insns);
     }
 
     /* Kernel hand-off (0x50318398): the first switch publishes the new

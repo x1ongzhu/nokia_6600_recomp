@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 81）
+最后更新：2026-10-26（round 82）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -528,6 +528,17 @@
   `0x80560000..0x80562000` fake stack 之外。说明该 entry 需要真正的
   StartThread frame/callback，而不是 sentinel。framebuffer 仍 0。
   验收 `tools/test_round81.sh`。
+
+- **server run/return cycle 完成**（round 82）：新增
+  `NK_SCHED_STACK_EXTRA` 在初始 sp 之上额外映射/填充 sentinel，以及
+  `NK_SCHED_EXIT` 在 fake thread 返回到 `0xdead0000` 时 retire 它并
+  恢复 supervisor。结果：
+  - server 干净返回到 `0xdead0000`（26,652 条）；
+  - scheduler 恢复 supervisor；
+  - supervisor 在 **29,295 条**时又撞 `0x00a04d08` bad dispatch，
+    期间 3,441 次 MMIO 读 / 22,928 次写。
+  framebuffer 仍 0。说明 server 运行/返回链路已通，下一 blocker 仍是
+  supervisor 的 `0x00a04d08` 虚拟调用。验收 `tools/test_round82.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -841,7 +852,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 推进到 13k 条；round 72 钉住 slot/export offset；round 73 定位 service-start 握手；round 74 修 nested SVC return；round 75 证明 wait 等真实线程；round 76 证明 DThread clone 不足；round 77 证明 direct dispatch 绕不过 handshake；round 78/79 用 fake scheduler + auto-complete 让 EStart server 跑满 200k；round 80 用 Mem::Copy clamp 越过 wild copy；round 81 证明 fake stack sentinel 不足 |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 推进到 13k 条；round 72 钉住 slot/export offset；round 73 定位 service-start 握手；round 74 修 nested SVC return；round 75 证明 wait 等真实线程；round 76 证明 DThread clone 不足；round 77 证明 direct dispatch 绕不过 handshake；round 78/79 用 fake scheduler + auto-complete 让 EStart server 跑满 200k；round 80 用 Mem::Copy clamp 越过 wild copy；round 81 证明 fake stack sentinel 不足；round 82 完成 server run/return cycle，supervisor 仍撞 0x00a04d08 |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -874,9 +885,9 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. EStart server 在 `0x503da6ee` 的 epilogue 因 fake stack 外
-    `sp=0x80562020` 返回 0（round 81）。下一步构造真正的
-    StartThread frame/callback，而不是继续填 sentinel/import。
+11. server run/return cycle 已通（round 82），supervisor 仍撞
+    `0x00a04d08`。下一步回到该虚拟调用，确认 server 返回后 supervisor
+    缺少的对象/参数。
 
 ---
 

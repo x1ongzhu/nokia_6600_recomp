@@ -771,6 +771,27 @@ null-call（r0=0），因为 `sp=0x80562020` 已超出 fake stack
 frame/callback，而不是 sentinel。framebuffer 仍 0。验收：
 `tools/test_round81.sh`。
 
+### round 82：server run/return cycle 完成
+
+新增：
+
+- `NK_SCHED_STACK_EXTRA`：在初始 sp 之上额外映射/填充 sentinel；
+- `NK_SCHED_EXIT`：fake thread 返回到 `0xdead0000` 时 retire 它并恢复
+  supervisor。
+
+结果：
+
+```
+server returns to 0xdead0000 (26,652 insns)
+sched: slot 0x80004600 state=0
+supervisor resumes and hits 0x00a04d08 (29,295 insns)
+mmio: 3441 reads, 22928 writes
+framebuffer: 0 non-zero bytes
+```
+
+server 运行/返回链路已通；下一 blocker 仍是 supervisor 的
+`0x00a04d08` 虚拟调用。验收：`tools/test_round82.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -833,6 +854,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 构造真正的 StartThread frame/callback：round 81 已证明 sentinel
-   不足，server 在 `0x503da6ee` epilogue 返回 0。下一步让该 server
-   entry 有正确的返回/回调帧。
+8. 回到 supervisor 的 `0x00a04d08` 虚拟调用：round 82 已让 server
+   跑完并返回，supervisor 仍在该点缺对象/参数。下一步确认 server
+   返回后 supervisor 期望的状态。

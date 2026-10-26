@@ -699,6 +699,14 @@ null-call（r0=0），因为 `sp=0x80562020` 超出 fake stack
 `0x80560000..0x80562000`。该 entry 需要真正的 StartThread
 frame/callback。验收 `tools/test_round81.sh`。
 
+### 2.35 round 82：server run/return cycle 完成
+
+`NK_SCHED_STACK_EXTRA` 在初始 sp 之上额外映射/填充 sentinel；
+`NK_SCHED_EXIT` 在 fake thread 返回 `0xdead0000` 时 retire 并恢复
+supervisor。server 干净返回（26,652 条），supervisor 恢复后在
+29,295 条时又撞 `0x00a04d08`（3,441 次 MMIO 读 / 22,928 次写），
+framebuffer 仍 0。验收 `tools/test_round82.sh`。
+
 ---
 
 ## 3. EUser 导入映射
