@@ -433,6 +433,16 @@ static int hle_alloc_block(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc,
      * like a heap with no room instead of poisoning the bump heap and
      * reporting a bogus "undefined instruction". */
     uint32_t cap = ip->alloc_max ? ip->alloc_max : 0x100000u;
+    if (sz > cap && ip->alloc_clamp) {
+        /* Bring-up clamp: a pointer-sized request (round 94/97) is not a real
+         * allocation, but failing it makes the caller leave.  Allocate the
+         * clamp size instead so the caller can continue and the next real
+         * defect becomes visible. */
+        fprintf(stderr, "[interp] HLE alloc clamped: %#x -> %#x at %#010x\n",
+                sz, ip->alloc_clamp, pc);
+        ip->alloc_clamped++;
+        sz = ip->alloc_clamp;
+    }
     if (sz > cap) {
         fprintf(stderr, "[interp] HLE alloc rejected: %#x bytes > cap %#x "
                 "at %#010x (r0=%#x r1=%#x r2=%#x)\n",
@@ -525,6 +535,10 @@ static int alloc_hle(nk_interp_t* ip, nk_cpu_t* c, uint32_t pc) {
             return 1;
         }
         uint32_t oldsz = nk_r32(c, old - NK_HLE_BLOCK_HDR);
+        if (ip->alloc_trace)
+            fprintf(stderr, "[interp] realloc trace old=%#010x book=%#x "
+                    "guest_hdr=%#x want=%d\n", old, oldsz,
+                    nk_r32(c, old - 4u), n);
         uint32_t newp;
         {
             int rc = hle_alloc_block(ip, c, pc, (uint32_t)n, &newp);

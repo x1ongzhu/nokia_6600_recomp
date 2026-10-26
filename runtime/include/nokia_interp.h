@@ -206,6 +206,9 @@ typedef struct nk_interp {
     unsigned long realloc_foreign;  /* reallocs of pointers we do not own */
     unsigned long free_foreign;     /* frees of pointers we do not own */
     uint32_t      alloc_max;     /* per-request cap, 0 = 0x100000 */
+    int           alloc_trace;   /* log every realloc with both headers */
+    uint32_t      alloc_clamp;   /* clamp oversized requests to this size */
+    unsigned long alloc_clamped;
     unsigned long free_hits;
     int      alloc_log;     /* log the first N allocations */
     /* Bring-up recovery: when a callee faults (undefined instruction, PC

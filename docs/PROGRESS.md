@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 99）
+最后更新：2026-10-27（round 100）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -789,6 +789,24 @@
     `0x5039c400` 调用）请求 `0xb63a74` 字节，被 round 94 的上限拒绝，
     于是 EFile 以 `KErrNoMemory` 离开。
   - 验收 `tools/test_round99.sh`。
+
+- **伪尺寸请求的真相 + 分配钳制**（round 100）：
+  - 新增 `NK_ALLOC_TRACE=1`（日志 `[ptr-8]` 的 HLE 记账尺寸与
+    `[ptr-4]` 的 guest cell 头）。实测那 4 次正常 realloc 都是
+    `book = guest_hdr - 4` 的自洽值；而**失败的那一次根本没走到这条
+    路径**。
+  - 结论：`0x80601b68` **不是** bump 堆的 payload —— 当时
+    `alloc_cur` 只到 ~`0x80600830`，`0x80601b68` 在它**之上**，是
+    **外来指针**。EUser 的描述符增长辅助函数（`0x5039c37c`）在操作
+    一块 HLE 堆从未分配过的缓冲区，容量字自然是垃圾。
+  - round 94 的策略是拒绝这类请求，于是 EFile 以 `KErrNoMemory`
+    立刻离开。新增 **`NK_ALLOC_CLAMP=<n>`**：超大请求改成分配 n
+    字节（记日志 `HLE alloc clamped`）而不是失败，让调用者继续跑，
+    把下一个真实缺陷暴露出来。
+  - 效果：EFile 从 1,322 → **1,447 条 Thumb**，2 次钳制，
+    `HLE alloc rejected` 归零；新 frontier 是对象 `0x80100c38` 上的
+    **空虚拟调用**（`[obj+8] → [+8] == 0`），`r2 = r6 = 0x2f`。
+  - 验收 `tools/test_round100.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

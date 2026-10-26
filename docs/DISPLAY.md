@@ -1033,3 +1033,11 @@ kernel 变体 `0x5038e4b4` 读到 count=0 会安全返回。故新增
 `NK_IMPORTMAP_NO_REVERT=0x503b3948`：回滚数 236→235，`0x3a` 消失，
 线程干净回卷。剩余是一次 11.9 MB 的伪 ReAlloc（EFile 构造服务器名）。
 验收 `tools/test_round99.sh`。
+
+### round 100：伪尺寸请求与分配钳制
+
+`NK_ALLOC_TRACE` 证明失败那次 realloc 的指针 `0x80601b68` 在
+`alloc_cur` 之上，是**外来指针**（HLE 从未分配），EUser 描述符增长在
+操作垃圾容量。`NK_ALLOC_CLAMP=<n>` 把超大请求改成分配 n 字节：EFile
+1,322 → 1,447 条 Thumb，拒绝归零；新 frontier 是 `0x80100c38` 上的空
+虚拟调用。验收 `tools/test_round100.sh`。

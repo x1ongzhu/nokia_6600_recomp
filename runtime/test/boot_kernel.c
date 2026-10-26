@@ -2734,6 +2734,8 @@ int main(int argc, char** argv) {
         ip.alloc_hle = 1;
         ip.alloc_pc = (uint32_t)env_ulong("NK_ALLOC_PC", 0x5038e2ecu);
         ip.realloc_pc = (uint32_t)env_ulong("NK_REALLOC_PC", 0x5039c630u);
+        ip.alloc_trace = (int)env_ulong("NK_ALLOC_TRACE", 0);
+        ip.alloc_clamp = (uint32_t)env_ulong("NK_ALLOC_CLAMP", 0);
         ip.free_pc = (uint32_t)env_ulong("NK_FREE_PC", 0x5038e3d8u);
         ip.alloc_cur = (uint32_t)env_ulong("NK_ALLOC_BASE", hle_heap);
         ip.alloc_base = ip.alloc_cur;

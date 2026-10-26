@@ -1183,3 +1183,16 @@ kernel 服务读的两块启动状态，直接 E32 入口启动从不建立：
 线程经 trap frame 干净回卷。剩余 blocker：EFile 构造服务器名时
 EUser 描述符增长路径请求 `0xb63a74` 字节的伪 ReAlloc。
 验收 `tools/test_round99.sh`。
+
+### 2.53 round 100：伪尺寸请求的真相与分配钳制
+
+`NK_ALLOC_TRACE=1` 记录每个被拦截 realloc 的 `[ptr-8]`（HLE 记账尺寸）与
+`[ptr-4]`（guest cell 头）。实测正常 realloc 都是 `book = guest_hdr - 4`
+的自洽值，而失败那次**没走到该路径**：说明 `0x80601b68` 不是 bump 堆
+payload（当时 `alloc_cur` 仅 ~`0x80600830`，该地址在其**之上**），是
+**外来指针**。EUser 描述符增长 `0x5039c37c` 在操作一块 HLE 从未分配的
+缓冲区，容量字是垃圾。
+
+`NK_ALLOC_CLAMP=<n>`：超大请求改分配 n 字节而非失败。EFile 从 1,322 →
+1,447 条 Thumb，拒绝归零；新 frontier 是对象 `0x80100c38` 的空虚拟调用
+（`[obj+8] → [+8] == 0`，`r2 = r6 = 0x2f`）。验收 `tools/test_round100.sh`。

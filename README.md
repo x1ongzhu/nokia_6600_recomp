@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 99)
+## Status (2026-10-27, round 100)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -105,7 +105,8 @@ from leaking into an app thread; round 96 isolates EFile's "FileServer" gate
 and the HLE-heap / guest-RHeap conflict; round 97 makes the application heap
 HLE-only; round 98 adds the per-thread trap frame and heap pointer that the
 kernel services read; round 99 keeps one kernel-time rebind for the object
-index. What works:
+index; round 100 traces and clamps the oversized descriptor-grow request. What
+works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -782,6 +783,19 @@ index. What works:
   `0x5039c400`) while EFile builds its server name.
   `tools/test_round99.sh` pins it.
 
+- [x] **Trace and clamp the oversized descriptor-grow request** (round 100):
+  `NK_ALLOC_TRACE=1` logs the HLE bookkeeping size at `[ptr-8]` and the guest
+  cell header at `[ptr-4]` for every intercepted realloc. The four healthy
+  reallocs all satisfy `book = guest_hdr - 4`; the failing one never reaches
+  that path, which proves `0x80601b68` is not a bump-heap payload (alloc_cur
+  was only ~`0x80600830`), so EUser's descriptor-grow helper `0x5039c37c` is
+  operating on a buffer the HLE heap never allocated and reading a garbage
+  capacity word. Round 94's reject policy made EFile leave with KErrNoMemory;
+  `NK_ALLOC_CLAMP=<n>` allocates n bytes instead, so the caller continues.
+  EFile advances from 1,322 to 1,447 Thumb instructions with zero rejections,
+  and the next defect is a null virtual call on `0x80100c38`
+  (`[obj+8] -> [+8] == 0`, `r2=r6=0x2f`). `tools/test_round100.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -957,7 +971,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round96.sh` | app thread is not starved; EFile's SVC 0x1c "FileServer" gate |
 | `tools/test_round97.sh` | application heap is HLE-only |
 | `tools/test_round98.sh` | per-thread trap frame and heap pointer |
-| `tools/test_round99.sh` | **current acceptance**: handle-lookup slot keeps the kernel-time variant; next frontier is a bogus 11.9 MB ReAlloc |
+| `tools/test_round99.sh` | handle-lookup slot keeps the kernel-time variant |
+| `tools/test_round100.sh` | **current acceptance**: oversized allocation traced and clamped; next frontier is a null virtual call on `0x80100c38` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
