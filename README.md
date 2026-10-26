@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 104)
+## Status (2026-10-27, round 105)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -852,6 +852,20 @@ works:
   uniform. New frontier: `[obj+0x10] == 0` at `0x503bfcfa`.
   `tools/test_round104.sh` pins it.
 
+- [x] **The shift is real but not a uniform rotation** (round 105):
+  `recompiler/euser_reloc.py` documents the rule - the kernel `.def` is the
+  generic 7.0 list with one export missing (`K = G-1`) and the ROM's EUser with
+  four missing (`M = G-4`), so `M = K-3`, verified on 236 kernel slots with the
+  low special cases and the K=1361 anchor. Applying it to application slots
+  (`edata[i] = original[i-3]`) does not fix EFile, it changes the whole
+  trajectory: with `rot=3` EFile no longer leaves with KErrNoMemory but reaches
+  `0x503c2adc` with a NULL `this` (`ldr r0,[r4]` with `r4=0`, then
+  `ldr r1,[r0,#0x28]` reads low memory and yields `0xe92d4070`, `bx r1`).
+  Other amounts land elsewhere: `rot=1` -> `0x5037d8b0`, `rot=2` ->
+  `0x5038cf4c`, `rot=4` -> TDblQue spin at `0x503a2664`. The shift exists but
+  the application's ordinal base is not uniform, so a per-slot map is needed.
+  `tools/test_round105.sh` pins the three measurements.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -1032,7 +1046,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round101.sh` | `NK_STUB_PC` neutralises guest RHeap housekeeping |
 | `tools/test_round102.sh` | the application thread runs on the kernel's real RHeap |
 | `tools/test_round103.sh` | app-time import rebinds; the app/ROM EUser mismatch is broader than one slot |
-| `tools/test_round104.sh` | **current acceptance**: first mapping of the EUser table shift (slot 0x503b37c4 -> export 9) |
+| `tools/test_round104.sh` | first mapping of the EUser table shift (slot 0x503b37c4 -> export 9) |
+| `tools/test_round105.sh` | **current acceptance**: the shift is real but not a uniform rotation; a per-slot map is required |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

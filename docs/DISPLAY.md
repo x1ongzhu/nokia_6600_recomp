@@ -1074,3 +1074,10 @@ app/ROM 的 EUser 不匹配比单槽更广。验收 `tools/test_round103.sh`。
 绑定后 EFile 从该调用**正常返回**并继续 `0x503bfcf8`。整表旋转不均
 匀（`0xe92d4070` 失败）。新 frontier：`0x503bfcfa` 的 `[obj+0x10]==0`。
 验收 `tools/test_round104.sh`。
+
+### round 105：偏移是真的，但不是均匀旋转
+
+`euser_reloc.py` 的规则 `M = K-3`（ROM = generic-4、kernel = generic-1）
+在 236 个 kernel 槽上成立。套到 app 时 `rot=3` 让 EFile 带 NULL `this`
+走到 `0x503c2adc`；`rot=1/2/4` 各落到不同位置。偏移存在但基准不一致，
+必须逐槽映射。验收 `tools/test_round105.sh`。

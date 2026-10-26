@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 104）
+最后更新：2026-10-27（round 105）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -886,6 +886,30 @@
   - 新增工具开关 `NK_EUSER_ROTATE` / `NK_EUSER_ROTATE_FROM`
     （导出表旋转，用于检验偏移假设）。
   - 验收 `tools/test_round104.sh`。
+
+- **偏移是真的，但不是均匀旋转**（round 105）：
+  - `recompiler/euser_reloc.py` 给出了权威理论：kernel 的 `.def` 是
+    generic 7.0 列表**少了 1 个**（`K = G - 1`），ROM 的 EUser 是**少了
+    4 个**（`M = G - 4`），因此 **`M = K - 3`** —— 这条规则在 236 个
+    kernel 槽上已被验证（低序号 0/1/2 与 K=1361 是已知例外）。
+  - 把同一规则套到 app 槽（`edata[i] = original[i-3]`）**不是修好**，
+    而是**整条轨迹改变**：`rot=3` 时 EFile 不再以 `KErrNoMemory` 离开，
+    而是带着 **NULL `this`** 走到 `0x503c2adc`：
+    ```
+    503c2adc  push {r4,r5,lr}
+    503c2ae4  ldr r0, [r4]          ; r4 == 0
+    503c2ae6  ldr r1, [r0, #0x28]   ; 读低地址 0x28 → 0xe92d4070
+    503c2aea  bl 0x503c5980         ; bx r1
+    ```
+  - 不同偏移量落到完全不同的位置：
+    `rot=1` → 预算停在 `0x5037d8b0`（Thumb 1080）；
+    `rot=2` → 预算停在 `0x5038cf4c`（Thumb 1037）；
+    `rot=3` → `0x503c2adc` 空对象调用（Thumb 1229）；
+    `rot=4` → 预算，在 `0x503a2664` 的 TDblQue 遍历里自旋（Thumb 785）。
+  - 结论：**偏移确实存在**（round 104 已用行为验证了槽 `0x503b37c4`
+    → export 9），但 **app 的序号基准不一致**，所以必须做**逐槽映射**，
+    而不是整表平移。
+  - 验收 `tools/test_round105.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

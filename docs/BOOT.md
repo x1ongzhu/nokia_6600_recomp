@@ -1255,3 +1255,18 @@ export 20/23/44 的预算自旋，Thumb 1,281–1,450），说明不匹配比单
 
 新 frontier：`0x503bfcfa` 的 `[obj+0x10] == 0` 空虚拟调用。
 验收 `tools/test_round104.sh`。
+
+### 2.58 round 105：偏移是真的，但不是均匀旋转
+
+`recompiler/euser_reloc.py` 的权威理论：kernel `.def` 是 generic 列表
+少 1 个（`K = G-1`），ROM EUser 少 4 个（`M = G-4`），故 **`M = K-3`**
+（236 个 kernel 槽已验证，低序号 0/1/2 与 K=1361 为例外）。
+
+把同一规则套到 app（`edata[i] = orig[i-3]`）不是修好而是改变轨迹：
+`rot=3` 时 EFile 带 **NULL `this`** 走到 `0x503c2adc`（`ldr r0,[r4]`，
+`r4=0`；`ldr r1,[r0,#0x28]` 读低地址得 `0xe92d4070`；`bx r1`）。
+其他偏移：`rot=1` → `0x5037d8b0`；`rot=2` → `0x5038cf4c`；
+`rot=4` → `0x503a2664` 自旋。
+
+结论：偏移存在，但 app 序号基准不一致，必须**逐槽映射**。
+验收 `tools/test_round105.sh`。
