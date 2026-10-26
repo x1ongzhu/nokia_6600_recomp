@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 109）
+最后更新：2026-10-27（round 110）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -1021,6 +1021,27 @@
     静态库与源码均已确认未改动。下一步必须先把这个镜像/构建不一致
     修好，否则所有 app 侧测量都不可复现。
   - 验收 `tools/test_round109.sh`（本轮只保留静态契约断言）。
+
+- **阻塞解除：镜像没坏，缺的是"掩膜 ROM 交接"**（round 110）：
+  - 诊断 round 109 的阻塞：kernel 入口函数 `0x50310054` 的结尾是
+    ```
+    50312b80  bl 0x50312f00
+    50312b84  bl 0x50310c3c      ; Kern::Init2
+    50312b88  b 0x50312b88       ; 永不返回
+    ```
+    **这是正常启动完成**，不是 panic。设备上此时由**掩膜 ROM**负责启动
+    第一个应用；我们的 harness 过去是靠 kernel 卡在 `Kern::Init2`
+    的重试循环（`0x50330a88`，约 439,000 条指令）时"劫持"它来交接的。
+    现在 kernel 干净启动完成，那条路径就再也不会触发了。
+  - 新增 **`NK_HANDOFF_PC`（默认 `0x50312b88`）**：调度器把这个自旋
+    当作掩膜 ROM 的交接点，驱动与"卡住"时相同的 wait-any-request
+    阻塞流程，从而完成到预建 app 线程的第一次切换。
+  - 效果：app 线程在 **126,894 条指令**处被派发，EFile 正常运行
+    （Thumb 1371），round 102–109 的 app 测试全部恢复可跑。
+    `NK_HANDOFF_PC=0` 可关闭。
+  - 新 frontier：`0x503bfcfa` 处 `[r4] = 0x503c7db4`（EFile 的 rodata
+    地址而不是 vtable）→ `[+0x10] = 0` → 空调用。
+  - 验收 `tools/test_round110.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

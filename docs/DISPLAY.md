@@ -1114,3 +1114,10 @@ EUser 以垃圾指针 `0x2e002d` 调 PushL 而卡在队列遍历。
 **阻塞**：重建镜像后 kernel 在 126,895 条指令停在 `0x50312b88`，
 app 测试全部无法启动，需先修镜像/构建不一致。
 验收 `tools/test_round109.sh`（仅静态）。
+
+### round 110：掩膜 ROM 交接
+
+kernel 干净启动后在 `0x50312b88` 自旋（`b .`，非 panic），真正启动第一个
+应用的是掩膜 ROM。新增 `NK_HANDOFF_PC`（默认该地址）把此处当作交接点，
+app 线程在 126,894 条指令处派发，EFile 恢复运行（Thumb 1371）。
+验收 `tools/test_round110.sh`。

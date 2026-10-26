@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 108)
+## Status (2026-10-27, round 110)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -911,6 +911,30 @@ works:
   Pop/PopAndDestroy may destroy live objects because our `iBase/iTop/iNext`
   layout is not right. `tools/test_round108.sh` pins the measurement.
 
+- [x] **CCleanup embeds a TDblQue at +8** (round 109): CleanupStack::PushL
+  (0x5037fca0) resolves `r5 = [thread+0x58]`, panics 0x2c when that is null,
+  0x30 when the pointer is null and 0x29 when `[aPtr+0xc]` is non-zero, then
+  calls `Add(CCleanup+8, aPtr)` at 0x503a2648. That Add is a TDblQue sorted
+  insert (`iNext` at +0, `iOffset` at +8, `link = item + iOffset`, priority at
+  `[link+8]`) that walks until it reaches the head again, so an empty queue's
+  head must point at itself. The old B7e layout (`iBase`/`iTop`/`iNext` at
+  +4/+8/+0xc) could never terminate - it is the spin at
+  `0x503a2660..0x503a2674`. Binding slot `0x503b37c4` to a no-op then lets
+  EFile run the entire budget (Thumb 1,634 instead of 1,380); it still ends in
+  the queue walk because EUser calls PushL with the garbage pointer
+  `r0=0x2e002d`. `tools/test_round109.sh` keeps the static contract.
+
+- [x] **Mask-ROM hand-off** (round 110): the kernel entry function 0x50310054
+  ends with `bl 0x50310c3c` (Kern::Init2) followed by `b .` at 0x50312b88 -
+  a completed boot, not a panic. On the device the mask ROM starts the first
+  application at that point; the harness used to rely on the kernel getting
+  stuck in the Kern::Init2 retry loop (0x50330a88, ~439,000 instructions) and
+  hijacking it there, which never happens on a clean boot. `NK_HANDOFF_PC`
+  (default 0x50312b88, `NK_HANDOFF_PC=0` disables) makes the scheduler treat
+  that instruction as the mask-ROM hand-off and drive the same wait-any-request
+  block, so the application thread is dispatched at 126,894 instructions and
+  EFile runs again (Thumb 1,371). `tools/test_round110.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -1095,7 +1119,9 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round105.sh` | the shift is real but not a uniform rotation |
 | `tools/test_round106.sh` | static proof: the disputed call takes one argument; `tools/app_import_search.sh` |
 | `tools/test_round107.sh` | per-thread cleanup stack pointer at `thread+0x58` |
-| `tools/test_round108.sh` | **current acceptance**: EFile dereferences a stale pointer to freed heap memory |
+| `tools/test_round108.sh` | EFile dereferences a stale pointer to freed heap memory |
+| `tools/test_round109.sh` | CCleanup/PushL contract (static) |
+| `tools/test_round110.sh` | **current acceptance**: mask-ROM hand-off restores the application thread |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

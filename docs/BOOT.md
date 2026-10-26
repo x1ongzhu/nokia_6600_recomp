@@ -1345,3 +1345,16 @@ panic `0x29`；然后 `Add(CCleanup+8, aPtr)` → `0x503a2648`。
 **阻塞**：重建的镜像让 kernel 在 126,895 条指令后停在 `0x50312b88`
 （`irqs=0`，无 app 交接），round 102–109 的 app 测试全部起不来。
 必须先修好镜像/构建不一致。
+
+### 2.63 round 110：掩膜 ROM 交接（解除 round 109 阻塞）
+
+kernel 入口 `0x50310054` 的结尾是 `bl 0x50310c3c`（`Kern::Init2`）之后的
+`0x50312b88: b .` —— **正常启动完成**，不是 panic。设备上此时由**掩膜
+ROM** 启动第一个应用；harness 过去靠 kernel 卡在 `Kern::Init2` 重试循环
+（`0x50330a88`，约 439k 指令）时劫持它。
+
+新增 `NK_HANDOFF_PC`（默认 `0x50312b88`）：把该自旋当作交接点，驱动
+wait-any-request 阻塞流程完成到预建 app 线程的第一次切换。app 线程在
+126,894 条指令处派发，EFile 恢复运行（Thumb 1371）。`NK_HANDOFF_PC=0`
+关闭。新 frontier：`0x503bfcfa` 的 `[r4]=0x503c7db4` → `[+0x10]=0`
+空调用。验收 `tools/test_round110.sh`。

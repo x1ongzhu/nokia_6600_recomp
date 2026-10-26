@@ -971,7 +971,37 @@ static void sched_resume(nk_cpu_t* c, nk_interp_t* ip, sched_thread* s) {
  * then preempts the NULL thread at the next instruction boundary; this hook
  * implements exactly that, saving the NULL thread mid-startup so it can be
  * resumed when the supervisor next blocks. */
+static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
+                          uint32_t pc);
+static int sched_handoff_pc_done;
+
 static int sched_yield_hook(nk_cpu_t* c, nk_interp_t* ip) {
+    /* Round 110: the kernel entry function (0x50310054) ends with a `b .`
+     * self-loop at 0x50312b88 when the kernel finishes its initialisation.
+     * On the device the mask ROM (not the kernel) then starts the first
+     * application; this harness has to do it.  NK_HANDOFF_PC=<addr> makes the
+     * scheduler treat that instruction as the mask-ROM hand-off by driving
+     * the same wait-any-request block the kernel uses when it gets stuck
+     * (which then performs the first switch to the pre-created app thread). */
+    if (sched_on && !sched_handoff_pc_done) {
+        static uint32_t hp;
+        if (!hp)
+            hp = (uint32_t)env_ulong("NK_HANDOFF_PC",
+                                     env_ulong("NK_SCHED_FAKE", 0)
+                                         ? 0x50312b88u : 0u);
+        if (hp && (c->r[15] & ~1u) == hp) {
+            uint32_t saved = c->r[14];
+            c->r[14] = (uint32_t)env_ulong("NK_SCHED_LR", 0x50330a98u);
+            int done = sched_swi_hook(c, ip, SCHED_WAIT_SWI, c->r[15]);
+            c->r[14] = saved;
+            if (done) {
+                sched_handoff_pc_done = 1;
+                printf("sched: mask-ROM hand-off at pc %#010x (insns=%lu)\n",
+                       hp, ip->st.insns);
+                return 1;
+            }
+        }
+    }
     if (sched_on && env_ulong("NK_SCHED_EXIT", 0) &&
         (c->r[15] & ~1u) == 0xdead0000u) {
         uint32_t t = nk_r32(c, SCHED_CURRENT);
