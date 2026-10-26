@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 59）
+最后更新：2026-10-26（round 60）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -304,6 +304,12 @@
   地址、无名字；匹配的 SDK `bitgdi.lib` 按 export 顺序保存 mangled
   名字。映射出 `Clear()` = `0x5069ec5d`、`Clear(TRect)` =
   `0x5069a029`、`DrawBitmap(TPoint, bitmap)` = `0x5069a991`。
+
+- **bitmap 构造函数 blocker**（round 60）：`CFbsBitmap::Create`
+  （FbsCli export 147，`0x5068cb91`）在 zeroed object 上调用，进入
+  FbsCli 后撞到未解析 veneer `0x506dd80c`，加载 placeholder
+  `0xe59ff028` 并跳过去（`lr=0x506dd80d`）。BitGdi/FbsCli 构造函数
+  也需要同一个 ROM-loader import fixup。
 
 ### 未完成
 

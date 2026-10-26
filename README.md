@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 59)
+## Status (2026-10-26, round 60)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -357,6 +357,13 @@ stable executive loop. What works:
   `CFbsBitmap` whose data pointer is `0x59800000` and calling `Clear`/
   `DrawBitmap` for a real guest-drawn frame.
 
+- [x] **Bitmap constructor blocker** (round 60): calling
+  `CFbsBitmap::Create` (FbsCli export 147, `0x5068cb91`) on a zeroed guest
+  object reaches an unresolved veneer at `0x506dd80c`, which loads the
+  placeholder `0xe59ff028` and branches there (`lr=0x506dd80d`). The
+  BitGdi/FbsCli constructors need the same ROM-loader import fixup as EwSrv;
+  the symbol map alone is not enough.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -494,7 +501,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round56.sh` | app literals behave like link-time addresses; a `0x4a780000` link base lands on valid Thumb prologues |
 | `tools/test_round57.sh` | EwSrv dllref section layout; the six tail entries are not per-import slots |
 | `tools/test_round58.sh` | first guest-written LCD frame (white splash background) via guest `Mem::Copy` |
-| `tools/test_round59.sh` | **current acceptance**: BitGdi export symbol map (`Clear`/`DrawBitmap` addresses mapped from the SDK import library) |
+| `tools/test_round59.sh` | BitGdi export symbol map (`Clear`/`DrawBitmap` addresses mapped from the SDK import library) |
+| `tools/test_round60.sh` | **current acceptance**: `CFbsBitmap::Create` hits the same unresolved veneer (`0x506dd80c` → `0xe59ff028`) |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

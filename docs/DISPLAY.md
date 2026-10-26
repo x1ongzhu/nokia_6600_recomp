@@ -387,6 +387,12 @@ drawing 入口是可用的。`tools/bitgdi_symbols.py` 可复现映射。
 下一步：构造一个 data pointer 指向 `0x59800000` 的 `CFbsBitGc` /
 `CFbsBitmap`，调用 `Clear`/`DrawBitmap`，得到 guest 自己绘制的帧。
 
+round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
+`0x5068cb91`）：在 zeroed guest object 上调用，进入 FbsCli 代码后撞到
+未解析 veneer `0x506dd80c`，加载 placeholder `0xe59ff028` 并跳过去
+（`lr=0x506dd80d`）。所以 BitGdi/FbsCli 的构造函数也需要同一个
+**ROM-loader import fixup**；仅有符号表还不够。
+
 ## 7. 还缺什么
 
 1. **进程启动**：`FbServ.exe` 还没有被 kernel 作为进程加载。当前
