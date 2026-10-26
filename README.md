@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 89)
+## Status (2026-10-26, round 90)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -96,7 +96,7 @@ supervisor's `0x00a04d08` cannot be zero-return HLE'd; round 84 rules out the
 adjacent EUser slot targets; round 85 diagnoses the stack-params-as-CBase
 bug; round 86 shows a vtable pointer alone still leaves; round 87 shows a real
 vtable/method still fails; round 88 rules out the global CBase as `this`; round 89 traces the callback
-ABI mismatch. What works:
+ABI mismatch; round 90 corrects that analysis from static evidence. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -635,6 +635,21 @@ ABI mismatch. What works:
   on `0x00a04d08`. The callback/object ABI needs the real server/class
   instance. `tools/test_round89.sh` pins the diagnosis.
 
+- [x] **Correction: EStart's real main and import map** (round 90):
+  static analysis shows `0x503da4a4` (the static-constructor walker) calls
+  the real main `0x503db29c`, which builds a **0x24-byte stack params
+  block** and calls 14 sub-steps with `r0 = sp` (21 `bl` sites). Those are
+  free functions taking a params struct, **not CBase methods**. The
+  "stack params as a CBase" seen in rounds 85-89 is an artifact of the fake
+  scheduler thread introduced in round 78, so those conclusions are
+  withdrawn. EStart's 56 import thunks split into 30 EUser slots, **12
+  EFSrv.dll slots** (`0x503cf918..0x503cfcdc`; uid3 `0x100039e4`, 241
+  exports), and kernel/other slots; 3 slots are unresolved
+  (`0x503cfcd8`, `0x50a1f06c`, `0x50a1f070`). **30 call sites go into the
+  EFSrv slots** (open/write/read/mount), so the real blocker is the EFSrv
+  file server being unavailable, not an object vtable.
+  `tools/test_round90.sh` pins these facts offline.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -800,7 +815,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round86.sh` | vtable pointer alone still enters TTrap/leave; real class vtable/method needed |
 | `tools/test_round87.sh` | real vtable/method still fails on the stack params; real class instance needed |
 | `tools/test_round88.sh` | global CBase as `this` also fails; real class instance/server response needed |
-| `tools/test_round89.sh` | **current acceptance**: callback receives stack params instead of a CBase; callback/object ABI mismatch |
+| `tools/test_round89.sh` | callback receives stack params instead of a CBase (superseded by round 90) |
+| `tools/test_round90.sh` | **current acceptance**: EStart main `0x503db29c`, 0x24-byte params block, 12 EFSrv import slots; EFSrv is the blocker |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

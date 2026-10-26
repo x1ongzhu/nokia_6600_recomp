@@ -863,6 +863,26 @@ r0 = 0x8057ffc8, r1 = 0xd
 callback/object ABI 不匹配；需要真实 server/class instance。
 验收：`tools/test_round89.sh`。
 
+### round 90：更正 —— EStart 的真实 main 与 import map
+
+静态分析（离线）确认：
+
+- EStart 的静态构造遍历器 `0x503da4a4` 调用真实 main **`0x503db29c`**；
+- main 在栈上建 **0x24 字节 params block**，以 `r0 = sp` 依次调用
+  14 个子步骤（共 21 处 `bl`）；这些是接收 params 的**自由函数**，
+  不是 `CBase` 方法；
+- 所以 round 78 起 fake scheduler 线程把 params 当 `this` 传入，
+  才产生“stack params as CBase”的现象 —— **round 85–89 的结论撤回**；
+- EStart 的 56 个 thunk 分三组：30 个 EUser、**12 个 EFSrv.dll**
+  （`0x503cf918..0x503cfcdc`，uid3 `0x100039e4`，241 exports，
+  romfs `EFSrv.dll`）、以及 `0x5034c6xx`/`0x503b6b30`；
+- 3 个槽未解析：`0x503cfcd8`、`0x50a1f06c`、`0x50a1f070`；
+- **30 处调用进入 EFSrv 槽**（open/write/read/mount），EStart 的多个
+  子步骤都在做文件 I/O。
+
+真正的 blocker 是 **EFSrv 文件服务器不可用**，不是对象 vtable。
+验收：`tools/test_round90.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。

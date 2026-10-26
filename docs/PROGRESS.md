@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 89）
+最后更新：2026-10-26（round 90）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -593,6 +593,28 @@
   于是后续 EUser 把 `[this+0x14]` 当 vtable，落到
   `0x00a04d08`。这是 callback/object ABI 不匹配，需要真实
   server/class instance。验收 `tools/test_round89.sh`。
+
+- **更正：EStart 的真实 main 与 import map**（round 90，静态分析）：
+  - **撤回 round 85–89 的结论**。EStart 的真实 main 是
+    `0x503db29c`（由 `0x503da4a4` 的静态构造遍历器调用）。它在栈上
+    建一个 **0x24 字节 params block**，以 `r0 = sp` 依次调用 14 个子
+    步骤（共 21 处 `bl`）。这些是**接收 params 结构的自由函数**，
+    不是 `CBase` 方法。所以“把 stack params 当 CBase”是 round 78 起
+    fake scheduler 线程**伪造调用**的产物，不是 EStart 的 bug。
+  - EStart 的 56 个 import thunk 分三组：30 个 EUser 槽
+    （`0x503b3xxx..0x503b4fxx`）、**12 个 EFSrv.dll 槽**
+    （`0x503cf918..0x503cfcdc` 是 EFSrv 的 `.edata`；uid3
+    `0x100039e4`、241 exports、romfs 名 `EFSrv.dll`）、以及
+    `0x5034c6xx` / `0x503b6b30` 的 kernel/其他槽。
+  - 3 个槽**未解析**（`0xffffffff`）：`0x503cfcd8`、`0x50a1f06c`、
+    `0x50a1f070`。
+  - **30 处调用进入 EFSrv 槽**，集中在 `0x503da574`、`0x503da59c`、
+    `0x503da60a`、`0x503da61e`、`0x503da65e`、`0x503da734` 等，
+    即多个子步骤都在做 **文件 I/O**（open/write/read/mount）。
+    EStart 是 params-block + 文件 I/O 程序，不是 CBase 客户端。
+  - 因此真正的 blocker 是 **EFSrv（文件服务器）不可用**：`RFile`/`RFs`
+    没连上 session，半初始化对象上的虚拟调用就落到 `0x00a04d08`。
+  - 验收 `tools/test_round90.sh`（离线、确定性）。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

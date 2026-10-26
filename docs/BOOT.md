@@ -760,6 +760,21 @@ params，后续 EUser 把 `[this+0x14]` 当 vtable，落到
 `0x00a04d08`。callback/object ABI 不匹配；需要真实
 server/class instance。验收 `tools/test_round89.sh`。
 
+### 2.43 round 90：更正 —— EStart 真实 main 与 import map
+
+`0x503da4a4`（静态构造遍历器）调用真实 main `0x503db29c`。main 在栈
+上建 **0x24 字节 params block**，以 `r0 = sp` 调用 14 个子步骤
+（21 处 `bl`）；这些是接收 params 的自由函数，不是 CBase 方法。
+round 78 起 fake scheduler 伪造调用，才出现“stack params as CBase”，
+round 85–89 的结论撤回。
+
+EStart 的 56 个 thunk：30 个 EUser + **12 个 EFSrv.dll**
+（`0x503cf918..0x503cfcdc`，uid3 `0x100039e4`，241 exports）+
+`0x5034c6xx`/`0x503b6b30`；3 个未解析（`0x503cfcd8`、
+`0x50a1f06c`、`0x50a1f070`）。**30 处调用进入 EFSrv 槽**
+（open/write/read/mount）。真正 blocker 是 EFSrv 文件服务器不可用。
+验收 `tools/test_round90.sh`。
+
 ---
 
 ## 3. EUser 导入映射
