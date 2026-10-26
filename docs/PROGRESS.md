@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 35）
+最后更新：2026-10-26（round 36）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -135,6 +135,13 @@
   - timer queue `[0x80001c34]` 为空
   说明 CPU/显示路径没问题；缺的是 handle `0x32` 的 thread-start
   completion 或 DFC 线程。
+
+- **MMIO 写来源**（round 36）：MMIO 写日志现在带 `pc`/`lr`，16-bit
+  store 也能看到。`0x41080000..0x41083fff` 的 0xffff 填充不是 LCD
+  framebuffer，而是 kernel 的 boot-region descriptor table：源表在
+  `0x41000000`，复制到 `0x41080000`；写入点是 `0x503164cc`（来自
+  `0x503163f4` 的扫描）。这条线索被排除，display driver 仍需从真正的
+  UI/显示路径找。
 
 ### 未完成
 

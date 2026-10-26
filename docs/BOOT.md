@@ -388,6 +388,22 @@ thread-start completion / DFC 线程**。`RThread::Resume(0x32)` 经
 结果：**5,999,983 条、14 IRQ、0 undefined/unbound/recovery**，
 stop 在 `0x50312720` 的预算边界（defer 模式）。不是 fault。
 
+### 2.12 round 36：MMIO 写来源，排除 0x41000000 的误导
+
+MMIO 写日志现在包含 `pc`/`lr`。这能定位 16-bit store（`nk_w16` 不走
+word write-watch）。在 2M 的运行里，`0x41080000..0x41083fff` 被
+0xffff 填满，第一笔写在：
+
+```
+[mmio] write 0x41080000 = 0 (2) pc=0x503164cc lr=0x503163f4
+[mmio] write 0x41000300 = 0xc000432 (4) pc=0x50310bc8 lr=0x50310bbc
+```
+
+这不是 LCD framebuffer。`0x503163f4` 起的循环读 `0x41000000` 的
+region descriptor，并把 4-byte entry 复制到 `0x41080000`：
+`0x41000000` 是源表，`0x41080000` 是目标表，`0x41000300/304` 是
+descriptor 控制字。display driver 还要从真正的 UI/显示路径找。
+
 ---
 
 ## 3. EUser 导入映射

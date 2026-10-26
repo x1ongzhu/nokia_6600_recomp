@@ -323,7 +323,9 @@ static uint32_t mmio_read(nk_cpu_t* c, uint32_t a, unsigned size) {
 static void mmio_write(nk_cpu_t* c, uint32_t a, uint32_t v, unsigned size) {
     mmio_init();
     unsigned long n = g_mmio_writes++;
-    if (mmio_log(n)) fprintf(stderr, "[mmio] write %#010x = %#x (%u)\n", a, v, size);
+    if (mmio_log(n))
+        fprintf(stderr, "[mmio] write %#010x = %#x (%u) pc=%#010x lr=%#010x\n",
+                a, v, size, c->r[15], c->r[14]);
     if (size == 4 &&
         ((a >= NK_UPP_TIMER_BASE && a < NK_UPP_TIMER_BASE + 0xa0) ||
          (a >= NK_UPP_ICU_BASE && a < NK_UPP_ICU_BASE + 0x100)))

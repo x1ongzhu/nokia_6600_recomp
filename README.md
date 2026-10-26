@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 35)
+## Status (2026-10-26, round 36)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -154,6 +154,13 @@ stable executive loop. What works:
   `KRequestPending`, the NULL thread is in the `Kern::Init3` timing loop, and
   only two `DThread` objects exist.  The missing piece is the handle-`0x32`
   thread-start completion / DFC thread, not a CPU fault.
+
+- [x] **MMIO provenance** (round 36): MMIO write logs now include PC/LR
+  (the 16-bit stores were invisible to the word write-watch). The large
+  `0xffff` fill at `0x41080000` is the kernel's boot-region descriptor table,
+  written at `0x503164cc` from `0x503163f4` (`0x41000000` source,
+  `0x41080000` copied entries), not an LCD framebuffer. This rules out that
+  lead and keeps the display hunt on the real UI path.
 
 Not implemented yet:
 
@@ -268,7 +275,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round32.sh` | live heap DThread, TTrap/UnTrap, first blocking executive call (historical control) |
 | `tools/test_round33.sh` | WaitForAnyRequest block, first switch to the NULL thread, start hand-off, KERN 6 closed (historical control) |
 | `tools/test_round34.sh` | live DThread/CObjectIx graph, status-completion wake, Init3 HAL gate, banked stacks, 6M-instruction run (historical control) |
-| `tools/test_round35.sh` | **current acceptance**: hand-off returns before preemption, supervisor runs to 464k, Init3 deadlock pinned to the handle-`0x32`/DFC path |
+| `tools/test_round35.sh` | hand-off returns before preemption, supervisor runs to 464k, Init3 deadlock pinned to the handle-`0x32`/DFC path |
+| `tools/test_round36.sh` | **current acceptance**: MMIO write PC/LR provenance; `0x41000000`/`0x41080000` is the boot-region table, not the LCD framebuffer |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -446,6 +454,13 @@ Only two `DThread` objects exist (`0x80601078`, `0x80601830`) and the timer
 queue `[0x80001c34]` is empty.  The next blocker is therefore the handle-`0x32`
 thread-start completion / DFC thread, not the CPU or the display path.
 Display-controller HLE and the first frame follow after the UI/DFC server runs.
+
+Round 36 added PC/LR provenance to the MMIO write log.  The big `0xffff`
+fill at `0x41080000..0x41083fff` is **not** the LCD buffer: it is the kernel's
+boot-region descriptor table, written at `0x503164cc` from the scan at
+`0x503163f4` (`0x41000000` source descriptors, `0x41080000` copied entries).
+The LCD driver search therefore continues at the real display path, not this
+table.
 
 See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for the roadmap.
 
