@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 80)
+## Status (2026-10-26, round 81)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -90,7 +90,8 @@ service-start handshake/wait; round 74 fixes the nested SVC return; round 75 sho
 started thread; round 76 rules out a DThread-shaped clone; round 77 rules
 out the SVC model; round 78 gets a fake scheduler thread into EStart's server
 entry; round 79 adds auto-complete so the server runs; round 80 clamps the
-wild Mem::Copy and advances it past the MMIO storm. What works:
+wild Mem::Copy and advances it; round 81 shows the server entry still needs a
+real StartThread frame. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -566,6 +567,12 @@ wild Mem::Copy and advances it past the MMIO storm. What works:
   (`r3=0xe59ff028`). Framebuffer remains untouched.
   `tools/test_round80.sh` pins the result.
 
+- [x] **Fake stack sentinel is not enough** (round 81):
+  `NK_SCHED_STACK_FILL=0xdead0000` still leaves the server's
+  `0x503da6ee` epilogue with r0=0 because `sp=0x80562020` is outside the
+  fake stack. The entry needs a real StartThread frame/callback.
+  Framebuffer remains untouched. `tools/test_round81.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -722,7 +729,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round77.sh` | direct dispatch hits the same EStart handshake; SVC model is not the blocker |
 | `tools/test_round78.sh` | fake scheduler thread reaches EStart server entry; null call at `0x503db18f` |
 | `tools/test_round79.sh` | auto-complete runs the EStart server 200k; wild copy at `0x5038d724` |
-| `tools/test_round80.sh` | **current acceptance**: Mem::Copy clamp advances the server to `0x503da6d5`; new import null call |
+| `tools/test_round80.sh` | Mem::Copy clamp advances the server to `0x503da6d5`; new import null call |
+| `tools/test_round81.sh` | **current acceptance**: stack sentinel still null-calls at `0x503da6ee`; real StartThread frame needed |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

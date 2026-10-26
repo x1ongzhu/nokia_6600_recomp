@@ -185,6 +185,8 @@
  *                           point [0x80000400] at it; NK_SCHED_ENTRY is its
  *                           first PC and NK_SCHED_STACK its stack (round 78).
  *   NK_SCHED_R0=0x...       initial r0 for that fake thread (round 78).
+ *   NK_SCHED_STACK_FILL=0x. fill the fake thread stack with this word
+ *                           instead of zero (round 81).
  *   NK_SCHED_AUTOCOMPLETE=1  after a switch, complete the blocked thread's
  *                           status and make it runnable again (round 79).
  *   NK_MEMCOPY_CLAMP=1      at Mem::Copy 0x5038cfe0, zero copies whose
@@ -1021,7 +1023,11 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
                 return 0;
             }
         }
-        for (uint32_t o = 0; o < SCHED_STACK_SIZE; o += 4) nk_w32(c, base + o, 0);
+        {
+            uint32_t fill = (uint32_t)env_ulong("NK_SCHED_STACK_FILL", 0);
+            for (uint32_t o = 0; o < SCHED_STACK_SIZE; o += 4)
+                nk_w32(c, base + o, fill);
+        }
         memset(next->r, 0, sizeof next->r);
         next->r[0] = (uint32_t)env_ulong("NK_SCHED_R0", 0);
         next->r[13] = base + SCHED_STACK_SIZE - 0x10u;

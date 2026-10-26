@@ -762,6 +762,15 @@ framebuffer: 0 non-zero bytes
 新 frontier 是该 server import，而不是 copy loop。验收：
 `tools/test_round80.sh`。
 
+### round 81：fake stack sentinel 不足
+
+新增 `NK_SCHED_STACK_FILL=0xdead0000`，把 fake thread stack 填成返回
+sentinel。EStart server 仍在 `0x503da6ee` 的 epilogue `bx r0`
+null-call（r0=0），因为 `sp=0x80562020` 已超出 fake stack
+`0x80560000..0x80562000`。说明该 entry 需要真正的 StartThread
+frame/callback，而不是 sentinel。framebuffer 仍 0。验收：
+`tools/test_round81.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -824,6 +833,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 补 EStart server 的新 import：round 80 已用 Mem::Copy clamp 越过
-   wild copy，当前停在 `lr=0x503da6d5`（`r3=0xe59ff028`）。先让
-   server 继续运行，再看它是否开始绘制。
+8. 构造真正的 StartThread frame/callback：round 81 已证明 sentinel
+   不足，server 在 `0x503da6ee` epilogue 返回 0。下一步让该 server
+   entry 有正确的返回/回调帧。

@@ -691,6 +691,14 @@ framebuffer 仍 0 像素。验收 `tools/test_round78.sh`。
 `lr=0x503da6d5` 的 null call（`r3=0xe59ff028`）。framebuffer 仍
 0 像素。验收 `tools/test_round80.sh`。
 
+### 2.34 round 81：fake stack sentinel 不足
+
+`NK_SCHED_STACK_FILL=0xdead0000` 把 fake thread stack 填成返回
+sentinel，但 EStart server 仍在 `0x503da6ee` 的 epilogue `bx r0`
+null-call（r0=0），因为 `sp=0x80562020` 超出 fake stack
+`0x80560000..0x80562000`。该 entry 需要真正的 StartThread
+frame/callback。验收 `tools/test_round81.sh`。
+
 ---
 
 ## 3. EUser 导入映射
