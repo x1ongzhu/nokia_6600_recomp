@@ -1103,3 +1103,14 @@ EFile 在绑定 PushL 时停在 `0xf0009b06`。验收 `tools/test_round107.sh`�
 但实际对象前 0x18 字节被覆盖成队列节点（`[0]=0x5103559c`），尾部完好
 ——内存被释放后重新分配。嫌疑是我们自造的 CCleanup 图让
 `Pop`/`PopAndDestroy` 销毁了活对象。验收 `tools/test_round108.sh`。
+
+### round 109：清理栈布局（CCleanup+8 是 TDblQue）
+
+`PushL` 把 `CCleanup+8` 当 TDblQue 容器传给 `0x503a2648` 的有序插入，
+空队列必须自指；B7e 旧的 `iBase/iTop` 布局导致无限自旋。修正后，
+把槽 `0x503b37c4` 绑 no-op 时 EFile 跑满预算（Thumb 1634），但仍因
+EUser 以垃圾指针 `0x2e002d` 调 PushL 而卡在队列遍历。
+
+**阻塞**：重建镜像后 kernel 在 126,895 条指令停在 `0x50312b88`，
+app 测试全部无法启动，需先修镜像/构建不一致。
+验收 `tools/test_round109.sh`（仅静态）。

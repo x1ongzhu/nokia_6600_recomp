@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 108）
+最后更新：2026-10-27（round 109）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -991,6 +991,36 @@
     配套的 `Pop`/`PopAndDestroy` 因为我们编的 `iBase/iTop/iNext` 布局
     不对，销毁了不该销毁的对象。
   - 验收 `tools/test_round108.sh`。
+
+- **清理栈的真实布局 + 镜像重建后的阻塞**（round 109）：
+  - 从 `CleanupStack::PushL`（`0x5037fca0`）反推出完整契约：
+    ```
+    5037fca8  bl 0x50392ba4      ; svc 0x74 → r5 = [thread+0x58] = CCleanup*
+    5037fcb0  moveq r0,#0x2c ; bleq panic     ; 没有清理栈
+    5037fcbc  moveq r0,#0x30 ; bleq panic     ; 空指针
+    5037fcc4  ldr r3,[r4,#0xc] ; if (r3!=0) panic 0x29   ; 已在栈上
+    5037fcd4  add r0,r5,#8       ; ← 容器 = CCleanup + 8
+    5037fcdc  bl 0x503a2648      ; TDblQue::Add
+    ```
+    而 `0x503a2648` 是 **TDblQue 的有序插入**：`r2=[r0]`（iNext）、
+    `r3=[r0+8]`（iOffset）、`link = item + iOffset`、`[link+8]` 作优先级，
+    循环 `r2=[r2]` 直到 `r2 == r0`（回到 head）。**空的 head 必须指向自己**。
+  - 因此修正 B7e 的 `CCleanup`：`+8/+0xc` 写成自指的空队列、`+0x10`
+    写 iOffset（原来的 `iBase/iTop/iNext` 布局让这个循环永远不终止，
+    正是 round 101/105 里在 `0x503a2660..74` 自旋的原因）。
+  - 实验（**在镜像重建之前**测得）：把槽 `0x503b37c4` 绑到一个纯
+    no-op（`0x50384b34` = `mov r0,#0; bx lr`）后，EFile **跑满整个预算**
+    （Thumb 1634，之前 1380），但仍停在队列遍历里 —— 因为 EUser 自己
+    以**垃圾指针** `r0=0x2e002d`（调用环 `0x50386a24 -> 0x5037fca0`）
+    调 `PushL`，而我们的内存模型对未映射读返回 0，于是"已在栈上"检查
+    通过，垃圾节点进了队列。
+  - **阻塞**：`tools/build_rom_image.sh` 重新生成的镜像现在会让 kernel
+    在 **126,895 条指令**后停在 `0x50312b88`（`b .` 自旋，`irqs=0`，
+    从未发生 app 交接），于是 **round 102–109 的所有 app 测试都起不来**。
+    镜像大小、ROMFS（UTF-16）条目、`--snap` 与否都试过，均无改善；
+    静态库与源码均已确认未改动。下一步必须先把这个镜像/构建不一致
+    修好，否则所有 app 侧测量都不可复现。
+  - 验收 `tools/test_round109.sh`（本轮只保留静态契约断言）。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

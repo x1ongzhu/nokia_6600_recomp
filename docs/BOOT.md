@@ -1327,3 +1327,21 @@ vtable）和 `[r4+0x18] = 0xffff8001`。dump `0x510355e0` 显示**尾部
 首要嫌疑：**自造的 CCleanup 图**。`PushL` 现在能用，但配套
 `Pop`/`PopAndDestroy` 因我们编的 `iBase/iTop/iNext` 布局不对而销毁了
 不该销毁的对象。验收 `tools/test_round108.sh`。
+
+### 2.62 round 109：清理栈的真实布局（以及镜像阻塞）
+
+`CleanupStack::PushL`（`0x5037fca0`）的完整契约：`r5 = [thread+0x58]`；
+`r5==0` → panic `0x2c`；`aPtr==0` → panic `0x30`；`[aPtr+0xc]!=0` →
+panic `0x29`；然后 `Add(CCleanup+8, aPtr)` → `0x503a2648`。
+`0x503a2648` 是 TDblQue 有序插入：`iNext@+0`、`iOffset@+8`、
+`link=item+iOffset`、`[link+8]` 为优先级，循环到 `r2==head` 为止 ——
+**空队列的 head 必须自指**。B7e 原来的 `iBase/iTop/iNext` 布局让该
+循环永不终止（round 101/105 的 `0x503a2660..74` 自旋）。
+
+把槽 `0x503b37c4` 绑成 no-op（`0x50384b34`）后 EFile 跑满预算
+（Thumb 1634）；仍停在队列遍历，因为 EUser 以垃圾指针 `0x2e002d`
+（`0x50386a24 -> 0x5037fca0`）调 PushL，未映射读返回 0 使检查通过。
+
+**阻塞**：重建的镜像让 kernel 在 126,895 条指令后停在 `0x50312b88`
+（`irqs=0`，无 app 交接），round 102–109 的 app 测试全部起不来。
+必须先修好镜像/构建不一致。

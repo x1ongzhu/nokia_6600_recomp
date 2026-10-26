@@ -1464,15 +1464,23 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
             uint32_t handler = base + B7E_TRAPH_OFF;
             uint32_t clean = base + B7E_CLEAN_OFF;
             uint32_t clbase = base + B7E_CLBASE_OFF;
-            uint32_t cltop = base + B7E_CLTOP_OFF;
             /* TCleanupTrapHandler: vptr + iCleanup. */
             nk_w32(c, handler + 0x00, B7E_TRAP_VT);
             nk_w32(c, handler + 0x04, clean);
-            /* CCleanup: vptr + iBase/iTop/iNext. */
+            /* CCleanup: vptr + an embedded TDblQue at +8.
+             *
+             * Round 109: CleanupStack::PushL (0x5037fca0) passes `this + 8`
+             * to the container Add at 0x503a2648, so CCleanup+8 is a
+             * TDblQue {iHead.iNext@+8, iHead.iPrev@+0xc, iOffset@+0x10}.
+             * Add walks the list until it reaches the head again
+             * (0x503a2660..0x503a2674), so a head that does not point at
+             * itself spins forever - exactly what happened with the old
+             * iBase/iTop layout.  An empty queue must be self-referential. */
             nk_w32(c, clean + 0x00, B7E_CLEAN_VT);
             nk_w32(c, clean + 0x04, clbase);
-            nk_w32(c, clean + 0x08, cltop);
-            nk_w32(c, clean + 0x0c, clbase + 8);
+            nk_w32(c, clean + 0x08, clean + 0x08); /* iHead.iNext -> self */
+            nk_w32(c, clean + 0x0c, clean + 0x08); /* iHead.iPrev -> self */
+            nk_w32(c, clean + 0x10, 0);            /* iOffset             */
             /* One TRAP level is already active: {operation=0, count=1}. */
             nk_w32(c, clbase + 0x00, 0);
             nk_w32(c, clbase + 0x04, 1);
