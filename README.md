@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 52)
+## Status (2026-10-26, round 53)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -299,6 +299,13 @@ stable executive loop. What works:
   pool is unrelocated by the flat-image loader. This is the concrete loader
   frontier for EwSrv/window-server bring-up.
 
+- [x] **LCD/framebuffer base** (round 53): ecust.dll's display config at
+  `0x5033abf4` writes the LCD controller base `0x59200000` and the
+  framebuffer base `0x59800000` (base + `0x600000`). `NK_MAP_LCD=1` maps the
+  controller page and a 4 MiB framebuffer and can dump it. The current stable
+  SplashScreen run writes **no pixels**; the 4 MiB dump is all zero. This is
+  now the capture target for the first frame.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -429,7 +436,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round49.sh` | splash MBM header, no MBM load in RAM, EwSrv bad veneer literal `0x4a7846c0` |
 | `tools/test_round50.sh` | EwSrv passes its first missing-DLL call via a mapped zero-return stub |
 | `tools/test_round51.sh` | EwSrv callmap redirect to its real prologue, then the packed-veneer literal frontier |
-| `tools/test_round52.sh` | **current acceptance**: EwSrv IAT is resolved but the veneer literal at `0x506c1dba` is padding (`0x40b846c0`) |
+| `tools/test_round52.sh` | EwSrv IAT is resolved but the veneer literal at `0x506c1dba` is padding (`0x40b846c0`) |
+| `tools/test_round53.sh` | **current acceptance**: real LCD base `0x59200000`, framebuffer `0x59800000`, currently all-zero |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

@@ -269,6 +269,22 @@ round 52 进一步确认：EwSrv 的 **IAT 是好的**。`0x506c9290` 处的表
 IAT slot。也就是说，**app code 的 literal pool 没有被 flat image loader
 重定位**。这是 EwSrv/window-server bring-up 的具体 loader frontier。
 
+round 53 找到了真正的 LCD/framebuffer 基址。ecust.dll 的显示配置
+`0x5033abf4` 写入：
+
+```
+[r1] = 0x59200000        ; LCD controller
+[r2] = 0x59800000        ; framebuffer = base + 0x600000
+[r3] = 0x2000000/0x400000; framebuffer size
+```
+
+之前 harness 没有映射这两个窗口，guest 的像素写入都进了 MMIO bus。
+`NK_MAP_LCD=1` 现在映射 controller page 和 4 MiB framebuffer，并可 dump。
+
+当前 stable SplashScreen 2M 运行仍然**不写 framebuffer**：4 MiB dump
+全 0。这现在是抓第一帧的 capture target；下一步是让 guest 真正执行
+显示初始化/draw。
+
 下一步是给 flat image 的 ROMFS app 加 literal-pool/relocation 处理，
 或 HLE window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 

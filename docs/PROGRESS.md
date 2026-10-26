@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 52）
+最后更新：2026-10-26（round 53）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -262,6 +262,12 @@
   但 veneer `0x506c1dba` 加载 `0x40b846c0`（代码/padding），不是 IAT
   slot。IAT 正常，问题在 app code 的 literal pool 没有被 flat image
   loader 重定位。这是 window-server bring-up 的 loader frontier。
+
+- **LCD/framebuffer 基址**（round 53）：ecust 显示配置
+  `0x5033abf4` 写入 LCD controller `0x59200000`、framebuffer
+  `0x59800000`（+0x600000）。`NK_MAP_LCD=1` 映射 controller page +
+  4 MiB framebuffer 并 dump。当前 stable SplashScreen 2M 运行不写
+  framebuffer，dump 全 0；这是抓第一帧的 capture target。
 
 ### 未完成
 

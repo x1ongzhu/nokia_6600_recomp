@@ -2371,6 +2371,15 @@ int main(int argc, char** argv) {
         }
         printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
     }
+    if (env_ulong("NK_MAP_LCD", 0)) {
+        /* ecust.dll's display config at 0x5033abf4 writes the LCD controller
+         * base 0x59200000 and the framebuffer base 0x59800000 (base +
+         * 0x600000).  Map both so guest pixel writes are captured instead of
+         * disappearing into the MMIO bus. */
+        if (nk_alloc_ram(&cpu, 0x59200000u, 0x10000u) == 0 &&
+            nk_alloc_ram(&cpu, 0x59800000u, 0x400000u) == 0)
+            printf("LCD: controller 0x59200000, framebuffer 0x59800000+0x400000\n");
+    }
     if (env_ulong("NK_FIX_4A78", 0)) {
         /* EwSrv's veneer at 0x506c15ee loads a stale absolute function
          * pointer 0x4a7846c0 from its missing DLL.  Map that address and
