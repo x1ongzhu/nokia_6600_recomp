@@ -324,6 +324,25 @@ uid 0x1000a859 -> 0x50a6d6f4  b5f0
 `0x40b846c0` 不匹配这个 base，说明每个 DLL 可能有自己的 link base。
 这进一步支持“缺 ROM-loader relocation/import fixup”的结论。
 
+round 57 解析了 EwSrv 的 64 字节 dllref section `0x506c9290`：
+
+```
+0x00070001   ; flags=1, count=7
+0x506980e5   ; BitGdi entry
+0x506a815c   ; EwSrv entry
+0x503c9485   ; EUser entry
+...
+0x00000000
+0x5068c1b5   ; FbsCli entry
+...
+0xffffffff
+```
+
+零后面的 6 个 entry 不是 per-import IAT slot：把第二个 veneer 指到
+`0x506c92b8`（`0x50698040`）会进入 BitGdi，然后 wild-jump 到
+`0x5155a0ca`；其他 slot 都 null-call。结论：EwSrv 需要真实的
+ROM loader import fixup，不能靠猜 slot 表。
+
 下一步是给 flat image 的 ROMFS app 加 literal-pool/relocation 处理，
 或 HLE window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 

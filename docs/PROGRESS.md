@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 56）
+最后更新：2026-10-26（round 57）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -286,6 +286,12 @@
   `code - 0x4a780000` 平移 `0x4a7846c0`，会落在多个 image 的合法
   Thumb prologue 上（如 `uid 0x10003c77 -> 0x505bf774`）。`0x40b846c0`
   不匹配这个 base，说明每个 DLL 可能有自己的 link base。
+
+- **EwSrv dllref section**（round 57）：`0x506c9290` 的 64 字节
+  section 是 flags=1、count=7、7 个 DLL entry、0、6 个 DLL entry、
+  `0xffffffff`。零后的 6 个 entry **不是** per-import IAT slot；
+  指到 `0x506c92b8` 会进入 BitGdi 后 wild-jump 到 `0x5155a0ca`，
+  其他 slot null-call。需要真实 ROM loader import fixup。
 
 ### 未完成
 

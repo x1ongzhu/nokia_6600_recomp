@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 56)
+## Status (2026-10-26, round 57)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -331,6 +331,14 @@ stable executive loop. What works:
   relocation/import fixup rather than one bad import. The `0x40b846c0`
   literal does not match this base, so each DLL may have its own link base.
 
+- [x] **EwSrv dllref section** (round 57): the 64-byte section at
+  `0x506c9290` is `flags=1, count=7`, the seven DLL entry points, a zero,
+  six more DLL entries and `0xffffffff`. The six tail entries are **not**
+  per-import IAT slots: patching the second veneer to `0x506c92b8`
+  (`0x50698040`, BitGdi) enters BitGdi but wild-jumps to `0x5155a0ca`; the
+  other slots null-call. EwSrv needs the real ROM loader import fixup, not a
+  guessed slot table.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -465,7 +473,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round53.sh` | real LCD base `0x59200000`, framebuffer `0x59800000` |
 | `tools/test_round54.sh` | the normal kernel boot also writes no LCD pixels |
 | `tools/test_round55.sh` | EwSrv is a `TRomImageHeader` with a 7-entry DLL ref table |
-| `tools/test_round56.sh` | **current acceptance**: app literals behave like link-time addresses; a `0x4a780000` link base lands on valid Thumb prologues |
+| `tools/test_round56.sh` | app literals behave like link-time addresses; a `0x4a780000` link base lands on valid Thumb prologues |
+| `tools/test_round57.sh` | **current acceptance**: EwSrv dllref section layout; the six tail entries are not per-import slots |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
