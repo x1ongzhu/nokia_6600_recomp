@@ -648,6 +648,26 @@ app 期望               = export 747 = 0x50383c84  (CBase constructor)
 SplashScreen 和 EStart 都需要把该 slot 重绑到 `0x50383c84`。验收：
 `tools/test_round72.sh`。
 
+### round 73：bad dispatch 是 service-start handshake
+
+round-71 的 `0x503ce69c` 调用来自 EStart `0x503da74a -> 0x503db3dc`，
+slot `0x503cf984` 的值是 `0x503ce691`。EStart 传的是 stack descriptor，
+而 ROM 函数把它当 CBase 对象读 `[obj+0x14] -> [0xc]`。
+
+把该 slot HLE 成 zero-return stub 后：
+
+```
+stop: budget (0) at 0x50314f78
+insns=200000
+mmio: 1720 reads, 0 writes
+framebuffer: 0 non-zero bytes
+```
+
+EStart 又回到 wait loop（handle `0x32`）。所以这条 bad dispatch 属于
+**service-start handshake**，不是绘制调用；下一步需要 minimal
+thread scheduler / server model，而不是继续找像素路径。验收：
+`tools/test_round73.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -710,6 +730,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 找 EStart 真实 class vtable：round 71 已推进到 13,162 条，当前
-   卡在 `0x503ce69c` 的 `bx r1`（`r1=0x00a04d08`）。generic
-   CBase vtable `0x503b359c` 不匹配；下一步确认该对象真实 vtable/class。
+8. 实现 minimal thread scheduler / server handshake：round 73 已证明
+   EStart 的 bad dispatch 是 service-start 握手，HLE 后仍回到
+   `0x50314f78` wait loop。下一步让 handle 0x32 的线程/服务真正推进，
+   而不是继续找绘制调用。

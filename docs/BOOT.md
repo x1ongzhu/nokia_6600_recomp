@@ -623,6 +623,16 @@ app 期望   = export 747 = 0x50383c84  (CBase constructor)
 SplashScreen 和 EStart 都需要重绑到 `0x50383c84`。验收：
 `tools/test_round72.sh`。
 
+### 2.26 round 73：bad dispatch 是 service-start handshake
+
+round-71 的 `0x503ce69c` 调用来自 EStart `0x503da74a ->
+0x503db3dc`，slot `0x503cf984` 的值是 `0x503ce691`。EStart 传的是
+stack descriptor，而 ROM 函数把它当 CBase 对象读
+`[obj+0x14] -> [0xc]`。把该 slot HLE 成 zero-return stub 后，EStart
+又跑满 200k，回到 `0x50314f78` wait loop（handle `0x32`），
+framebuffer 仍 0 像素。说明这是 **service-start handshake**；下一步
+需要 minimal scheduler/server model。验收 `tools/test_round73.sh`。
+
 ---
 
 ## 3. EUser 导入映射

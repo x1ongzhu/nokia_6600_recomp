@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 72）
+最后更新：2026-10-26（round 73）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -451,6 +451,16 @@
   - 两者相差 2 个 entry。
   这解释了为什么 ROM slot 是 operator new、而 SplashScreen 和 EStart
   都需要重绑到 `0x50383c84`。验收 `tools/test_round72.sh`。
+
+- **EStart bad dispatch 是服务启动握手，不是绘制**（round 73）：round-71
+  的 `0x503ce69c` 调用来自 EStart `0x503da74a -> 0x503db3dc`，
+  slot `0x503cf984` 的值是 `0x503ce691`；EStart 传的是 stack
+  descriptor，而 ROM 函数把它当 CBase 对象读 `[obj+0x14] -> [0xc]`。
+  把该 slot HLE 成 zero-return stub 后，EStart 又跑满 200k，回到
+  `0x50314f78` 的 wait loop（handle `0x32`），framebuffer 仍 0 像素。
+  说明这条 bad dispatch 属于 **service-start handshake**；下一步需要
+  minimal scheduler/server model，而不是继续找绘制调用。验收
+  `tools/test_round73.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -764,7 +774,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 加 wait HLE + CBase rebind 后 EStart 推进到 13k 条，当前卡在 bad virtual dispatch `0x00a04d08`；round 72 钉住 app slot/export 的 2-entry offset |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 推进到 13k 条；round 72 钉住 slot/export offset；round 73 证明 EStart 的下一 blocker 是 service-start handshake/wait，需要 scheduler/server model |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -797,10 +807,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. EStart + wait HLE + CBase rebind 已推进到 13,162 条
-    （round 71），当前卡在 `0x503ce69c` 的 `bx r1`，
-    `r1=0x00a04d08`。下一步找 EStart 真实 class vtable（不是
-    `0x503b359c` 这个 generic CBase vtable），修掉该虚拟调用。
+11. EStart 的 bad dispatch 已证明是 service-start handshake
+    （round 73）；HLE 后仍回到 `0x50314f78` wait loop (handle 0x32)。
+    下一步需要 minimal thread scheduler / server handshake model，
+    才能让 EStart 继续启动 SplashScreen/window server。
 
 ---
 
