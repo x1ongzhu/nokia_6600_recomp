@@ -696,6 +696,15 @@ handle `0x32`）。说明这个 wait 等的是**真实启动的线程**，不是
 status 写完。下一步需要给 handle 0x32 一个 DThread/server 对象，而
 不是继续 HLE status。验收：`tools/test_round75.sh`。
 
+### round 76：DThread clone 仍不能完成 wait
+
+B7e 的 object-index fetch 对所有 handle 返回当前 DThread
+（`0x80003000`）。在 `0x80004600` 克隆一个同 vtable/process/request/
+objidx 的线程并接到 fetch literal `0xffff041c`，EStart 仍停在
+`0x50398660`，`[r5]=0x80000001`（KRequestPending）。说明缺的是
+**真实 request/server completion**，不是另一个 DThread 形状的对象。
+验收：`tools/test_round76.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -758,6 +767,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 给 handle 0x32 建 DThread/server 对象：round 75 已证明 NOP wait
-   分支后会立刻重试 StartThread。下一步实现 minimal scheduler 或
-   fake DThread，而不是继续 HLE status。
+8. 实现真实 request/server completion：round 76 已证明 DThread clone
+   不足，wait status 仍是 KRequestPending。下一步完成 request 并交付
+   消息，或实现 minimal scheduler/server。

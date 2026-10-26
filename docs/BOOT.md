@@ -650,6 +650,14 @@ handle `0x32`）。说明这个 wait 等的是**真实启动的线程**；下一
 给 handle 0x32 一个 DThread/server 对象，而不是继续 HLE status。
 验收 `tools/test_round75.sh`。
 
+### 2.29 round 76：DThread clone 仍不能完成 wait
+
+在 `0x80004600` 克隆一个同 vtable/process/request/objidx 的 DThread，
+并接到 object-index fetch literal `0xffff041c`，EStart 仍停在
+`0x50398660`，`[r5]=0x80000001`（KRequestPending）。说明缺的是
+**真实 request/server completion**，不是另一个 DThread 形状的对象。
+验收 `tools/test_round76.sh`。
+
 ---
 
 ## 3. EUser 导入映射

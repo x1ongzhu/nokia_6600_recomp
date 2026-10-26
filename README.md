@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 75)
+## Status (2026-10-26, round 76)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -87,7 +87,7 @@ first unresolved import; round 70 adds wait completion; round 71 rebinds the
 global CBase slot and advances EStart past the zero-vtable object; round 72
 pins the app slot/export offset; round 73 shows the next EStart blocker is the
 service-start handshake/wait; round 74 fixes the nested SVC return; round 75 shows the wait needs a real
-started thread. What works:
+started thread; round 76 rules out a DThread-shaped clone. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -525,6 +525,12 @@ started thread. What works:
   DThread/server object for that handle, not another status HLE.
   `tools/test_round75.sh` pins the result.
 
+- [x] **DThread clone is not enough** (round 76): wiring a cloned
+  DThread at `0x80004600` into the object-index fetch still leaves
+  EStart's wait status at KRequestPending (`0x50398660`). The missing
+  piece is a real request/server completion, not another object graph.
+  `tools/test_round76.sh` pins the negative result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -676,7 +682,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round72.sh` | app slot `0x503b4338` = export 745, app expects export 747 (2-entry offset) |
 | `tools/test_round73.sh` | HLE EStart bad dispatch; 200k wait loop on handle `0x32`; no draw |
 | `tools/test_round74.sh` | nested SVC fix; EStart reaches `0x50398660` wait-status check |
-| `tools/test_round75.sh` | **current acceptance**: exiting the wait retries StartThread handle `0x32`; real thread/server needed |
+| `tools/test_round75.sh` | exiting the wait retries StartThread handle `0x32`; real thread/server needed |
+| `tools/test_round76.sh` | **current acceptance**: DThread clone still leaves the wait at KRequestPending; need request/server completion |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
