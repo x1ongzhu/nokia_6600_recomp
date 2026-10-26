@@ -633,6 +633,15 @@ stack descriptor，而 ROM 函数把它当 CBase 对象读
 framebuffer 仍 0 像素。说明这是 **service-start handshake**；下一步
 需要 minimal scheduler/server model。验收 `tools/test_round73.sh`。
 
+### 2.27 round 74：nested SVC return fix
+
+EStart 的 wait 从 SVC mode 进入 SVC。`exception_enter` 把 SVC bank LR
+覆盖成 PC+4，handler 的 `mov lr,pc` 又覆盖寄存器，`movs pc,lr` 无法
+恢复 caller，最终在 `0x50314f78` self-loop。新增 `NK_NESTED_SVC=1`：
+nested SVC 保留 caller LR，`movs pc,lr` 通过 bank LR 返回 caller。
+EStart 的 wait 返回后停在 `0x50398660` 的 wait-status check，不再撞
+`0x50314f78`；framebuffer 仍 0 像素。验收 `tools/test_round74.sh`。
+
 ---
 
 ## 3. EUser 导入映射

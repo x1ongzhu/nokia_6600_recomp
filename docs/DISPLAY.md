@@ -668,6 +668,26 @@ EStart 又回到 wait loop（handle `0x32`）。所以这条 bad dispatch 属于
 thread scheduler / server model，而不是继续找像素路径。验收：
 `tools/test_round73.sh`。
 
+### round 74：nested SVC return fix
+
+EStart 的 wait 从 **SVC mode** 进入 SVC。`exception_enter` 把 SVC bank
+LR 覆盖成 PC+4，handler 的 `mov lr,pc` 又覆盖寄存器，`movs pc,lr`
+无法恢复 caller，最终在 `0x50314f78` self-loop。
+
+新增 `NK_NESTED_SVC=1`：nested SVC 保留 caller LR，`movs pc,lr` 通过
+bank LR 返回 caller。结果：
+
+```
+stop: budget (0) at 0x50398660
+insns=200000
+mmio: 1720 reads, 0 writes
+framebuffer: 0 non-zero bytes
+```
+
+EStart 的 wait 返回后停在 `0x50398660` 的 wait-status check，不再撞
+`0x50314f78` 的 pre-handler self-loop。下一步是完成该
+TRequestStatus。验收：`tools/test_round74.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -730,7 +750,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 实现 minimal thread scheduler / server handshake：round 73 已证明
-   EStart 的 bad dispatch 是 service-start 握手，HLE 后仍回到
-   `0x50314f78` wait loop。下一步让 handle 0x32 的线程/服务真正推进，
-   而不是继续找绘制调用。
+8. 完成 EStart 的 wait status：round 74 修好 nested SVC return 后，
+   停在 `0x50398660` 的 wait-status check。下一步让该
+   TRequestStatus 真正完成，或实现 server 完成路径。

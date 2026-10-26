@@ -131,6 +131,9 @@
  *   NK_SWI_COMPLETE=0x4d    comma-separated service indices modelled as
  *                           "request already complete": write 0 to [r0]
  *   NK_SWI_LOG=n            log the first n direct SWI dispatches (default 16)
+ *   NK_NESTED_SVC=1         keep the caller LR for an SVC entered from SVC
+ *                           mode; fixes the 0x50314f78 pre-handler self-loop
+ *                           (round 74, off by default)
  *   NK_FAKE_THREAD=1        install the round-18/19 minimal current-thread
  *                           object at [0x800017d4] (legacy stand-in; the
  *                           process+0x38 field was misread as a heap)

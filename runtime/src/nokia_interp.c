@@ -23,6 +23,8 @@
 #include "nokia_rt.h"
 
 static int g_bank_log;
+static int g_nested_svc_fix;
+static int g_nested_svc_pending;
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -292,7 +294,16 @@ static int swi_exception(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
     (void)imm;
     if (!ip->swi_exception) return 0;
     uint32_t vector = (c->cp15_c1 & 0x2000u) ? 0xffff0008u : 0x8u;
-    exception_enter(c, NK_MODE_SVC, vector, pc + insn_size, c->cpsr);
+    uint32_t link = pc + insn_size;
+    int from_svc = (c->cpsr & 0x1fu) == NK_MODE_SVC;
+    g_nested_svc_pending = 0;
+    if (g_nested_svc_fix && from_svc) {
+        /* A nested SVC returns through the caller's LR, not the instruction
+         * after the SVC.  Keep that LR in the SVC bank for `movs pc,lr`. */
+        g_nested_svc_pending = 1;
+        link = c->r[14];
+    }
+    exception_enter(c, NK_MODE_SVC, vector, link, c->cpsr);
     return 1;
 }
 
@@ -1210,6 +1221,21 @@ static int arm_step(nk_cpu_t* c, nk_interp_t* ip) {
                  * functions also use `mov pc, lr` as an ordinary return. */
                 if (s && ip->banked) {
                     int i = mode_idx(c->cpsr);
+                    if (g_nested_svc_fix && g_nested_svc_pending && i == 3 &&
+                        c->bank[i].spsr_valid) {
+                        /* Nested SVC: LR was clobbered by the handler's
+                         * `mov lr,pc`, but the bank still holds the caller's
+                         * LR.  Return there and bypass the 0x50314f78
+                         * bx-lr self-loop. */
+                        uint32_t nc = c->bank[i].spsr;
+                        uint32_t ret = c->bank[i].lr;
+                        c->bank[i].spsr_valid = 0;
+                        g_nested_svc_pending = 0;
+                        banked_set_cpsr(c, nc, 1);
+                        c->r[14] = ret;
+                        c->r[15] = ret & ~1u;
+                        return 0;
+                    }
                     if (i != 0 && c->bank[i].spsr_valid) {
                         uint32_t nc = c->bank[i].spsr;
                         c->bank[i].spsr_valid = 0;
@@ -1754,6 +1780,7 @@ void nk_interp_init(nk_interp_t* ip) {
     ip->free_pc = 0x5038e3d8u;    /* EUser RHeap::Free */
     ip->alloc_log = 16;
     g_bank_log = getenv("NK_BANK_LOG") != NULL;
+    g_nested_svc_fix = getenv("NK_NESTED_SVC") != NULL;
 }
 
 /* The 6600 executes code from ROM (0x50000000), the pre-MMU low alias
