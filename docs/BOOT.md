@@ -658,6 +658,13 @@ handle `0x32`）。说明这个 wait 等的是**真实启动的线程**；下一
 **真实 request/server completion**，不是另一个 DThread 形状的对象。
 验收 `tools/test_round76.sh`。
 
+### 2.30 round 77：direct dispatch 仍撞同一 handshake
+
+`NK_SWI_DIRECT=1` + `NK_SWI_COMPLETE=0x4d` 下，EStart 仍停在
+`0x00a04d08`（12,305 条、1,719 次 MMIO 读、framebuffer 0）。说明
+EStart 的 blocker 是 service-start handshake，与 SVC 模型无关。
+验收 `tools/test_round77.sh`。
+
 ---
 
 ## 3. EUser 导入映射

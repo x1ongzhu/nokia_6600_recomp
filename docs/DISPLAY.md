@@ -705,6 +705,14 @@ objidx 的线程并接到 fetch literal `0xffff041c`，EStart 仍停在
 **真实 request/server completion**，不是另一个 DThread 形状的对象。
 验收：`tools/test_round76.sh`。
 
+### round 77：direct dispatch 仍撞同一 handshake
+
+把 SVC 模型切到 `NK_SWI_DIRECT=1`（并 model SVC 0x4d complete），
+EStart 仍停在 `0x00a04d08`，12,305 条、1,719 次 MMIO 读、
+framebuffer 0。说明 EStart 的 blocker 是 **service-start
+handshake**，与 banked SVC/exception 模型无关；下一步仍是真实
+request/server completion。验收：`tools/test_round77.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -767,6 +775,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 实现真实 request/server completion：round 76 已证明 DThread clone
-   不足，wait status 仍是 KRequestPending。下一步完成 request 并交付
-   消息，或实现 minimal scheduler/server。
+8. 实现真实 request/server completion：round 76/77 已证明 DThread
+   clone 和换 SVC 模型都不够。下一步完成 request 并交付消息，或实现
+   minimal scheduler/server。

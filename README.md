@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 76)
+## Status (2026-10-26, round 77)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -87,7 +87,8 @@ first unresolved import; round 70 adds wait completion; round 71 rebinds the
 global CBase slot and advances EStart past the zero-vtable object; round 72
 pins the app slot/export offset; round 73 shows the next EStart blocker is the
 service-start handshake/wait; round 74 fixes the nested SVC return; round 75 shows the wait needs a real
-started thread; round 76 rules out a DThread-shaped clone. What works:
+started thread; round 76 rules out a DThread-shaped clone; round 77 rules
+out the SVC model as the blocker. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -531,6 +532,12 @@ started thread; round 76 rules out a DThread-shaped clone. What works:
   piece is a real request/server completion, not another object graph.
   `tools/test_round76.sh` pins the negative result.
 
+- [x] **Direct dispatch does not bypass the handshake** (round 77):
+  `NK_SWI_DIRECT=1` still stops EStart at `0x00a04d08` after 12,305
+  instructions with 1,719 MMIO reads. The blocker is the service-start
+  handshake, independent of the SVC/exception model.
+  `tools/test_round77.sh` pins the negative result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -683,7 +690,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round73.sh` | HLE EStart bad dispatch; 200k wait loop on handle `0x32`; no draw |
 | `tools/test_round74.sh` | nested SVC fix; EStart reaches `0x50398660` wait-status check |
 | `tools/test_round75.sh` | exiting the wait retries StartThread handle `0x32`; real thread/server needed |
-| `tools/test_round76.sh` | **current acceptance**: DThread clone still leaves the wait at KRequestPending; need request/server completion |
+| `tools/test_round76.sh` | DThread clone still leaves the wait at KRequestPending; need request/server completion |
+| `tools/test_round77.sh` | **current acceptance**: direct dispatch hits the same EStart handshake; SVC model is not the blocker |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
