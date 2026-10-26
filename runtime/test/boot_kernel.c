@@ -2361,6 +2361,13 @@ int main(int argc, char** argv) {
         }
         printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
     }
+    if (env_ulong("NK_MAP_APP_LOW", 0)) {
+        /* The direct app path copies ~400 KiB to 0x600000; on the phone this
+         * is a physical buffer, not MMIO.  Map it as RAM so the copy is not
+         * swallowed by the MMIO bus. */
+        if (nk_alloc_ram(&cpu, 0x600000u, 0x1000000u) == 0)
+            printf("app low buffer: mapped 0x600000..0x1600000\n");
+    }
     if (env_ulong("NK_DFC_EMPTY", 0)) {
         /* Direct app entry: the kernel's DFC queue at [0x80001c28] has not
          * been initialised by Kern::Init1.  Make it an empty TDblQue so the

@@ -182,7 +182,37 @@ executive 上下文，或改回 kernel scheduler。
 
 ---
 
-## 4. 还缺什么
+## 4. 开机画面：SplashScreen / EwSrv
+
+ROMFS 里的开机视觉链路：
+
+| 文件 | uid3 | 地址 | 入口 |
+|---|---|---|---|
+| `SplashScreen.exe` | `0x100059de` | `0x509eee20` | `0x509eee85` (Thumb) |
+| `SplashScreen.mbm` | — | `0x509efae0` | MBM 资源 |
+| `EwSrv.exe` | `0x10003b20` | `0x506a81a0` | `0x506a8205` (Thumb) |
+| `EStart.exe` | — | `0x503da440` | `0x503da4a5` |
+
+在稳定 app harness 里直接跑 `SplashScreen.exe`，会进入 `EwSrv` 代码，
+然后在 `0x506cbf1c` 遇到 undefined instruction：
+
+```
+509ef864 -> 0x506cbf1c, lr=0x509ef1ab
+bytes: ec ff 20 1c ...
+```
+
+目标字节既不是有效 Thumb 也不是 ARM 入口，而是**数据/未初始化函数指针**。
+`NK_CALL_INFER=1` 也无效，所以不是 CPU 解码边界，而是 EwSrv 的
+import/vtable 还没有初始化。下一步是 EwSrv 的 import 绑定/窗口服务状态，
+而不是继续调 CPU。
+
+另外，direct 路径对 `0x600000` 的 400 KB+ 写入不是 framebuffer，而是
+一次**长度错误的数据 copy**；`NK_MAP_APP_LOW=1` 把
+`0x600000..0x1600000` 映射成 RAM 后，copy 仍继续越过 16 MiB。
+
+---
+
+## 5. 还缺什么
 
 1. **进程启动**：`FbServ.exe` 还没有被 kernel 作为进程加载。当前
    supervisor 死在 `RThread::Resume(0x32)` 的 thread-start 等待上
@@ -196,7 +226,7 @@ executive 上下文，或改回 kernel scheduler。
 
 ---
 
-## 5. 下一步
+## 6. 下一步
 
 1. 修直接 FbServ 的对象初始化：跑 `.init_array`/constructors，或让
    kernel 的 process loader 正常启动 FbServ。

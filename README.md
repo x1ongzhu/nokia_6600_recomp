@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 45)
+## Status (2026-10-26, round 46)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -238,6 +238,16 @@ stable executive loop. What works:
   The direct `NK_SWI_DIRECT` path also reaches the 500k budget, with a wild
   `0x600000` clear as its new frontier.
 
+- [x] **Splash-screen route** (round 46): the first visual is the
+  splash/startup screen. ROMFS has `SplashScreen.exe` (uid3 `0x100059de`,
+  entry `0x509eee85` Thumb) + `SplashScreen.mbm`, `EwSrv.exe` (uid3
+  `0x10003b20`, entry `0x506a8205`) and `EStart.exe` (`0x503da440`). Running
+  SplashScreen in the stable app harness reaches EwSrv code and stops on the
+  bad function/data pointer `0x506cbf1c` (`lr=0x509ef1ab`), not a CPU decode
+  limit. The next step is EwSrv import/vtable initialisation. The direct
+  path's `0x600000` copy is a multi-MB data copy with a bad length, not the
+  framebuffer (`NK_MAP_APP_LOW=1` maps it but does not remove the frontier).
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -361,7 +371,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round42.sh` | the 1.5M blocker is a post-executive stack/context switch, not the vtable or wait SWIs |
 | `tools/test_round43.sh` | real SVC exception model; the 1.5M FbServ run was no-op SWIs, not a kernel path |
 | `tools/test_round44.sh` | FbServ's first `svc #0x6c`, user/kernel bit-23 selector, and the dispatch-table frontier |
-| `tools/test_round45.sh` | **current acceptance**: stable real-SVC FbServ, full 2M budget in the EUser wait loop |
+| `tools/test_round45.sh` | stable real-SVC FbServ, full 2M budget in the EUser wait loop |
+| `tools/test_round46.sh` | **current acceptance**: splash-screen route; SplashScreen reaches EwSrv and stops on the bad pointer `0x506cbf1c` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
