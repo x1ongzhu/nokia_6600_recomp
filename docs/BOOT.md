@@ -745,6 +745,13 @@ vtable 也失败，framebuffer 仍 0。`this` 是 EStart 的 stack params
 block，不是 class 实例；需要真实对象实例（连同字段）。验收
 `tools/test_round87.sh`。
 
+### 2.41 round 88：global CBase 当 this 也失败
+
+`NK_SUPERVISOR_THIS` 强制 `this=0x80600008` 时 supervisor 在 29,295
+条跳到数据地址 `0x80000500`；`this=0x80600000` 则 null-call。两者都
+无 framebuffer。global CBase 也不是所需对象；必须恢复真实 class
+instance/server response。验收 `tools/test_round88.sh`。
+
 ---
 
 ## 3. EUser 导入映射

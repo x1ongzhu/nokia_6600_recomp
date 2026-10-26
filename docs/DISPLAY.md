@@ -840,6 +840,14 @@ EUser TTrap/leave，`lr=0x5038cb70`（`r1=0xfffffff8`）。
 class 实例；需要真实对象实例（连同字段）。验收：
 `tools/test_round87.sh`。
 
+### round 88：global CBase 当 this 也失败
+
+新增 `NK_SUPERVISOR_THIS`。强制 `this=0x80600008` 时 supervisor 在
+29,295 条跳到数据地址 `0x80000500`；`this=0x80600000` 则
+null-call。两者都无 framebuffer 像素。global CBase 也不是所需对象；
+必须恢复真实 class instance/server response。验收：
+`tools/test_round88.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -902,6 +910,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 构造 supervisor 的真实 class instance（字段 + vtable）：round 87
-   已证明换真实 vtable/method 仍失败。下一步从对象构造路径入手，
-   而不是只换指针。
+8. 恢复 supervisor 的真实 class instance/server response：round 87/88
+   已排除 vtable、global CBase、stack params。下一步从 ROM 恢复该
+   class 的构造路径，或改走 kernel process loader。
