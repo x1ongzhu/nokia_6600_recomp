@@ -1096,3 +1096,10 @@ round 106 的"三参数"更正撤回（静态证明：两处调用都只设 r0�
 残留）。补齐 `[thread+0x58]`（清理栈指针，`svc 0x74/0x75`）：此前
 `CleanupStack::PushL` 拿到空清理栈 panic `0x2c`。发布后 panic 消失，
 EFile 在绑定 PushL 时停在 `0xf0009b06`。验收 `tools/test_round107.sh`。
+
+### round 108：EFile 使用悬垂指针
+
+构造器 `0x503bdca4` 装了 `[obj]=0x503c80c4` 与 `[obj+0x18]=0xffff8001`，
+但实际对象前 0x18 字节被覆盖成队列节点（`[0]=0x5103559c`），尾部完好
+——内存被释放后重新分配。嫌疑是我们自造的 CCleanup 图让
+`Pop`/`PopAndDestroy` 销毁了活对象。验收 `tools/test_round108.sh`。

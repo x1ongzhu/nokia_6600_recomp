@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 107）
+最后更新：2026-10-27（round 108）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -965,6 +965,32 @@
     停在 `pc left the image 0xf0009b06`（新的 frontier）；默认 ROM 值
     的运行仍是干净退出（Thumb 1380）。
   - 验收 `tools/test_round107.sh`。
+
+- **EFile 用到已释放内存的悬垂指针**（round 108）：
+  - 补齐 `thread+0x58` 并把槽 `0x503b37c4` 绑到单参数 PushL 形状后，
+    EFile 停在 `0x503bfcfa` 的取方法指针处：
+    ```
+    503bfcf2  adds r4, r0          ; r4 = 0x510355e0（来自 0x503bdc5c）
+    503bfcf8  ldr r0, [r4]
+    503bfcfa  ldr r1, [r0, #0x10]  ; r0 = 0x5103559c（不是 vtable！）
+    503bfcfe  bl 0x503c5980        ; bx r1 → 0xf0009b06
+    ```
+  - 而构造器 `0x503bdca4`（由 `0x503bdc5c` 调用）**确实装了 vtable**：
+    ```
+    503bdcb0  ldr r0,[pc,#0x10]   ; = 0x503c80c4（EFile 自己的 .rdata vtable）
+    503bdcb2  str r0,[r4]
+    503bdcb4  ldr r0,[pc,#0x10]   ; = 0xffff8001（kernel handle 常量）
+    503bdcb6  str r0,[r4,#0x18]
+    503bdcba  str r0,#0 ；str r0,[r4,#0x1c]
+    ```
+  - dump `0x510355e0` 显示：**尾部的 `+0x18=0xffff8001`、`+0x1c=0`
+    仍然完好**（正是构造器写的），但**前 0x18 字节被覆盖**成类队列节点
+    （`[0]=0x5103559c`、`[0x10]=0x510355dc`）。
+  - 也就是说：**对象被释放并重新分配了**，EFile 手上的指针是悬垂的。
+    首要嫌疑就是我们**自造的 CCleanup 图**：`PushL` 现在能用了，但
+    配套的 `Pop`/`PopAndDestroy` 因为我们编的 `iBase/iTop/iNext` 布局
+    不对，销毁了不该销毁的对象。
+  - 验收 `tools/test_round108.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

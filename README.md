@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 107)
+## Status (2026-10-27, round 108)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -1079,7 +1079,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round104.sh` | first mapping of the EUser table shift (slot 0x503b37c4 -> export 9) |
 | `tools/test_round105.sh` | the shift is real but not a uniform rotation |
 | `tools/test_round106.sh` | static proof: the disputed call takes one argument; `tools/app_import_search.sh` |
-| `tools/test_round107.sh` | **current acceptance**: per-thread cleanup stack pointer at `thread+0x58` |
+| `tools/test_round107.sh` | per-thread cleanup stack pointer at `thread+0x58` |
+| `tools/test_round108.sh` | **current acceptance**: EFile dereferences a stale pointer to freed heap memory |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

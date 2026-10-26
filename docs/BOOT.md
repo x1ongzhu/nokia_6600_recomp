@@ -1306,3 +1306,24 @@ CCleanup 到 `+0x58`（`NK_NO_CLEANUP58=1` 可关闭对照）。
 效果：`0x2c` panic 消失；绑定 PushL 后 EFile 停在
 `pc left the image 0xf0009b06`；默认 ROM 值仍干净退出（Thumb 1380）。
 验收 `tools/test_round107.sh`。
+
+### 2.61 round 108：EFile 使用已释放内存的悬垂指针
+
+补齐 `thread+0x58` + 绑定单参数 PushL 后，EFile 停在 `0x503bfcfa`：
+
+```
+503bfcf2  adds r4, r0          ; r4 = 0x510355e0（0x503bdc5c 返回）
+503bfcf8  ldr r0, [r4]
+503bfcfa  ldr r1, [r0, #0x10]  ; r0 = 0x5103559c（不是 vtable）
+503bfcfe  bx r1                ; → 0xf0009b06
+```
+
+构造器 `0x503bdca4` 确实装了 `[r4] = 0x503c80c4`（EFile `.rdata`
+vtable）和 `[r4+0x18] = 0xffff8001`。dump `0x510355e0` 显示**尾部
+`+0x18/+0x1c` 完好**、**前 0x18 字节被覆盖**成队列节点
+（`[0]=0x5103559c`、`[0x10]=0x510355dc`）——对象被释放并重新分配，
+指针悬垂。
+
+首要嫌疑：**自造的 CCleanup 图**。`PushL` 现在能用，但配套
+`Pop`/`PopAndDestroy` 因我们编的 `iBase/iTop/iNext` 布局不对而销毁了
+不该销毁的对象。验收 `tools/test_round108.sh`。
