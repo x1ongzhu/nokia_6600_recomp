@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 64)
+## Status (2026-10-26, round 66)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -79,8 +79,9 @@ allocator header and the shared EUser export-table conflict. Round 63 adds the
 first app-side EUser import rebind, so SplashScreen's static init now
 constructs its CBase and returns cleanly instead of crashing on a zero
 vtable. Round 64 rebinds the app's TTrap wrapper too, which takes the real
-`0x509ef5fc` main path — currently blocked by a kernel SVC-return self-loop.
-What works:
+`0x509ef5fc` main path. Round 66 then rebinds the app's low allocator slot,
+removing the null-descriptor `0xe59ff028` writes; the remaining blocker is the
+app main's StartThread/SVC path. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -438,6 +439,15 @@ What works:
   `tools/test_round64.sh` pins the frontier; framebuffer still has no app
   pixels.
 
+- [x] **App low allocator rebind** (round 66): the null descriptor came from
+  `0x509ef5fc`'s `operator new(0x68)`, which uses EUser export index 2
+  (slot `0x503b379c`). The app expects `User::Alloc`, but the unpatched ROM
+  slot returns 0. `config/imports-app-main-alloc-6600.txt` rebinds it to
+  `0x503988f0`; the `0xe59ff028` MMIO writes are gone and the framebuffer is
+  untouched. The remaining blocker is the app main's StartThread/SVC path,
+  still self-looping at `0x50314f78` with `r1=0x32`.
+  `tools/test_round66.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -580,7 +590,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round61.sh` | real `SplashScreen.mbm` logo frame written through guest `Mem::Copy` |
 | `tools/test_round62.sh` | app-entry allocator cell header, StartThread completion, and shared EUser export-slot conflict |
 | `tools/test_round63.sh` | first app-side EUser import rebind; CBase vtable `0x503b359c`; static init returns cleanly |
-| `tools/test_round64.sh` | **current acceptance**: TTrap rebind exposes the app main path; kernel SVC-return self-loop at `0x50314f78` |
+| `tools/test_round64.sh` | TTrap rebind exposes the app main path; kernel SVC-return self-loop at `0x50314f78` |
+| `tools/test_round66.sh` | **current acceptance**: low allocator rebind removes `0xe59ff028`; remaining StartThread/SVC self-loop |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

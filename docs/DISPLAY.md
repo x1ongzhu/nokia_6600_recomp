@@ -512,6 +512,41 @@ overflow 对象，读 `[r0+0xc]` 就从低地址读回了 `0xe59ff028`。也就�
 TDes16Overflow 参数** 被格式化函数解引用。下一步应确认
 `0x509ef78c` 这个 app helper 的 import/ABI 是否又绑错。
 
+### round 66：low allocator rebind 消除 null descriptor
+
+`0x509ef5fc` 的 `operator new(0x68)` 走 EUser export index 2
+（slot `0x503b379c`）。app 链接的语义是 `User::Alloc`，但 ROM 原始
+slot 是另一个低 ordinal 函数并返回 0，于是 `r4=0`，格式化函数读到
+`[0+0xc]=0xe59ff028`。
+
+`config/imports-app-main-alloc-6600.txt` 增加：
+
+```
+0x503b379c 0x503988f0   # User::Alloc
+```
+
+结果：
+
+```
+app import rebind: 0x503b379c 0x5038ee04 -> 0x503988f0
+--- stop: budget (0) at 0x50314f78 ---
+mmio: 0 reads, 0 writes
+framebuffer: 0 non-zero bytes
+```
+
+`0xe59ff028` 的 descriptor/format 写完全消失。剩余 blocker 是 app
+main 的 StartThread/SVC 路径，仍在 `0x50314f78` self-loop；最终寄存器
+`r1=0x32` 与 thread start handle 一致。验收：
+`tools/test_round66.sh`。
+
+补充 control：把 SVC 模型切到 direct dispatch
+（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）后，同一条 main 路径不再撞
+banked SVC self-loop，而是跑到 EwSrv `0x506ca5e4` null call
+（1,561 条）；再把 EwSrv export slot `0x506ce44c` 指到
+`0x506ca57f`，又回到已知的 `0x506cd868 -> 0xb5f00000` wild jump。
+这说明 banked SVC return 和 EwSrv jump-table relocation 是两条独立
+的 blocker，direct dispatch 可以先绕开前者。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -574,7 +609,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 修 SVC exception-return/SPSR：round 64 已用 TTrap rebind 进入
-   `0x509ef5fc` 的 main 路径，但第一条 `svc #0x6c` 的 kernel return
-   在 `0x50314f78` self-loop。先修这个 return，再看 main 路径的
-   descriptor/EwSrv 问题。
+8. 追 app main 的 StartThread/SVC self-loop：round 66 已修掉
+   low allocator/null descriptor，`0xe59ff028` 消失；现在
+   `0x50314f78` 的最终寄存器 `r1=0x32` 指向 thread start handle。
+   先确认该 SVC 的线程/信号量状态，再看 EwSrv。

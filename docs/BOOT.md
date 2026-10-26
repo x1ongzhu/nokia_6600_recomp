@@ -546,6 +546,16 @@ stack 溢出；下一步查 `0x509ef78c` 的 import/ABI。
 实验 map 在 `config/imports-app-main-6600.txt`；默认 app map 仍只做
 CBase rebind。验收 `tools/test_round64.sh`。
 
+### 2.20 round 66：low allocator rebind 消除 null descriptor
+
+根因是 `0x509ef5fc` 的 `operator new(0x68)` 走 EUser export index 2
+（slot `0x503b379c`）。app 期望 `User::Alloc`，ROM 原始 slot 却是另一个
+低 ordinal 函数并返回 0。把该 slot 重绑到 `0x503988f0`
+（`config/imports-app-main-alloc-6600.txt`）后，`0xe59ff028` 的 MMIO
+写完全消失；framebuffer 仍无像素。剩余 blocker 是 app main 的
+StartThread/SVC 路径，仍在 `0x50314f78` self-loop，最终寄存器
+`r1=0x32` 与 thread start handle 一致。验收 `tools/test_round66.sh`。
+
 ---
 
 ## 3. EUser 导入映射

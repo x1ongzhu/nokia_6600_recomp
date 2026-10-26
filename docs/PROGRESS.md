@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 64）
+最后更新：2026-10-26（round 66）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -383,7 +383,22 @@
     进入 `0x50383e80` 时 **r0=0**、r1=`0x54442d18`，函数把 r0 当
     descriptor/TDes16Overflow 解引用 `[r0+0xc]`，从低地址读回
     `0xe59ff028`。所以问题不是 cleanup stack 溢出，而是 **null
-    descriptor/overflow 参数**；下一步查 `0x509ef78c` 的 import/ABI。
+    descriptor/overflow 参数**。
+
+- **app low allocator rebind**（round 66）：null descriptor 的根因是
+  `0x509ef5fc` 的 `operator new(0x68)` 走 EUser export index 2
+  （slot `0x503b379c`）。app 链接的语义是 `User::Alloc`，但 ROM 原始
+  slot 是另一个低 ordinal 函数并返回 0，于是 `r4=0`、格式化函数读到
+  `[0+0xc]=0xe59ff028`。新增 `config/imports-app-main-alloc-6600.txt`，
+  把 `0x503b379c` 重绑到 `0x503988f0`。结果：`0xe59ff028` 的 MMIO
+  写完全消失，framebuffer 仍无像素；剩余 blocker 变成 app main 的
+  StartThread/SVC 路径，仍在 `0x50314f78` self-loop。验收
+  `tools/test_round66.sh`。
+  - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
+    撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
+    加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
+    `0x506cd868 -> 0xb5f00000` wild jump。说明 banked SVC return 和
+    EwSrv jump-table relocation 是两条独立 blocker。
   - 该实验放在 `config/imports-app-main-6600.txt`，默认 app map
     （`imports-app-6600.txt`）仍只做 round-63 的 CBase rebind，保持
     干净返回。framebuffer 仍无 app 像素。
@@ -688,7 +703,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基并完成首个 app import rebind；round 64 暴露 splash main 路径，当前被 kernel SVC-return/SPSR self-loop 卡住 |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基并完成首个 app import rebind；round 64 暴露 splash main 路径；round 66 修掉 low allocator/null descriptor，当前被 app main 的 StartThread/SVC self-loop 卡住 |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -722,10 +737,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
 11. 找到 SplashScreen 真正的 main / active object 驱动：round 64 用
-    TTrap rebind 已经进入 `0x509ef5fc` 的 main/constructor 路径；当前
-    卡在该路径的第一条 `svc #0x6c` 的 kernel return（`0x50314f78`
-    self-loop）。下一步修 SVC exception-return/SPSR，而不是继续猜
-    active scheduler。
+    TTrap rebind 已经进入 `0x509ef5fc` 的 main/constructor 路径；round
+    66 修掉 low allocator/null descriptor，`0xe59ff028` 已消失；当前
+    卡在 app main 的 StartThread/SVC 路径（`0x50314f78` self-loop）。
+    下一步追该路径的线程/信号量状态，而不是继续猜 active scheduler。
 
 ---
 

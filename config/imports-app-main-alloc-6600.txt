@@ -1,0 +1,17 @@
+# imports-app-main-alloc-6600.txt - app main path with the low allocator slot
+#
+# Round 64's main-path map (imports-app-main-6600.txt) exposed the
+# 0x509ef5fc constructor, but its 0x68-byte operator new call goes through
+# EUser export index 2 (slot 0x503b379c).  The app expects User::Alloc there;
+# without the kernel map the ROM slot is a different low-ordinal function and
+# returns 0, so the constructor result is null and TDes16 formatting reads
+# [0+0xc] = 0xe59ff028.
+#
+# Rebinding only this app-side slot to 0x503988f0 (User::Alloc) removes the
+# 0xe59ff028 writes and leaves the next blocker: the app main's StartThread /
+# SVC path ends in the 0x50314f78 self-loop.
+#
+# Format: <slot> <target>
+0x503b4338 0x50383c84
+0x503b4980 0x5038cae8
+0x503b379c 0x503988f0
