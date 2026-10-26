@@ -591,6 +591,28 @@ SVC/pre-handler 路径 `0x50314f68`。下一步是它等待的线程/信号量�
 （很可能是 SplashScreen 或 window server 的启动）。验收：
 `tools/test_round69.sh`。
 
+### round 70：EStart wait HLE 与 zero-vtable frontier
+
+加 `NK_WAIT_HLE=1` 完成 EStart 的 wait-any-request 后，EStart 从
+200k spin 推进到 **12,136 条 + 1,720 次 MMIO 读**，随后停在一个
+zero-vtable 对象：
+
+```
+r5 = 0x80600000, [r5] = 0
+0x503dac78  ldr r2,[r0,#8] -> 0xe59ff028
+0x503dac7e  bl 0x503db35c (bx r2)
+lr = 0x503dac83
+```
+
+对象来自 EStart constructor `0x503db640 -> slot 0x5034c638`
+（静态值 `0x5034c74d`）。把该 slot 重绑到 EUser CBase constructor
+`0x50383c84` 没有改变结果，说明真正的 EStart 对象 constructor 还没
+找到。进一步看，`r5=0x80600000` 的分配来自
+`0x503dac48 -> 0x503db560 -> slot 0x503b4f14`（静态值
+`0x503a35b4`）；把这个 slot 也重绑到 `0x50383c84` 仍不改变，
+所以它不是 CBase-style constructor。framebuffer 仍 0 像素。验收：
+`tools/test_round70.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -653,6 +675,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 追 EStart 的 wait/thread 事件：round 69 已把 EStart 跑到 200k，
-   当前停在 `0x50314f68` 的 SVC/pre-handler 路径；下一步确认它等待的
-   线程/信号量（SplashScreen / window server）。
+8. 找 EStart 真正的对象 constructor：round 70 加 wait HLE 后已推进到
+   12,136 条，当前停在 zero-vtable 对象 `0x80600000`（slot
+   `0x5034c638`）。先确认该 slot 的正确 target，再看它是否开始
+   SplashScreen/window server。

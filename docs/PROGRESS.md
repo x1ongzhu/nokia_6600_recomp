@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 69）
+最后更新：2026-10-26（round 70）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -417,6 +417,21 @@
   **200,000 条**，停在 kernel SVC/pre-handler 路径
   `0x50314f68`；`mmio: 0 reads, 0 writes`，framebuffer 仍 0 像素。
   下一步是它等待的线程/信号量事件。验收 `tools/test_round69.sh`。
+
+- **EStart wait HLE 与 zero-vtable frontier**（round 70）：加
+  `NK_WAIT_HLE=1` 完成 EStart 的 wait-any-request 后，EStart 从 200k
+  spin 推进到 **12,136 条 + 1,720 次 MMIO 读**，随后停在一个
+  zero-vtable 对象：
+  `r5=0x80600000`，`[r5]=0`，`vtable+8 -> 0xe59ff028`，
+  `lr=0x503dac83`。对象来自 EStart constructor
+  `0x503db640 -> slot 0x5034c638`（静态值 `0x5034c74d`）。把该 slot
+  重绑到 EUser CBase constructor `0x50383c84` 没有改变结果，说明
+  真正的 EStart 对象 constructor 还没找到。进一步看，
+  `r5=0x80600000` 的分配来自
+  `0x503dac48 -> 0x503db560 -> slot 0x503b4f14`（静态值
+  `0x503a35b4`）；把这个 slot 也重绑到 `0x50383c84` 仍不改变，
+  所以它不是 CBase-style constructor。framebuffer 仍 0 像素。
+  验收 `tools/test_round70.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -730,7 +745,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart 并绑定其首个 import，当前 EStart 跑满 200k 后停在 SVC/wait 路径 |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70 加 wait HLE 后 EStart 推进到 12k 条并暴露 zero-vtable constructor frontier |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -763,9 +778,10 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. EStart 已能跑满 200k（round 69），当前停在
-    `0x50314f68` 的 kernel SVC/pre-handler 路径；下一步追它等待的
-    线程/信号量事件（很可能是 SplashScreen 或 window server 的启动）。
+11. EStart + wait HLE 已推进到 12,136 条（round 70），当前停在
+    zero-vtable 对象 `0x80600000`（`vtable+8 -> 0xe59ff028`）。
+    下一步找 EStart 真正的对象 constructor（slot `0x5034c638` 的
+    正确 target），而不是继续 wait/scheduler。
 
 ---
 

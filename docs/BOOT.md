@@ -579,6 +579,26 @@ export_dir/import fixup。
 0 writes`，framebuffer 仍 0 像素。下一步是它等待的线程/信号量事件。
 验收 `tools/test_round69.sh`。
 
+### 2.23 round 70：EStart wait HLE 与 zero-vtable frontier
+
+加 `NK_WAIT_HLE=1` 后，EStart 从 200k wait spin 推进到 **12,136 条 +
+1,720 次 MMIO 读**，随后停在 zero-vtable 对象：
+
+```
+r5 = 0x80600000, [r5] = 0
+0x503dac78  ldr r2,[r0,#8] -> 0xe59ff028
+0x503dac7e  bl 0x503db35c (bx r2)
+lr = 0x503dac83
+```
+
+对象来自 EStart constructor `0x503db640 -> slot 0x5034c638`
+（静态值 `0x5034c74d`）。重绑该 slot 到 `0x50383c84` 未改变结果。
+`r5=0x80600000` 的分配实际来自
+`0x503dac48 -> 0x503db560 -> slot 0x503b4f14`（静态
+`0x503a35b4`）；把该 slot 也重绑到 `0x50383c84` 仍不改变，说明它
+不是 CBase-style constructor。framebuffer 仍 0 像素。验收
+`tools/test_round70.sh`。
+
 ---
 
 ## 3. EUser 导入映射
