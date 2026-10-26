@@ -1166,3 +1166,20 @@ kernel 服务读的两块启动状态，直接 E32 入口启动从不建立：
 
 两开关均为 opt-in。新 frontier：`0x3a` 空指针解引用。
 验收 `tools/test_round98.sh`。
+
+### 2.52 round 99：handle 查找槽保留 kernel 期变体
+
+`0x3a` frontier 定位：last pcs 停在 `CObjectIx::At`（`0x50380270`）的
+`ldr ip,[ip,#0x14]; bx ip`，`ip=0x3a`。对象索引 `0x80600e98` 由 kernel
+构造（ctor `0x50384d44`：vtable `0x503b36f8`、`+0x10=1`、
+`+0x14=0` 即条目数组未分配）。
+
+- ROM 的 At（槽 `0x503b3948` 的镜像值 `0x50380270`）解引用空数组 →
+  跳 `0x3a`；
+- kernel 构建的变体（`0x5038e4b4`，map 装的值）读到 count=0，安全返 0。
+
+故 `NK_IMPORTMAP_REVERT` 必须跳过这一槽：新增
+`NK_IMPORTMAP_NO_REVERT=<hex,...>`。回滚数 236→235，`0x3a` 消失，
+线程经 trap frame 干净回卷。剩余 blocker：EFile 构造服务器名时
+EUser 描述符增长路径请求 `0xb63a74` 字节的伪 ReAlloc。
+验收 `tools/test_round99.sh`。

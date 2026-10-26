@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 98）
+最后更新：2026-10-27（round 99）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -769,6 +769,26 @@
     再发布线程堆后不再有分配拒绝，新 frontier 是 `0x3a` 的空指针解引用。
   - 两个开关都是 opt-in（默认关），round 97 等既有测试不受影响。
   - 验收 `tools/test_round98.sh`（两次运行）。
+
+- **handle 查找槽必须保留 kernel 期变体**（round 99）：round 98 的
+  `0x3a` frontier 定位到了。
+  - last pcs 停在 `CObjectIx::At`（`0x50380270`）的
+    `ldr ip,[ip,#0x14]; bx ip`，`ip=0x3a`。
+  - 对象索引 `0x80600e98` 是 **kernel 建的**：构造器 `0x50384d44`
+    装 vtable `0x503b36f8`、`+0x10 = 1`（iCount=1）、`+0x14 = 0`
+    （条目数组**未分配**，要等第一次登记才建）。
+  - **ROM 的 At（`0x50380270`，也就是槽 `0x503b3948` 在镜像里的值）**
+    会解引用这个空数组 → 跳 `0x3a`；而 **kernel 构建的变体
+    （`0x5038e4b4`，就是 `config/imports-r29-6600.txt` 装的值）**
+    读到的 count 是 0，安全返回 0。
+  - 所以 `NK_IMPORTMAP_REVERT` **不能回滚这一个槽**。新增
+    `NK_IMPORTMAP_NO_REVERT=<hex,...>` 列出保留 kernel 期值的槽。
+  - 效果：回滚数 **236 → 235**，`0x3a` 崩溃消失，线程通过 trap frame
+    干净回卷。剩余 blocker 是 **一次 11.9 MB 的伪 ReAlloc**：EFile 构造
+    服务器名时走 EUser 的描述符增长路径（`0x5039c37c`，由
+    `0x5039c400` 调用）请求 `0xb63a74` 字节，被 round 94 的上限拒绝，
+    于是 EFile 以 `KErrNoMemory` 离开。
+  - 验收 `tools/test_round99.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

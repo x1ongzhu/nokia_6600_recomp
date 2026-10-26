@@ -1024,3 +1024,12 @@ EUser export 757 → `svc #0x1c`，仅当返回 -1（KErrNotFound）才继续；
 干净回卷。`svc 0x6c` 返回 `[thread+0x34]`（线程堆），留 0 会让 guest
 带空分配器调 `RHeap`；`NK_THREAD_HEAP=<addr>` 后分配拒绝消失，新
 frontier 为 `0x3a`。验收 `tools/test_round98.sh`。
+
+### round 99：handle 查找槽保留 kernel 期变体
+
+`0x3a` 来自 `CObjectIx::At`（`0x50380270`）解引用对象索引
+`0x80600e98` 的空条目数组（ctor `0x50384d44` 令 `+0x14=0`）；
+kernel 变体 `0x5038e4b4` 读到 count=0 会安全返回。故新增
+`NK_IMPORTMAP_NO_REVERT=0x503b3948`：回滚数 236→235，`0x3a` 消失，
+线程干净回卷。剩余是一次 11.9 MB 的伪 ReAlloc（EFile 构造服务器名）。
+验收 `tools/test_round99.sh`。

@@ -1970,6 +1970,29 @@ static int      g_map_revert_done;
 
 static void importmap_revert(nk_cpu_t* c);
 
+/* Round 99: a few EUser export slots must keep the kernel-time rebind even
+ * for an application thread.  The handle -> object lookup is the first one:
+ * the object index at 0x80600e98 is built by the kernel (constructor
+ * 0x50384d44 installs vtable 0x503b36f8, iCount=1 at +0x10, and leaves the
+ * entry array at +0x14 null until something is registered).  The ROM's
+ * At (0x50380270) dereferences that null array and jumps to 0x3a, while the
+ * kernel build's variant (0x5038e4b4) reads a count that is zero and returns
+ * 0 safely.  NK_IMPORTMAP_NO_REVERT=<hex,...> lists slots that keep the
+ * kernel-time value. */
+static int importmap_keep_slot(uint32_t slot) {
+    const char* list = getenv("NK_IMPORTMAP_NO_REVERT");
+    if (!list) return 0;
+    while (*list) {
+        char* end = NULL;
+        unsigned long v = strtoul(list, &end, 0);
+        if (end == list) break;
+        if ((uint32_t)v == slot) return 1;
+        list = end;
+        while (*list == ',' || *list == ' ' || *list == '\t') list++;
+    }
+    return 0;
+}
+
 static void importmap_revert(nk_cpu_t* c) {
     if (g_map_revert_done || !g_map_revert_n) return;
     g_map_revert_done = 1;
@@ -2019,7 +2042,8 @@ static void bind_flat_imports(nk_cpu_t* cpu, nk_interp_t* ip,
                 }
                 if (getenv("NK_IMPORTMAP_REVERT") &&
                     g_map_revert_n < NK_MAP_REVERT_MAX &&
-                    v != target) {
+                    v != target &&
+                    !importmap_keep_slot(slot)) {
                     g_map_revert_addr[g_map_revert_n] = slot;
                     g_map_revert_old[g_map_revert_n] = v;
                     g_map_revert_n++;

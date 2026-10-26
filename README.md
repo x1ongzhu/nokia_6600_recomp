@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 98)
+## Status (2026-10-27, round 99)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -104,7 +104,8 @@ through the kernel start hand-off; round 95 stops kernel-time import rebinds
 from leaking into an app thread; round 96 isolates EFile's "FileServer" gate
 and the HLE-heap / guest-RHeap conflict; round 97 makes the application heap
 HLE-only; round 98 adds the per-thread trap frame and heap pointer that the
-kernel services read. What works:
+kernel services read; round 99 keeps one kernel-time rebind for the object
+index. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -765,6 +766,22 @@ kernel services read. What works:
   `NK_THREAD_HEAP=<addr>` publishes a heap and those rejections disappear.
   Both knobs are opt-in. `tools/test_round98.sh` pins both runs.
 
+- [x] **The handle-lookup slot keeps the kernel-time variant** (round 99):
+  round 98's `0x3a` frontier is `CObjectIx::At` (`0x50380270`) executing
+  `ldr ip,[ip,#0x14]; bx ip` with `ip=0x3a`. The object index at `0x80600e98`
+  is built by the kernel: constructor `0x50384d44` installs vtable
+  `0x503b36f8`, sets iCount=1 at `+0x10`, and leaves the entry array at
+  `+0x14` null until something is registered. The ROM's `At` (the image value
+  of slot `0x503b3948`) dereferences that null array, while the kernel
+  build's variant (`0x5038e4b4`, what the round-29 map installs) reads a zero
+  count and returns 0. `NK_IMPORTMAP_REVERT` therefore must skip this slot;
+  `NK_IMPORTMAP_NO_REVERT=<hex,...>` lists slots that keep the kernel-time
+  value. Reverts drop from 236 to 235, the `0x3a` crash is gone and the app
+  thread unwinds through its trap frame. The remaining blocker is one bogus
+  11.9 MB `ReAlloc` from EUser's descriptor-grow path (`0x5039c37c` via
+  `0x5039c400`) while EFile builds its server name.
+  `tools/test_round99.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -939,7 +956,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round95.sh` | `NK_IMPORTMAP_REVERT` keeps kernel-time rebinds out of the app thread |
 | `tools/test_round96.sh` | app thread is not starved; EFile's SVC 0x1c "FileServer" gate |
 | `tools/test_round97.sh` | application heap is HLE-only |
-| `tools/test_round98.sh` | **current acceptance**: per-thread trap frame and heap pointer; next frontier is the `0x3a` null dereference |
+| `tools/test_round98.sh` | per-thread trap frame and heap pointer |
+| `tools/test_round99.sh` | **current acceptance**: handle-lookup slot keeps the kernel-time variant; next frontier is a bogus 11.9 MB ReAlloc |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
