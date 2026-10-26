@@ -1169,7 +1169,8 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
             next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u |
                          (t ? NK_CPSR_T : 0u);
         }
-        if (getenv("NK_IMPORTMAP_REVERT") || getenv("NK_IMPORTMAP_APP"))
+        if (getenv("NK_IMPORTMAP_REVERT") || getenv("NK_IMPORTMAP_APP") ||
+            getenv("NK_EUSER_ROTATE"))
             importmap_revert(c);
         /* Round 102: the kernel's own boot cannot run without the HLE
          * allocator (it panics at 12,595 instructions when the allocator is
@@ -2010,6 +2011,29 @@ static void importmap_revert(nk_cpu_t* c) {
             nk_w32(c, g_map_revert_addr[i], g_map_revert_old[i]);
         printf("importmap: reverted %d kernel-time rebinds for the app thread\n",
                g_map_revert_n);
+    }
+    /* Round 104: the ROM's EUser export table is shifted by three relative
+     * to the .def that the ROM's applications were linked against.  Evidence:
+     * every application calls slot 0x503b37c4 (table entry 12) with a single
+     * pointer argument, but entry 12 holds 0x503988a8, a three-argument heap
+     * grow.  Three entries lower, entry 9 = 0x5037fca0, is exactly a
+     * one-argument CleanupStack::PushL (it takes r0, resolves the thread's
+     * cleanup stack and panics 0x2c/0x30 on null).  The kernel map encodes the
+     * same K -> K-3 rule, so NK_EUSER_ROTATE=<n> shifts the whole table. */
+    {
+        uint32_t rot = (uint32_t)env_ulong("NK_EUSER_ROTATE", 0);
+        if (rot) {
+            uint32_t edata = (uint32_t)env_ulong("NK_EUSER_EDATA", 0x503b3794u);
+            uint32_t n = (uint32_t)env_ulong("NK_EUSER_EXPORTS", 1788u);
+            if (n > 2048) n = 2048;
+            uint32_t from = (uint32_t)env_ulong("NK_EUSER_ROTATE_FROM", 6);
+            static uint32_t tmp[2048];
+            for (uint32_t i = 0; i < n; i++) tmp[i] = nk_r32(c, edata + 4 * i);
+            for (uint32_t i = from; i < n && i >= rot; i++)
+                nk_w32(c, edata + 4 * i, tmp[i - rot]);
+            printf("euser: rotated export entries %u..%u by %u\n", from, n - 1,
+                   rot);
+        }
     }
     /* Round 103: an application that was linked against a different EUser
      * .def revision needs its own rebinds, applied after the kernel-time ones

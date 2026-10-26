@@ -1066,3 +1066,11 @@ EFile 以**单参数**调用 EUser 槽 `0x503b37c4`（新对象 `CleanupStack`
 残留寄存器导致 `0x503c7180` 字节请求 → `KErrNoMemory`。新增
 `NK_IMPORTMAP_APP=<file>` 逐槽修正；对 export 6..44 扫描无效，说明
 app/ROM 的 EUser 不匹配比单槽更广。验收 `tools/test_round103.sh`。
+
+### round 104：EUser 导出表对 app 有系统性偏移
+
+163 个 ROM 镜像都以**单参数**调用槽 `0x503b37c4`，而 ROM 表项 12 是
+3 参数堆增长；表项 9（`0x5037fca0`）才是单参数 `CleanupStack::PushL`。
+绑定后 EFile 从该调用**正常返回**并继续 `0x503bfcf8`。整表旋转不均
+匀（`0xe92d4070` 失败）。新 frontier：`0x503bfcfa` 的 `[obj+0x10]==0`。
+验收 `tools/test_round104.sh`。

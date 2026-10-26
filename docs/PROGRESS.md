@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-27（round 103）
+最后更新：2026-10-27（round 104）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -865,6 +865,27 @@
     Thumb 数始终落在 1,281–1,450。说明 **app/ROM 的 EUser 不匹配
     比单个槽更广**，不是替换一个函数能解决的。
   - 验收 `tools/test_round103.sh`。
+
+- **EUser 导出表对 app 存在系统性偏移**（round 104）：确认 round 103
+  的错位不是 EFile 的问题。
+  - 槽 `0x503b37c4` 被 **163 个 ROM 镜像**导入；`SplashScreen`
+    （`0x509ef15c`：`mov r0,r4; bl`）和 `Starter`（`0x509ececc`：
+    `ldr r0,[sp]; bl`）也都是**单参数**调用。
+  - 而 ROM 表项 12 = `0x503988a8` 是 3 参数堆增长；**表项 9 =
+    `0x5037fca0`** 才是单参数的 `CleanupStack::PushL` 形状
+    （`push {r4,r5,lr}; mov r4,r0`，清理栈为空时 panic `0x2c`/`0x30`）。
+    即在这个序号上 **app 的 .def 比 ROM 表低 3**，和 kernel map 的
+    `K → K-3` 规则一致。
+  - **实测验证**：把 `0x503b37c4` 绑到 `0x5037fca0` 后，EFile
+    **从该调用正常返回**并继续执行 `0x503bfcf8`/`0x503bfcfe`
+    （之前是以 `KErrNoMemory` 离开）。
+  - 但**整表旋转是错的**：`NK_EUSER_ROTATE` 从 6/12/14 起旋转 3 位
+    都以 `pc left the image 0xe92d4070` 失败 —— **偏移不是均匀的**。
+  - 新 frontier：`0x503bfcfa` 处 `[obj+0x10] == 0`，EFile 取出函数指针
+    后 `bx r1`（`bl 0x503c5980`）→ 空调用。
+  - 新增工具开关 `NK_EUSER_ROTATE` / `NK_EUSER_ROTATE_FROM`
+    （导出表旋转，用于检验偏移假设）。
+  - 验收 `tools/test_round104.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

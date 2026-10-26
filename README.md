@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-27, round 103)
+## Status (2026-10-27, round 104)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -838,6 +838,20 @@ works:
   and the Thumb count stays between 1,281 and 1,450 - so the mismatch is
   broader than one slot. `tools/test_round103.sh` pins it.
 
+- [x] **The ROM EUser export table is shifted for applications** (round 104):
+  163 ROM images import slot `0x503b37c4`, and SplashScreen (`0x509ef15c`,
+  `mov r0,r4; bl`) and Starter (`0x509ececc`, `ldr r0,[sp]; bl`) call it with
+  a single pointer argument too. The ROM's entry 12 is `0x503988a8`, a
+  three-argument heap grow, while entry 9 (`0x5037fca0`) is the one-argument
+  CleanupStack::PushL shape (it panics 0x2c/0x30 on an empty cleanup stack).
+  So on this ordinal the application `.def` is three lower than the ROM table,
+  matching the kernel map's K -> K-3 rule. Binding that slot to `0x5037fca0`
+  makes EFile return from the call and continue at `0x503bfcf8` (before, it
+  left with KErrNoMemory). A global table rotation is wrong though:
+  `NK_EUSER_ROTATE` from 6/12/14 all fail at `0xe92d4070`, so the shift is not
+  uniform. New frontier: `[obj+0x10] == 0` at `0x503bfcfa`.
+  `tools/test_round104.sh` pins it.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -1017,7 +1031,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round100.sh` | oversized allocation traced and clamped |
 | `tools/test_round101.sh` | `NK_STUB_PC` neutralises guest RHeap housekeeping |
 | `tools/test_round102.sh` | the application thread runs on the kernel's real RHeap |
-| `tools/test_round103.sh` | **current acceptance**: app-time import rebinds; the app/ROM EUser mismatch is broader than one slot |
+| `tools/test_round103.sh` | app-time import rebinds; the app/ROM EUser mismatch is broader than one slot |
+| `tools/test_round104.sh` | **current acceptance**: first mapping of the EUser table shift (slot 0x503b37c4 -> export 9) |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

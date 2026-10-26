@@ -1240,3 +1240,18 @@ EUser `.def` 与 ROM 版本不同**。
 重绑。对 `0x503b37c4` 扫描 export 6..44：无绑定能解锁 EFile（最好为
 export 20/23/44 的预算自旋，Thumb 1,281–1,450），说明不匹配比单槽更广。
 验收 `tools/test_round103.sh`。
+
+### 2.57 round 104：EUser 导出表对 app 的系统性偏移
+
+槽 `0x503b37c4` 被 **163 个 ROM 镜像**导入；`SplashScreen`（`0x509ef15c`）
+与 `Starter`（`0x509ececc`）同样是**单参数**调用。ROM 表项 12 =
+`0x503988a8` 是 3 参数堆增长；**表项 9 = `0x5037fca0`** 才是单参数
+`CleanupStack::PushL` 形状（清理栈为空时 panic `0x2c`/`0x30`）。即该
+序号上 app 的 `.def` 比 ROM 表低 3，与 kernel map 的 `K → K-3` 一致。
+
+实测：绑定 `0x503b37c4 → 0x5037fca0` 后 EFile **从该调用返回**并继续
+`0x503bfcf8`（此前以 `KErrNoMemory` 离开）。整表旋转（`NK_EUSER_ROTATE`）
+从 6/12/14 起都会以 `pc left the image 0xe92d4070` 失败 —— 偏移不均匀。
+
+新 frontier：`0x503bfcfa` 的 `[obj+0x10] == 0` 空虚拟调用。
+验收 `tools/test_round104.sh`。
