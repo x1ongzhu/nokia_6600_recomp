@@ -831,6 +831,15 @@ EUser TTrap/leave，`lr=0x5038cb70`（`r1=0xfffffff8`）。
 需要真实 class vtable/method，而不只是一个合法指针。framebuffer
 仍 0。验收：`tools/test_round86.sh`。
 
+### round 87：真实 vtable/method 也救不了 stack params
+
+把 `[this+0x14]` 指向 `0x503b36d0`（+0xc 是真实方法
+`0x5038681c`），supervisor 仍在 30,852 条 null-call；
+`0x503b3518`/`0x503b3410`/`0x503b35a0` 也失败，framebuffer 仍 0。
+问题不只是 vtable 指针：`this` 是 EStart 的 stack params block，不是
+class 实例；需要真实对象实例（连同字段）。验收：
+`tools/test_round87.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -893,6 +902,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 找 supervisor 对象真实 class vtable/method：round 86 已证明
-   只换 vtable 指针会进入 leave。下一步从对象构造路径入手，而不是
-   造指针。
+8. 构造 supervisor 的真实 class instance（字段 + vtable）：round 87
+   已证明换真实 vtable/method 仍失败。下一步从对象构造路径入手，
+   而不是只换指针。

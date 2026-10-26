@@ -693,7 +693,8 @@ static void supervisor_object_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
     (void)ip; (void)pc;
     uint32_t thisp = c->r[4];
     if (thisp >= 0x80500000u && thisp < 0x80600000u)
-        nk_w32(c, thisp + 0x14u, 0x80003040u);
+        nk_w32(c, thisp + 0x14u,
+               (uint32_t)env_ulong("NK_SUPERVISOR_VTABLE", 0x80003040u));
 }
 
 static void timerq_pc_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {

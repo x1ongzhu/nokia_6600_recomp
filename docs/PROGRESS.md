@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 86）
+最后更新：2026-10-26（round 87）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -569,6 +569,14 @@
   EUser TTrap/leave，`lr=0x5038cb70`（`r1=0xfffffff8`）。
   说明需要真实 class vtable/method，而不只是一个合法指针。
   framebuffer 仍 0。验收 `tools/test_round86.sh`。
+
+- **真实 vtable/method 也救不了 stack params**（round 87）：把
+  `[this+0x14]` 指向 `0x503b36d0`（+0xc 是真实方法
+  `0x5038681c`），supervisor 仍在 30,852 条 null-call；
+  `0x503b3518`/`0x503b3410`/`0x503b35a0` 也失败，framebuffer 仍 0。
+  问题不只是 vtable 指针：`this` 是 EStart 的 stack params block，
+  不是 class 实例；需要真实对象实例（连同字段），而不只是 vtable。
+  验收 `tools/test_round87.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
@@ -882,7 +890,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 推进到 13k 条；round 72 钉住 slot/export offset；round 73 定位 service-start 握手；round 74 修 nested SVC return；round 75 证明 wait 等真实线程；round 76 证明 DThread clone 不足；round 77 证明 direct dispatch 绕不过 handshake；round 78/79 用 fake scheduler + auto-complete 让 EStart server 跑满 200k；round 80 用 Mem::Copy clamp 越过 wild copy；round 81 证明 fake stack sentinel 不足；round 82 完成 server run/return cycle；round 83 证明 0x00a04d08 不能简单 HLE；round 84 排除相邻 EUser slot target；round 85 诊断出 supervisor 把 stack params 当 CBase；round 86 证明只换 vtable 指针仍会 leave |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；round 62/63 修通 app-entry 地基与 import rebind；round 66 修掉 null descriptor；round 68/69 转向 EStart；round 70/71 推进到 13k 条；round 72 钉住 slot/export offset；round 73 定位 service-start 握手；round 74 修 nested SVC return；round 75 证明 wait 等真实线程；round 76 证明 DThread clone 不足；round 77 证明 direct dispatch 绕不过 handshake；round 78/79 用 fake scheduler + auto-complete 让 EStart server 跑满 200k；round 80 用 Mem::Copy clamp 越过 wild copy；round 81 证明 fake stack sentinel 不足；round 82 完成 server run/return cycle；round 83 证明 0x00a04d08 不能简单 HLE；round 84 排除相邻 EUser slot target；round 85 诊断出 supervisor 把 stack params 当 CBase；round 86 证明只换 vtable 指针仍会 leave；round 87 证明真实 vtable/method 也救不了 stack params |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -915,9 +923,9 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
    让 kernel 的 K-3 relocation 不再改写 app 共享的 EUser export slots。
 10. 修 EwSrv 的 jump table / literal relocation（round 62 的
     `0x506ca5e4`、`0x506cd866 -> 0xb5f00000`），再接 window server。
-11. supervisor 需要真实 class vtable/method：round 86 已证明只把
-    `[this+0x14]` 换成 B7e vtable 会进入 leave。下一步找该对象真实
-    vtable/class，而不是造指针。
+11. supervisor 需要真实 class instance（字段 + vtable）：round 87
+    已证明换真实 vtable/method 仍失败。下一步从对象构造路径
+    构造完整实例，而不是只换指针。
 
 ---
 

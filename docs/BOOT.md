@@ -737,6 +737,14 @@ zero-return stub，supervisor 在 30,988 条进入 EUser TTrap/leave
 （`lr=0x5038cb70`，`r1=0xfffffff8`）。需要真实 class
 vtable/method，而不只是一个合法指针。验收 `tools/test_round86.sh`。
 
+### 2.40 round 87：真实 vtable/method 也救不了 stack params
+
+把 `[this+0x14]` 指向 `0x503b36d0`（+0xc 是真实方法
+`0x5038681c`），supervisor 仍在 30,852 条 null-call；其他候选
+vtable 也失败，framebuffer 仍 0。`this` 是 EStart 的 stack params
+block，不是 class 实例；需要真实对象实例（连同字段）。验收
+`tools/test_round87.sh`。
+
 ---
 
 ## 3. EUser 导入映射
