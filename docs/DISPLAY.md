@@ -194,17 +194,26 @@ ROMFS 里的开机视觉链路：
 | `EStart.exe` | — | `0x503da440` | `0x503da4a5` |
 
 在稳定 app harness 里直接跑 `SplashScreen.exe`，会进入 `EwSrv` 代码，
-然后在 `0x506cbf1c` 遇到 undefined instruction：
+最初在 `0x506cbf1c` 遇到 undefined instruction：
 
 ```
 509ef864 -> 0x506cbf1c, lr=0x509ef1ab
 bytes: ec ff 20 1c ...
 ```
 
-目标字节既不是有效 Thumb 也不是 ARM 入口，而是**数据/未初始化函数指针**。
-`NK_CALL_INFER=1` 也无效，所以不是 CPU 解码边界，而是 EwSrv 的
-import/vtable 还没有初始化。下一步是 EwSrv 的 import 绑定/窗口服务状态，
-而不是继续调 CPU。
+进一步检查发现 export slot `0x506ce7d0` 存的是 `0x506cbf1d`，而真正的
+Thumb prologue 在 `0x506cbf1e`（`20 1c 10 bc 02 bc 08 47...`）。也就是
+**ROM build 的 export 值差 2 字节**，不是 CPU 解码问题。`NK_EWSRV_SNAP=1`
+按 E32 loader 的 Thumb +2 规则修正：
+
+```
+0x506cbf1d -> 0x506cbf1f
+```
+
+修正后 SplashScreen 跑满 **2,000,000 条**预算、0 undefined/unbound/
+recovery，停在 request-semaphore 的 Wait service `0x503244e4..f4`，
+在等客户端/消息，而不是崩溃。下一步是完成该 request，或 HLE
+window-server 的 draw 路径，把 splash 像素送进 framebuffer。
 
 另外，direct 路径对 `0x600000` 的 400 KB+ 写入不是 framebuffer，而是
 一次**长度错误的数据 copy**；`NK_MAP_APP_LOW=1` 把

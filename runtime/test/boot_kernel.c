@@ -2361,6 +2361,14 @@ int main(int argc, char** argv) {
         }
         printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
     }
+    if (env_ulong("NK_EWSRV_SNAP", 0)) {
+        /* The ROM build's EwSrv export slot 0x506ce7d0 holds 0x506cbf1d,
+         * two bytes before the real Thumb prologue at 0x506cbf1e.  Snap it
+         * like the E32 loader's export fixup so SplashScreen can call into
+         * EwSrv instead of hitting an undefined halfword. */
+        nk_w32(&cpu, 0x506ce7d0u, 0x506cbf1fu);
+        printf("EwSrv export snap: 0x506cbf1d -> 0x506cbf1f (Thumb +2)\n");
+    }
     if (env_ulong("NK_MAP_APP_LOW", 0)) {
         /* The direct app path copies ~400 KiB to 0x600000; on the phone this
          * is a physical buffer, not MMIO.  Map it as RAM so the copy is not

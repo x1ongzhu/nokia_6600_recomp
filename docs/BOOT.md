@@ -470,6 +470,23 @@ direct-SWI 路径也到 500k 预算，但出现 `0x600000` wild clear。
 
 ---
 
+### 2.16 round 47：EwSrv export 的 Thumb +2 修正
+
+`SplashScreen.exe` 调用 EwSrv 的 export slot `0x506ce7d0`，ROM build 存
+的是 `0x506cbf1d`，而真正 Thumb prologue 从 `0x506cbf1e` 开始：
+
+```
+506cbf1c: ec ff          ; 前一条指令的尾部/填充
+506cbf1e: 20 1c 10 bc ... ; adds r0,r4; pop {r4}; ...
+```
+
+`NK_EWSRV_SNAP=1` 把它改成 `0x506cbf1f`（Thumb bit + 正确入口），
+等价于 E32 loader 的 export fixup。修正后 SplashScreen 跑满
+**2,000,000 条**，停在 request-semaphore Wait service
+`0x503244e4..f4`，0 fault。
+
+---
+
 ## 3. EUser 导入映射
 
 EKA1 import stub：

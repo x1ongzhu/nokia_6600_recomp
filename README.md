@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 46)
+## Status (2026-10-26, round 47)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -248,6 +248,15 @@ stable executive loop. What works:
   path's `0x600000` copy is a multi-MB data copy with a bad length, not the
   framebuffer (`NK_MAP_APP_LOW=1` maps it but does not remove the frontier).
 
+- [x] **Stable SplashScreen** (round 47): SplashScreen's EwSrv export slot
+  `0x506ce7d0` holds `0x506cbf1d`, two bytes before the real Thumb prologue
+  at `0x506cbf1e`. `NK_EWSRV_SNAP=1` applies the E32-loader-style Thumb +2
+  fixup. SplashScreen then runs the full **2,000,000-instruction budget**
+  with 0 undefined/unbound/recoveries, ending in the request-semaphore Wait
+  service `0x503244e4..f4` — waiting for a client/message, not on a bad
+  pointer. The next step is to complete that request or HLE the window-server
+  draw path so the splash pixels reach a framebuffer.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -372,7 +381,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round43.sh` | real SVC exception model; the 1.5M FbServ run was no-op SWIs, not a kernel path |
 | `tools/test_round44.sh` | FbServ's first `svc #0x6c`, user/kernel bit-23 selector, and the dispatch-table frontier |
 | `tools/test_round45.sh` | stable real-SVC FbServ, full 2M budget in the EUser wait loop |
-| `tools/test_round46.sh` | **current acceptance**: splash-screen route; SplashScreen reaches EwSrv and stops on the bad pointer `0x506cbf1c` |
+| `tools/test_round46.sh` | splash-screen route; SplashScreen reaches EwSrv and stops on the bad pointer `0x506cbf1c` |
+| `tools/test_round47.sh` | **current acceptance**: EwSrv export snap; SplashScreen runs the full 2M budget in the wait service |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
