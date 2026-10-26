@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 58)
+## Status (2026-10-26, round 59)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -348,6 +348,15 @@ stable executive loop. What works:
   rendered to [docs/assets/first_frame.png](docs/assets/first_frame.png).
   This is the splash background frame, not yet the app's full logo/UI draw.
 
+- [x] **BitGdi export symbol map** (round 59): the ROM BitGdi export
+  directory has 185 addresses and no names, but the matching S60 2.0 SDK
+  `bitgdi.lib` stores the mangled names in export order. The drawing entry
+  points map as `Clear()` = `0x5069ec5d`, `Clear(TRect)` = `0x5069a029`,
+  `DrawBitmap(TPoint, bitmap)` = `0x5069a991`. `tools/bitgdi_symbols.py`
+  reproduces the mapping. The next step is constructing a `CFbsBitGc` /
+  `CFbsBitmap` whose data pointer is `0x59800000` and calling `Clear`/
+  `DrawBitmap` for a real guest-drawn frame.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -484,7 +493,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round55.sh` | EwSrv is a `TRomImageHeader` with a 7-entry DLL ref table |
 | `tools/test_round56.sh` | app literals behave like link-time addresses; a `0x4a780000` link base lands on valid Thumb prologues |
 | `tools/test_round57.sh` | EwSrv dllref section layout; the six tail entries are not per-import slots |
-| `tools/test_round58.sh` | **current acceptance**: first guest-written LCD frame (white splash background) via guest `Mem::Copy` |
+| `tools/test_round58.sh` | first guest-written LCD frame (white splash background) via guest `Mem::Copy` |
+| `tools/test_round59.sh` | **current acceptance**: BitGdi export symbol map (`Clear`/`DrawBitmap` addresses mapped from the SDK import library) |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

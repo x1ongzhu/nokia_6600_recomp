@@ -367,7 +367,27 @@ Splash MBM 的第一帧是 **176×208、4bpp、全白**（EByteRLE，首个 run
 这是 **splash 背景帧**，由 guest `Mem::Copy` 写入真实 LCD framebuffer；
 还不是 SplashScreen/UI 自己绘制的完整 logo 帧。
 
-## 6. 还缺什么
+## 6. BitGdi 导出符号表（round 59）
+
+ROM BitGdi 的 export dir（`0x506a7e78`，185 项）只有地址，没有名字。
+匹配的 S60 2.0 SDK `bitgdi.lib` 在 symbol table 里按 **export 顺序**
+保存了 mangled 名字，因此 symbol i -> export i：
+
+```
+idx 147 0x5069a991 DrawBitmap(TPoint, CFbsBitmap*)
+idx 148 0x5069a9b5 DrawBitmap(TRect, CFbsBitmap*, T1)
+idx 149 0x5069a9d9 DrawBitmap(TRect, CFbsBitmap*)
+idx 164 0x5069a029 Clear(TRect)
+idx 165 0x5069ec5d Clear()
+```
+
+`BitBlt` 的尾部索引（171-174）混入了 DLL-ref entry，不可靠；上面的
+drawing 入口是可用的。`tools/bitgdi_symbols.py` 可复现映射。
+
+下一步：构造一个 data pointer 指向 `0x59800000` 的 `CFbsBitGc` /
+`CFbsBitmap`，调用 `Clear`/`DrawBitmap`，得到 guest 自己绘制的帧。
+
+## 7. 还缺什么
 
 1. **进程启动**：`FbServ.exe` 还没有被 kernel 作为进程加载。当前
    supervisor 死在 `RThread::Resume(0x32)` 的 thread-start 等待上
@@ -381,7 +401,7 @@ Splash MBM 的第一帧是 **176×208、4bpp、全白**（EByteRLE，首个 run
 
 ---
 
-## 7. 下一步
+## 8. 下一步
 
 1. 修直接 FbServ 的对象初始化：跑 `.init_array`/constructors，或让
    kernel 的 process loader 正常启动 FbServ。
