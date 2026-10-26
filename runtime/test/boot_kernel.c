@@ -1468,6 +1468,40 @@ static void b7e_thread_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
             nk_w32(c, clbase + 0x04, 1);
             nk_w32(c, t + 0x3c, handler);   /* SThread::iTrapHandler   */
             nk_w32(c, t + 0x38, 0);         /* SThread::iFrame         */
+            /* Round 98: the kernel's UnTrap service (svc 0x73, 0x503187e8)
+             * returns [thread+0x38] and pops the chain through [frame+0x40].
+             * EUser then reads [frame+0x44] and [frame+0x48] and, when
+             * [frame+0x48] is zero, restores a whole context with
+             * `ldm r5, {r4..fp, sp, lr}` and branches through the saved LR.
+             * With no frame installed (thread+0x38 == 0) that "restore"
+             * reads address 0 and jumps to 0x2c.  Give the thread one
+             * initial frame whose saved LR is the exit sentinel, which is
+             * exactly the state the runtime would establish for a thread
+             * whose outermost TRAP is the thread entry. */
+            /* Round 98: the kernel's `get heap` service (svc 0x6c,
+             * 0x503187b8) returns [current_thread+0x34].  B7e leaves that
+             * field zero, so guest code that allocates through the thread
+             * heap passes a null allocator to RHeap and, in the HLE model,
+             * also loses the base used for descriptor arithmetic.
+             * NK_THREAD_HEAP=<addr> publishes a heap pointer for the thread. */
+            if (env_ulong("NK_THREAD_HEAP", 0)) {
+                nk_w32(c, t + 0x34, (uint32_t)env_ulong("NK_THREAD_HEAP", 0));
+                if (b7e_installs <= 4)
+                    printf("B7e: thread %#010x heap %#010x\n", t,
+                           (uint32_t)env_ulong("NK_THREAD_HEAP", 0));
+            }
+            if (env_ulong("NK_TRAP_FRAME", 0)) {
+                uint32_t frame = base + 0x100u;
+                for (uint32_t o = 0; o < 0x4cu; o += 4) nk_w32(c, frame + o, 0);
+                nk_w32(c, frame + 0x24, 0xdead0000u);   /* saved LR: exit   */
+                nk_w32(c, frame + 0x20, c->r[13]);      /* saved SP         */
+                nk_w32(c, frame + 0x40, 0);             /* no outer frame   */
+                nk_w32(c, frame + 0x48, 0);             /* no outer handler */
+                nk_w32(c, t + 0x38, frame);             /* SThread::iFrame  */
+                if (b7e_installs <= 4)
+                    printf("B7e: thread %#010x initial trap frame %#010x "
+                           "(exit through 0xdead0000)\n", t, frame);
+            }
             if (b7e_installs <= 4)
                 printf("B7e: thread %#010x trap handler %#010x, cleanup %#010x\n",
                        t, handler, clean);

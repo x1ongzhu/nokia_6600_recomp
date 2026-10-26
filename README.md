@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 97)
+## Status (2026-10-27, round 98)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -103,7 +103,8 @@ selection so a real ROM image (EFile) runs to the kernel; round 94 pushes it
 through the kernel start hand-off; round 95 stops kernel-time import rebinds
 from leaking into an app thread; round 96 isolates EFile's "FileServer" gate
 and the HLE-heap / guest-RHeap conflict; round 97 makes the application heap
-HLE-only. What works:
+HLE-only; round 98 adds the per-thread trap frame and heap pointer that the
+kernel services read. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -749,6 +750,21 @@ HLE-only. What works:
   `bx lr` through a garbage restored LR of `0x2c`. The trap-handler stack is
   the next frontier. `tools/test_round97.sh` pins the result.
 
+- [x] **Per-thread trap frame and heap pointer** (round 98): two pieces of
+  boot state that a direct E32-entry boot never establishes.
+  `svc 0x73` UnTrap (`0x503187e8`) returns `[current_thread+0x38]` and pops
+  the chain through `[frame+0x40]`; EUser (`0x5038cb34`) then reads
+  `[frame+0x44]`/`[frame+0x48]` and, when the latter is zero, restores a
+  whole context with `ldm r5, {r4..fp, sp, lr}` and branches through the
+  saved LR. B7e left `thread+0x38` zero, so that restore read address 0 and
+  jumped to `0x2c`. `NK_TRAP_FRAME=1` installs one initial frame whose saved
+  LR is the exit sentinel `0xdead0000`, and the thread unwinds cleanly.
+  `svc 0x6c` (`0x503187b8`) returns `[current_thread+0x34]`, the thread heap;
+  B7e left it zero too, so guest allocation paths called RHeap with a null
+  allocator and the HLE allocator rejected a pointer-sized request.
+  `NK_THREAD_HEAP=<addr>` publishes a heap and those rejections disappear.
+  Both knobs are opt-in. `tools/test_round98.sh` pins both runs.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -922,7 +938,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round94.sh` | EFile passes the kernel start hand-off |
 | `tools/test_round95.sh` | `NK_IMPORTMAP_REVERT` keeps kernel-time rebinds out of the app thread |
 | `tools/test_round96.sh` | app thread is not starved; EFile's SVC 0x1c "FileServer" gate |
-| `tools/test_round97.sh` | **current acceptance**: application heap is HLE-only; EFile reaches the trap-handler restore |
+| `tools/test_round97.sh` | application heap is HLE-only |
+| `tools/test_round98.sh` | **current acceptance**: per-thread trap frame and heap pointer; next frontier is the `0x3a` null dereference |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

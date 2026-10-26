@@ -1015,3 +1015,12 @@ EUser export 757 → `svc #0x1c`，仅当返回 -1（KErrNotFound）才继续；
 处理器恢复 `0x5038cb34`（`svc #0x73` → `ldm r5,{...,sp,lr}` → `bx lr`），
 恢复出的 LR 是 `0x2c`。下一 frontier 是 trap handler 栈。
 验收 `tools/test_round97.sh`。
+
+### round 98：每线程 trap frame 与 heap 指针
+
+`svc 0x73` UnTrap 返回 `[thread+0x38]` 并弹链，EUser 用
+`ldm r5,{r4..fp,sp,lr}` 恢复上下文；B7e 把该字段留 0 → 恢复读地址 0 →
+跳 `0x2c`。`NK_TRAP_FRAME=1` 装初始 frame（保存 LR `0xdead0000`）后
+干净回卷。`svc 0x6c` 返回 `[thread+0x34]`（线程堆），留 0 会让 guest
+带空分配器调 `RHeap`；`NK_THREAD_HEAP=<addr>` 后分配拒绝消失，新
+frontier 为 `0x3a`。验收 `tools/test_round98.sh`。

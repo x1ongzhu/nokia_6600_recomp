@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 97）
+最后更新：2026-10-27（round 98）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -751,6 +751,24 @@
     而恢复出的 LR 是垃圾 **`0x2c`**。
   - 因此下一个 frontier 是**陷阱处理器栈**（svc 0x72/0x73）。
   - 验收 `tools/test_round97.sh`。
+
+- **每线程的 trap frame 与 heap 指针**（round 98）：kernel 服务读的两块
+  启动状态，直接 E32 入口启动从来不建立。
+  - **`svc 0x73` "UnTrap"（`0x503187e8`）** 返回
+    `[current_thread+0x38]`，并通过 `[frame+0x40]` 弹链。EUser
+    （`0x5038cb34`）随后读 `[frame+0x44]`、`[frame+0x48]`；当
+    `[frame+0x48]==0` 时用 `ldm r5, {r4..fp, sp, lr}` 整体恢复上下文
+    并 `bx` 到保存的 LR。B7e 把 `thread+0x38` 留成 0，于是这次"恢复"
+    读了地址 0，跳到 `0x2c`。**`NK_TRAP_FRAME=1`** 装一个初始 frame，
+    保存的 LR = 退出哨兵 `0xdead0000`，线程于是**干净地回卷退出**。
+  - **`svc 0x6c`（`0x503187b8`）** 返回 `[current_thread+0x34]`，即
+    线程堆。B7e 也留成 0，于是 guest 分配路径带着**空分配器**调
+    `RHeap`，HLE 侧看到 `ReAlloc(heap=0, ptr=..., size=<指针值>)`。
+    **`NK_THREAD_HEAP=<addr>`** 发布一个堆指针后，这类拒绝**完全消失**。
+  - 效果：trap frame 把 `0x2c` 的野跳变成 `0xdead0000` 的干净回卷；
+    再发布线程堆后不再有分配拒绝，新 frontier 是 `0x3a` 的空指针解引用。
+  - 两个开关都是 opt-in（默认关），round 97 等既有测试不受影响。
+  - 验收 `tools/test_round98.sh`（两次运行）。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

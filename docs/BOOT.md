@@ -1148,3 +1148,21 @@ round 97 去掉全部 fall-through：foreign/null 的 realloc → 新分配（�
 （trap handler uninstall）→ `ldm r5, {r4..fp, sp, lr}` → `bx lr`，
 恢复出的 LR 为 `0x2c`。下一 frontier：**trap handler 栈**（svc
 `0x72`/`0x73`）。验收 `tools/test_round97.sh`。
+
+### 2.51 round 98：每线程 trap frame 与 heap 指针
+
+kernel 服务读的两块启动状态，直接 E32 入口启动从不建立：
+
+- `svc 0x73` UnTrap（`0x503187e8`）返回 `[thread+0x38]`，经
+  `[frame+0x40]` 弹链。EUser `0x5038cb34` 再读 `[frame+0x44]`、
+  `[frame+0x48]`；`[frame+0x48]==0` 时用 `ldm r5, {r4..fp, sp, lr}`
+  恢复上下文并 `bx`。B7e 令 `thread+0x38=0` → 恢复读地址 0 → 跳
+  `0x2c`。`NK_TRAP_FRAME=1` 装一个初始 frame，保存 LR =
+  `0xdead0000`，线程干净回卷。
+- `svc 0x6c`（`0x503187b8`）返回 `[thread+0x34]`（线程堆）。B7e 也留 0
+  → guest 带空分配器调 `RHeap` → HLE 看到
+  `ReAlloc(heap=0, ptr=..., size=<指针>)`。`NK_THREAD_HEAP=<addr>`
+  发布堆指针后拒绝消失。
+
+两开关均为 opt-in。新 frontier：`0x3a` 空指针解引用。
+验收 `tools/test_round98.sh`。
