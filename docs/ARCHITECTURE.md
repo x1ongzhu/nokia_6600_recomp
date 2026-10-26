@@ -139,8 +139,9 @@ success.
 | timer/IRQ + idle exit | **done (round 30)**: first IRQ at 430,557 insns, idle exits |
 | timer-queue boot state | **done (round 31)**: ctor 0x5032aff8 + HAL `+0x1c` override |
 | live thread identity / TTrap | **done (round 32)**: heap DThread 0x80601078, TTrap::UnTrap succeeds, 439,534 insns |
-| scheduler / first blocking executive call | **next**: `svc #0x4d` wait on [0x80001784] -> KERN 6 at 0x50330aa8 |
+| first scheduler switch | **done (round 33)**: `svc #0x4d` blocks on thread+0x5c, NULL thread 0x80601830 runs from 0x5031f144, KERN 6 closed, 440,623 insns |
+| run queue / multi-thread CObjectIx | **next**: null call at 0x503360d4 while Init2 creates further threads |
 | display/keypad/audio/file server/apps | not started |
 
 Acceptance tests and the current frontier:
-[`PROGRESS.md`](PROGRESS.md), [`tools/test_round32.sh`](../tools/test_round32.sh).
+[`PROGRESS.md`](PROGRESS.md), [`tools/test_round33.sh`](../tools/test_round33.sh).

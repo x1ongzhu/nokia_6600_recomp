@@ -61,11 +61,12 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 32)
+## Status (2026-10-26, round 33)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
-hardware interrupt wakes it**, and the **timer-queue singleton is now created
-with the kernel's own constructor**. What works:
+hardware interrupt wakes it**, the **timer-queue singleton is created with the
+kernel's own constructor**, and **the first blocking executive call now
+switches to the kernel's NULL thread and returns**. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -94,6 +95,17 @@ with the kernel's own constructor**. What works:
   getter. The harness calls the kernel constructor at `0x5031ef40`, copies the
   base vtable and substitutes a zero-return tick getter, so the kernel's own
   `0x5032b024` runs.
+- [x] **First scheduler switch** (round 33): EUser K=1208 is `svc #0x4d`;
+  kernel table entry `0x503244e4` calls
+  `current_thread->[0x5c]->vtable[0x20]`, i.e. Wait() on the request
+  semaphore that `0x503311c8` installs at `DThread+0x5c`. `Kern::Init2`
+  (`0x503309e4`) created the NULL thread at `0x5032fa10` (object
+  `0x80601830`, entry `0x5031f144`, 0x2000-byte stack). `NK_SCHED=1` blocks
+  the supervisor at the Init2 wait, starts that thread at its real entry,
+  lets the guest's own start hand-off (`0x50321088` -> `0x50318398`)
+  complete the pending `TRequestStatus`, and preempts back to the supervisor
+  at `0x50330a98`. **KERN 6 no longer fires**; boot advances to
+  **440,623 instructions**.
 - [x] **Live thread identity / TTrap** (round 32): `TTrap` is 0x4c bytes
   (`iState[0x10]` +0x00, `iNext` +0x40, `iResult` +0x44, `iHandler` +0x48).
   The kernel's bootstrap `SThread` at `0x802ffd00` lives inside the boot
@@ -107,15 +119,13 @@ with the kernel's own constructor**. What works:
 
 Not implemented yet:
 
-- [ ] **Scheduler / first blocking executive call** — after the cleanup
-  frame succeeds, the kernel-start path calls EUser K=1208 (`0x50398644`,
-  `svc #0x4d`) with `[0x80001784]` pointing at a `TRequestStatus` initialised
-  to `KRequestPending` (`0x80000001`). The harness completes SWI 0x4d as a
-  no-op and the request stays pending, so the kernel's own check panics
-  **KERN 6** at `0x50330aa8` (halt `0x50312b88`). No scheduler runs the
-  thread created at `0x5032fa10` (name `"NULL"`, 0x2000-byte stack, object
-  `0x80601830`), which would complete the request. This is the new frontier.
-- [ ] First context switch / run queue / DFC thread.
+- [ ] **Run queue / full thread state** — round 33 switches contexts and
+  crosses KERN 6, but `Kern::Init2`'s next step (creating further threads
+  through EUser `RThread::Create`, `0x5032e300`) now stops at a null call
+  `0x503360d4` in the multi-thread `CObjectIx`/B7e stand-in. The B7e graph
+  models a single live thread; it needs per-thread object indices before the
+  DFC threads can start.
+- [ ] Real ready-queue priorities, DFC thread, timer unit 1 / IRQ 2.
 - [ ] UI/display, keypad, audio, file server, app launching (P3).
 - [ ] Mask-ROM PeaK record codec (the hand-off is an explicit stand-in).
 - [ ] Real hardware HLE (display controller, DSP/radio, RTC).
@@ -170,6 +180,12 @@ NK_SUPERPAGE=1 NK_RAM_EXTRA=0x300000 NK_KERNEL_VECTORS=1 NK_SWI_DIRECT=1 \
 #    NK_B7E_VALID_HI=0x80a00000 ... (same command)
 # ... 439,534 insns, [0x800017d4]=0x80601078, TTrap::UnTrap succeeds,
 # ... KERN 6 panic at 0x50330aa8 while waiting on [0x80001784]
+
+# 8. round 33: let svc #0x4d block and switch to the NULL thread
+#    NK_SCHED=1 ... (same command)
+# ... svc #0x4d -> Wait on thread+0x5c; first switch starts 0x80601830 at
+# ... 0x5031f144; 0x50318398 completes the start request; supervisor resumes
+# ... at 0x50330a98, KERN 6 gone, 440,623 insns, next null call 0x503360d4
 ```
 
 Without `NK_SYSTEM_TIME=1` the same boot stops at 133,950 instructions with
@@ -194,7 +210,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round29.sh` | previous acceptance: interpreter fixes, r29 map, idle loop |
 | `tools/test_round30.sh` | UPP timer/ICU, IRQ entry, idle exit, round-30 null call |
 | `tools/test_round31.sh` | historical control: timer-queue ctor, HAL vtable override, round-31 thread model |
-| `tools/test_round32.sh` | **current acceptance**: live heap DThread, TTrap/UnTrap, first blocking executive call |
+| `tools/test_round32.sh` | live heap DThread, TTrap/UnTrap, first blocking executive call (historical control) |
+| `tools/test_round33.sh` | **current acceptance**: WaitForAnyRequest block, first switch to the NULL thread, start hand-off, KERN 6 closed |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
@@ -277,9 +294,43 @@ path then reaches the first blocking executive call:
 0x50312b88  panic halt
 ```
 
-Boot reaches **439,534 instructions** with 1 IRQ and 0
-undefined/unbound/recoveries.  The control `NK_B7E_VALID_HI=0x80400000`
-reproduces round 31 exactly (439,177, null call at `0x503a6148`).
+Round 33 re-read that call.  Kernel service table entry `0x4d`
+(`0x503244e4`) is not a "complete the request" stub:
+
+```
+0x503244e4  bl CurrentThread          ; [0x800017d4]
+0x503244ec  ldr r0, [r0, #0x5c]       ; DThread::iRequestSemaphore
+0x503244f0  ldr r3, [r0]
+0x503244f4  ldr pc, [r3, #0x20]       ; semaphore Wait()
+```
+
+`0x503311c8` creates that semaphore with `0x50320ac0` and stores it at
+`DThread+0x5c`, so `svc #0x4d` really is `WaitForAnyRequest`.  `Kern::Init2`
+(`0x503309e4`) had already created the NULL thread at `0x5032fa10`: object
+`0x80601830`, entry `0x5031f144` (literal `0x5032faf4`), 0x2000-byte stack.
+DThread vtable `+0x20` (`0x50321088`) -> `0x50318398` completes the pending
+start request and publishes the new thread; the NULL thread runs that path
+itself.
+
+`NK_SCHED=1` models the missing scheduler: it saves the supervisor's context
+at the wait, starts the NULL thread on a 0x2000-byte kernel stack at
+`0x5031f144`, keeps `[0x80001784]` armed so every `Kern::StartThread`
+(`svc #0x76` -> `0x503312d4`) hand-off succeeds, and preempts back to the
+supervisor as soon as the hand-off completes its request.  The supervisor
+returns at `0x50330a98` with `[sp] == 0`:
+
+```
+sched: thread 0x80601078 blocks on svc #0x4d (status 0x802fff8c)
+sched: first switch -> NULL thread 0x80601830, entry 0x5031f144
+sched: startup request 0x802fff8c completed, supervisor 0x80601078 ready
+sched: preempt 0x80601830 -> supervisor 0x80601078 at pc 0x50330a98
+```
+
+**KERN 6 is gone.**  The boot now reaches **440,623 instructions** and stops
+at a null call from `0x503360d4` while `Kern::Init2` creates further threads
+through EUser `RThread::Create` (`0x5032e300`): the B7e graph still models one
+live thread and its `CObjectIx` stand-in.  Per-thread object indices and a
+real ready queue are the next frontier.
 
 See `docs/BOOT.md` for the boot state and `docs/PROGRESS.md` for the roadmap.
 

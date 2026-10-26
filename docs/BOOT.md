@@ -257,6 +257,42 @@ B7e: thread 0x80601078 trap handler 0x80004200, cleanup 0x80004240
 `0x5032fa10` 创建的 NULL 线程（对象 `0x80601830`，name `"NULL"`，
 0x2000 字节栈）。
 
+### 2.9 round 33：第一次调度切换，跨过 KERN 6
+
+重新读 `svc #0x4d`：kernel service table `[0x4d] = 0x503244e4` 取
+`CurrentThread()->[0x5c]`，再调它的 `vtable+0x20`。`0x503311c8` 在
+线程创建时用 `0x50320ac0` 在 `DThread+0x5c` 安装请求信号量，因此这是
+`WaitForAnyRequest` 的 Wait，而不是“完成 request”。NULL 线程的真实入口
+来自线程创建参数里的字面量 `0x5032faf4` = **`0x5031f144`**（对象
+`0x80601830`，栈 0x2000）。
+
+DThread vtable `+0x20`（`0x50321088`）→ `0x50318398` 是 kernel 的启动
+交接：读 `[0x80001784]`，清 slot、把 0 写进该 `TRequestStatus`、发布
+新的 current thread，并 Open `[thread+0x5c]`。Init2 自己先挂了一个
+pending status；NULL 线程启动时也会走这条路径。
+
+`NK_SCHED=1` 的模型：
+
+```
+0x50330a94  svc #0x4d
+            sched: save supervisor context, block it
+            选择 [0x80000400] = 0x80601830（NULL thread）
+            0x80540000..0x80542000 上构造 SVC 上下文：
+              pc = 0x5031f144, sp = 0x80541ff0, cpsr = ...0053
+            完成 supervisor 的 status 0x802fff8c
+            0x80530000 重新挂一个 KRequestPending 供 guest 交接
+0x5031f144  NULL thread: Kern::Init3 ...
+  0x50331308  [thread]->vtable+0x20 = 0x50321088
+  0x50321098  -> 0x50318398: 消费 0x80530000 的 status
+  0x50318398  [0x80001c90] = 0x1c, [0x80001ca4] = thread；Open 信号量
+            sched: hand-off 完成 -> preempt 回 supervisor（更高优先级）
+0x50330a98  supervisor: [sp] == 0 -> 不再 KERN 6
+0x50330aac  Init2 继续（EUser RThread::Create 0x5032e300）
+0x503360d4  null call：多线程 CObjectIx/B7e 模型不足
+```
+
+结果：**440,623 条、1 IRQ、0 undefined/unbound/recovery**。
+
 ---
 
 ## 3. EUser 导入映射
@@ -326,6 +362,14 @@ round 32（NK_TIMERQ=1, NK_B7E_VALID_HI=0x80a00000）:
   TTrap::UnTrap -> handler 0x80004200 -> 0x50383c40
   stop: KERN 6 panic @ 0x50330aa8 / halt 0x50312b88（wait 未完成）
 
+round 33（NK_SCHED=1，其余同 round 32）:
+  440,623 insns, 1 IRQ, 1 timer expiry
+  0 undefined / 0 unbound IAT / 0 recoveries
+  svc #0x4d -> Wait(current_thread+0x5c request semaphore)
+  first switch -> NULL thread 0x80601830 @ 0x5031f144, stack 0x80540000
+  0x50318398 hand-off -> supervisor 恢复 @ 0x50330a98, [sp] == 0
+  stop: null call @ 0x503360d4（多线程 CObjectIx/B7e；不再是 KERN 6）
+
 round 31 control（NK_TIMERQ_MODE=ctor，仅基类 vtable）:
   430,945 insns, 1 IRQ
   vtable+0x1c = User::Panic -> panic halt @ 0x50312b88
@@ -372,42 +416,49 @@ round 30 control（NK_TIMER=1, NK_CPSR=0x400000d3, I=1）:
 | `NK_TIMERQ_MODE=ctor\|stub` | 仅基类 vtable / 全零返回 vtable |
 | `NK_TIMERQ_ADDR=0x...` | 注入对象页（默认 `0x80500000`） |
 | `NK_B7E_VALID_HI=0x...` | B7e 认为“活线程/进程”的地址上界（默认映射堆顶 `0x80a00000`；`0x80400000` 复现 round 31） |
+| `NK_SCHED=1` | 在 Init2 的 `svc #0x4d` 处阻塞并切换到 NULL 线程（round 33） |
+| `NK_SCHED_LOG=n` | 打印前 n 条调度/切换/交接日志（默认 8） |
+| `NK_SCHED_LR=0x...` | 触发切换的 wait 返回地址（默认 `0x50330a98`） |
+| `NK_SCHED_ENTRY=0x...` | NULL 线程入口（默认 `0x5031f144`） |
+| `NK_SCHED_STACK=0x...` | harness NULL 线程栈基址（默认 `0x80540000`） |
 | `NK_ENTRY` / `NK_STOP_PC` | 覆盖入口/停止地址 |
 
 ---
 
 ## 6. 当前 frontier
 
-Round 30 验证了 timer/IRQ；round 31 注入 `[0x80001c34]` 并跨过
-`0x5031ef50`；round 32 修正线程身份后，kernel-start 路径成功执行
-`TTrap::UnTrap`（handler `0x80004200` → `0x50383c40`），进入第一个
-阻塞 executive call。新 frontier：
+Round 33 在 `0x50330a94` 的 wait 处真正阻塞，保存 supervisor 上下文，
+在 0x80540000 的 0x2000 字节栈上从 NULL 线程真实入口 `0x5031f144`
+运行；guest 自己走 `0x50321088` → `0x50318398` 的启动交接，完成
+`[0x80001784]` 的 request 并唤醒 supervisor，随后立刻抢占回 supervisor。
+**KERN 6 已消失**，supervisor 在 `0x50330a98` 以 `[sp]==0` 继续。新
+frontier：
 
 ```
-0x50330a8c  TRequestStatus = KRequestPending (0x80000001)
-0x50330a90  [0x80001784] = &status
-0x50330a94  EUser K=1208 -> 0x50398644: svc #0x4d  ; wait-any-request
-0x50330a9c  ldr r3,[sp]; cmp r3,#0x80000001
-0x50330aa8  still pending -> Kern::Panic("KERN", 6)
-0x50312b88  panic halt
+0x50330a98  supervisor resumes; [sp] == 0
+0x50330aac  Init2: current thread -> 0x50334ef0
+0x50330ac0  EUser import -> trap push
+0x50330acc  bl 0x5033045c
+0x50330740  bl 0x5032e300            ; EUser RThread::Create
+0x5032d4b4  ...
+0x503360d4  null call -> stop
 ```
 
-harness 的 `NK_SWI_COMPLETE=0x4d` 只把 `[0x80001784]` 清 0，没有把
-reason 写回 `TRequestStatus`，也没有 scheduler 运行
-`0x5032fa10` 创建的 NULL 线程（对象 `0x80601830`，0x2000 字节栈）。
-因此这是“等待任何 request”在没有调度器时的必然停止点，而不是
-CPU/解析错误。
+stop 时的寄存器：`r0=0x80003300`（B7e 对象索引）、`r4=0xffffffff`、
+`r6=0x80601830`、`r7=0x80003200`。B7e 的 `CObjectIx::At` stand-in 对
+每个 handle 都返回同一个 harness CObject；Init2 又创建新线程后，空
+vtable 被调用。这不是 CPU/解析错误。
 
 下一步：
 
-1. **第一次线程切换**：在 `0x50330a94` 的 wait 处让出 CPU，运行
-   `0x5032fa10` 创建的 NULL 线程（对象 `0x80601830`，栈 0x2000），
-   记录第一次 thread run / context switch。
-2. **SWI 0x4d 真实语义**：区分 `WaitForRequest` 与
-   `RequestComplete(TRequestStatus*&, TInt)`；后者写 reason、清 slot、
-   唤醒等待者。
-3. 让 NULL 线程完成 `[0x80001784]` 的 request，验证
-   `[sp] != KRequestPending` 分支。
+1. **按线程区分 CObjectIx 元素**：让 `At()` 至少对 `DThread` 句柄返回
+   各自的对象，重跑 `NK_SCHED=1`，越过 `0x503360d4`。
+2. **真正的 ready queue/优先级**：把 `DThread+0x24` 状态、`+0x20`
+   suspend 位、`+0x1c` 优先级纳入队列，允许 NULL 线程被抢占后继续
+   `Kern::Init3`/DFC 创建。
+3. **`svc #0x4d` 的通用完成路径**：为请求信号量实现
+   `RequestComplete` 的 signal，替换早期 wait 循环的
+   `NK_SWI_COMPLETE=0x4d` 内联 HLE。
 4. 给 timer queue 一个 pending timer，验证 IRQ 2 → `0x503113d8` → DFC。
 
 kernel IRQ entry 的关键序列（round 30 已实际执行）：
@@ -431,8 +482,13 @@ kernel IRQ entry 的关键序列（round 30 已实际执行）：
 - 所有 `NK_*` 交接都是 harness 模型，不是真实 mask ROM 解密结果。
 - `[0x80001c34]` 由 `NK_TIMERQ=1` 注入；对象用 kernel 构造器
   0x5032aff8，但 `+0x1c` 的 HAL tick getter 是零返回 stub。
-- 当前 stop 是 `0x50330aa8` 的 KERN 6 panic（`svc #0x4d` 的 wait 未完成），
-  不是 CPU fault；根因是缺少 scheduler/真实 request 完成语义。
+- round 32 的 KERN 6 已被 round 33 关闭；当前 stop 是 `0x503360d4` 的
+  null call（多线程 CObjectIx/B7e），不是 CPU fault。
+- `NK_SCHED=1` 的 NULL 线程栈（`0x80540000`）和 hand-off status
+  （`0x80530000`）由 harness 分配；kernel 线程创建时实际分配的栈尚未
+  从对象字段解出。
+- `NK_SCHED=1` 只接管 Init2 wait（LR `0x50330a98`）；其他 `svc #0x4d`
+  仍走 `NK_SWI_COMPLETE=0x4d` 的内联 HLE。
 - B7e 的 live-pointer 上界必须覆盖 kernel 实际堆；`0x80400000` 会把
   真实 DThread `0x80601078` 判成 transient，重新发布 boot-stack 上的
   SThread `0x802ffd00`（round-31 control）。

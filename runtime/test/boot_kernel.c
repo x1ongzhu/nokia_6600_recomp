@@ -584,6 +584,287 @@ static void timerq_pc_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t pc) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Round 33: first scheduler switch                                    */
+/*                                                                     */
+/* 0x503309e4 (Kern::Init2) creates the kernel's NULL thread at        */
+/* 0x5032fa10: DThread object 0x80601830, name descriptor "NULL",      */
+/* 0x2000-byte kernel stack, entry 0x5031f144 (the literal at          */
+/* 0x5032faf4 passed as the thread function).  It then publishes a     */
+/* TRequestStatus at [0x80001784] and calls EUser K=1208              */
+/* (0x50398644 -> `svc #0x4d`).  Kernel service table entry 0x4d is    */
+/* 0x503244e4: `current_thread->[0x5c]->vtable[0x20]`, i.e. Wait() on  */
+/* the request semaphore that 0x503311c8 installs at thread+0x5c       */
+/* (DThread vtable 0x503385b4; +0x5c is created by DObject-style       */
+/* constructor 0x50320ac0).  Without a scheduler the wait can never    */
+/* return and Init2 panics KERN 6 at 0x50330aa8.                       */
+/*                                                                     */
+/* This model performs the switch the kernel's own scheduler would:    */
+/*   - the caller's context is saved at the `svc #0x4d` call gate;     */
+/*   - the NULL thread is started on a 0x2000-byte kernel stack with   */
+/*     its real entry point (0x5031f144);                              */
+/*   - the first switch goes through the kernel's observable hand-off  */
+/*     (0x50318398, reached from DThread vtable+0x20 0x50321088): it   */
+/*     publishes the new current thread, clears [0x80001784] and       */
+/*     completes the startup TRequestStatus (writes 0), which is what  */
+/*     lets the supervisor leave WaitForAnyRequest;                    */
+/*   - the hand-off wakes the supervisor, which preempts the NULL      */
+/*     thread at the next instruction boundary (higher priority);      */
+/*     the NULL thread stays runnable and resumes when scheduled.      */
+/* The stack itself is harness-owned: the kernel-allocated stack is not */
+/* recorded in a field this boot has recovered yet.                     */
+/*                                                                     */
+/* Known conflict: B7e's current-thread hook still overwrites +0x5c     */
+/* with its TLS stand-in whenever a thread is published, which replaces */
+/* the request semaphore this round identified.  Round 33 does not      */
+/* execute the real Wait for the NULL thread, so the switch works; the  */
+/* next round must stop clobbering a live +0x5c.                        */
+/* ------------------------------------------------------------------ */
+#define SCHED_CURRENT     0x800017d4u  /* kernel current DThread*        */
+#define SCHED_PENDING     0x80001784u  /* startup TRequestStatus* slot   */
+#define SCHED_NULL_GLOBAL 0x80000400u  /* [..] = DThread made at 0x5032fa10 */
+#define SCHED_NULL_ENTRY  0x5031f144u  /* thread function argument       */
+#define SCHED_STACK_BASE  0x80540000u
+#define SCHED_STACK_SIZE  0x2000u
+#define SCHED_SLOTS       4
+#define SCHED_WAIT_SWI    0x4du
+
+typedef struct sched_thread {
+    uint32_t thread;
+    uint32_t r[16];
+    uint32_t cpsr;
+    uint32_t resume_pc;      /* instruction after the blocked call gate */
+    uint32_t status;         /* TRequestStatus* observed at the wait    */
+    uint32_t calls_lr[64];   /* per-thread interpreter shadow stack     */
+    uint8_t  calls_thumb[64];
+    int      calls_n;
+    int      state;          /* 0 free, 1 ready, 2 running, 3 blocked   */
+    int      started;
+} sched_thread;
+
+static sched_thread sched_slot_tab[SCHED_SLOTS];
+static int      sched_on;
+static int      sched_log = 8;
+static unsigned sched_switches;
+static unsigned sched_blocks;
+static int      sched_startup_done;
+
+static sched_thread* sched_slot(uint32_t t, int create) {
+    for (int i = 0; i < SCHED_SLOTS; i++)
+        if (sched_slot_tab[i].thread == t) return &sched_slot_tab[i];
+    if (!create) return NULL;
+    for (int i = 0; i < SCHED_SLOTS; i++)
+        if (sched_slot_tab[i].thread == 0) {
+            sched_slot_tab[i].thread = t;
+            sched_slot_tab[i].state = 1;
+            return &sched_slot_tab[i];
+        }
+    return NULL;
+}
+
+static void sched_save_calls(nk_interp_t* ip, sched_thread* s) {
+    s->calls_n = ip->calls_n;
+    for (int i = 0; i < s->calls_n; i++) {
+        s->calls_lr[i] = ip->calls[i].lr;
+        s->calls_thumb[i] = ip->calls[i].thumb;
+    }
+}
+
+static void sched_load_calls(nk_interp_t* ip, sched_thread* s) {
+    ip->calls_n = s->calls_n;
+    for (int i = 0; i < s->calls_n; i++) {
+        ip->calls[i].lr = s->calls_lr[i];
+        ip->calls[i].thumb = s->calls_thumb[i];
+    }
+}
+
+static uint32_t sched_supervisor;
+static int      sched_need_yield;
+
+static void sched_resume(nk_cpu_t* c, nk_interp_t* ip, sched_thread* s) {
+    memcpy(c->r, s->r, sizeof s->r);
+    c->cpsr = s->cpsr;
+    c->r[15] = s->r[15] & ~1u;
+    sched_load_calls(ip, s);
+    s->state = 2;
+    nk_w32(c, SCHED_CURRENT, s->thread);
+}
+
+/* The kernel wakes the supervisor when the NULL thread's start hand-off
+ * completes its request.  On a real scheduler the higher-priority supervisor
+ * then preempts the NULL thread at the next instruction boundary; this hook
+ * implements exactly that, saving the NULL thread mid-startup so it can be
+ * resumed when the supervisor next blocks. */
+static int sched_yield_hook(nk_cpu_t* c, nk_interp_t* ip) {
+    if (!sched_need_yield) return 0;
+    sched_need_yield = 0;
+    if (!sched_on || !sched_supervisor) return 0;
+    uint32_t t = nk_r32(c, SCHED_CURRENT);
+    sched_thread* cur = sched_slot(t, 0);
+    sched_thread* sup = sched_slot(sched_supervisor, 0);
+    if (!cur || !sup || cur == sup || sup->state != 1) return 0;
+    memcpy(cur->r, c->r, sizeof cur->r);
+    cur->cpsr = c->cpsr;
+    cur->started = 1;
+    cur->state = 1;                 /* runnable, preempted mid-startup */
+    sched_save_calls(ip, cur);
+    sched_resume(c, ip, sup);
+    sched_switches++;
+    if (sched_log-- > 0)
+        printf("sched: preempt %#010x -> supervisor %#010x at pc %#010x "
+               "(its wait returns 0)\n", cur->thread, sup->thread, c->r[15]);
+    return 1;
+}
+
+/* The kernel's thread-start hand-off consumes one pending TRequestStatus at
+ * [0x80001784] (0x50318398 reads it, clears the slot and writes 0 to the
+ * status).  EUser's `RThread::Resume` wrapper (0x50399898 -> svc #0x76 ->
+ * Kern::StartThread 0x503312d4) calls that path once per thread it starts,
+ * so a boot that has more than one thread needs a fresh pending request for
+ * every call.  Keep the harness hand-off page armed: when the guest consumes
+ * it, put KRequestPending back and re-publish the slot.  The value write must
+ * bypass the watch (nk_w32 would re-enter this hook). */
+static uint32_t sched_dummy;
+static unsigned sched_handoffs;
+
+static void sched_handoff_hook(nk_cpu_t* c, uint32_t addr, uint32_t value) {
+    (void)value;
+    if (!sched_on || !sched_dummy || addr != sched_dummy) return;
+    boot_time_raw_w32(c, sched_dummy, 0x80000001u);   /* KRequestPending */
+    nk_w32(c, SCHED_PENDING, sched_dummy);
+    sched_handoffs++;
+    /* The hand-off completed a request; if a higher-priority thread is now
+     * ready, let it run at the next instruction boundary. */
+    if (sched_supervisor && nk_r32(c, SCHED_CURRENT) != sched_supervisor)
+        sched_need_yield = 1;
+    if (sched_log-- > 0)
+        printf("sched: thread-start hand-off consumed; re-armed %#010x\n",
+               sched_dummy);
+}
+
+static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
+                          uint32_t pc) {
+    (void)pc;
+    if (!sched_on || (imm & 0x1ffu) != SCHED_WAIT_SWI) return 0;
+    /* Only the kernel-start wait (BL at 0x50330a94) is the scheduled block.
+     * Earlier EUser code also executes `svc #0x4d` from its own wait loop
+     * (return address 0x5039865c); those keep the historical inline model. */
+    {
+        static uint32_t sched_lr;
+        if (!sched_lr) sched_lr = (uint32_t)env_ulong("NK_SCHED_LR", 0x50330a98u);
+        if ((c->r[14] & ~1u) != sched_lr) return 0;
+    }
+    uint32_t t = nk_r32(c, SCHED_CURRENT);
+    if (!t) return 0;
+    sched_thread* cur = sched_slot(t, 1);
+    if (!cur) return 0;
+    if (!sched_supervisor) sched_supervisor = t;
+
+    /* Save the caller.  LR is the return address of the BL that entered the
+     * EUser stub; the stub is a tail branch to the SVC instruction, so the
+     * executive call resumes there once the thread is running again. */
+    memcpy(cur->r, c->r, sizeof cur->r);
+    cur->cpsr = c->cpsr;
+    cur->resume_pc = c->r[14];
+    cur->r[15] = cur->resume_pc & ~1u;   /* resume after the call gate */
+    cur->status = nk_r32(c, SCHED_PENDING);
+    cur->started = 1;
+    sched_save_calls(ip, cur);
+    if (cur->calls_n > 0) cur->calls_n--;  /* the call gate consumes its BL */
+    cur->state = 3;
+    sched_blocks++;
+    if (sched_log-- > 0)
+        printf("sched: thread %#010x blocks on svc #0x%02x (status %#010x, "
+               "resume %#010x)\n", t, imm & 0x1ffu, cur->status,
+               cur->resume_pc);
+
+    /* Pick the next thread: the kernel's NULL thread is the only other one
+     * this boot has created. */
+    uint32_t nt = nk_r32(c, SCHED_NULL_GLOBAL);
+    sched_thread* next = NULL;
+    if (nt && nt != t) {
+        sched_thread* n = sched_slot(nt, 1);
+        if (n && n->state != 3) next = n;
+    }
+    if (!next) {
+        for (int i = 0; i < SCHED_SLOTS && !next; i++)
+            if (sched_slot_tab[i].thread && sched_slot_tab[i].thread != t &&
+                sched_slot_tab[i].state == 1)
+                next = &sched_slot_tab[i];
+    }
+    if (!next) {
+        if (sched_log-- > 0)
+            printf("sched: no runnable thread; %#010x stays blocked\n", t);
+        return 0;
+    }
+
+    if (!next->started) {
+        uint32_t base = (uint32_t)env_ulong("NK_SCHED_STACK", SCHED_STACK_BASE);
+        if (!nk_page_ptr(c, base)) {
+            if (nk_alloc_ram(c, base, SCHED_STACK_SIZE) != 0) {
+                printf("sched: cannot map NULL-thread stack %#010x\n", base);
+                return 0;
+            }
+        }
+        for (uint32_t o = 0; o < SCHED_STACK_SIZE; o += 4) nk_w32(c, base + o, 0);
+        memset(next->r, 0, sizeof next->r);
+        next->r[13] = base + SCHED_STACK_SIZE - 0x10u;
+        next->r[14] = 0xdead0000u;
+        next->r[15] = (uint32_t)env_ulong("NK_SCHED_ENTRY", SCHED_NULL_ENTRY);
+        /* Kernel threads run in SVC mode; keep the caller's IRQ mask. */
+        next->cpsr = (cur->cpsr & 0x000000c0u) | 0x40000013u;
+        /* The kernel's resume path clears the suspend bits before a thread
+         * runs; the direct switch bypasses it, so clear them here. */
+        nk_w32(c, next->thread + 0x20u,
+               nk_r32(c, next->thread + 0x20u) & ~0xcu);
+        next->calls_n = 0;
+        next->started = 1;
+        next->state = 1;
+        printf("sched: first switch -> NULL thread %#010x, entry %#010x, "
+               "stack %#010x..%#010x\n", next->thread, next->r[15],
+               base, base + SCHED_STACK_SIZE);
+    }
+
+    /* Kernel hand-off (0x50318398): the first switch publishes the new
+     * current thread and completes the startup request at [0x80001784]. */
+    if (!sched_startup_done) {
+        uint32_t st = nk_r32(c, SCHED_PENDING);
+        if (st) nk_w32(c, st & ~3u, 0);
+        nk_w32(c, SCHED_PENDING, 0);
+        sched_startup_done = 1;
+        cur->state = 1;          /* the waiting supervisor is runnable again */
+        cur->r[0] = 0;
+        /* The kernel's start hand-off (0x50318398, DThread vtable+0x20) is
+         * also what the NULL thread itself executes on its way up: it reads
+         * [0x80001784], completes that TRequestStatus and publishes the new
+         * current thread.  Re-arm the slot with a pending status owned by the
+         * harness stack so the guest path runs instead of panicking 0x73
+         * ("no thread-start request").  The supervisor's own request has just
+         * been completed above, exactly like the kernel hand-off does. */
+        uint32_t dummy = 0x80530000u;        /* harness hand-off page */
+        if (!nk_page_ptr(c, dummy)) {
+            if (nk_alloc_ram(c, dummy, 0x1000u) == 0)
+                for (uint32_t o = 0; o < 0x1000u; o += 4) nk_w32(c, dummy + o, 0);
+        }
+        sched_dummy = dummy;
+        nk_w32(c, dummy, 0x80000001u);       /* KRequestPending */
+        nk_w32(c, SCHED_PENDING, dummy);
+        nk_dbg_watch_write2(dummy, sched_handoff_hook);
+        if (sched_log-- > 0)
+            printf("sched: startup request %#010x completed, supervisor "
+                   "%#010x ready; hand-off re-armed at %#010x\n",
+                   st, cur->thread, dummy);
+    }
+
+    sched_resume(c, ip, next);
+    sched_switches++;
+    if (sched_log-- > 0)
+        printf("sched: switch #%u -> thread %#010x pc %#010x sp %#010x "
+               "cpsr %#010x\n", sched_switches, next->thread, c->r[15],
+               c->r[13], c->cpsr);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* B7e boot-state stand-in: initial thread -> process -> object index  */
 /*                                                                     */
 /* A cold boot lets the mask ROM build the first DThread/DProcess       */
@@ -1828,6 +2109,22 @@ int main(int argc, char** argv) {
         ip.pc_hook = timerq_pc_hook;
         printf("timerq: will inject [0x80001c34] before %#010x\n",
                ip.pc_hook_addr);
+    }
+
+    /* Round 33: model `svc #0x4d` (WaitForAnyRequest) as a block plus a
+     * context switch to the kernel's NULL thread.  It runs before the
+     * generic SWI dispatch, so NK_SWI_COMPLETE=0x4d must not be set. */
+    if (env_ulong("NK_SCHED", 0)) {
+        sched_on = 1;
+        ip.swi_hook = sched_swi_hook;
+        ip.yield_hook = sched_yield_hook;
+        /* The inline NK_SWI_COMPLETE model stays for every other call site;
+         * sched_swi_hook claims only the kernel-start wait. */
+        sched_log = (int)env_ulong("NK_SCHED_LOG", 8);
+        printf("sched: wait-any-request switch model on (svc #0x%02x, "
+               "NULL thread [%#010x], entry %#010x)\n",
+               SCHED_WAIT_SWI, SCHED_NULL_GLOBAL,
+               (uint32_t)env_ulong("NK_SCHED_ENTRY", SCHED_NULL_ENTRY));
     }
 
     printf("run: sp=%#010x cpsr=%#010x budget=%ld infer=%d call-infer=%d policy=%d\n",

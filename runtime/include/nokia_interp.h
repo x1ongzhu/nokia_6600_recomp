@@ -170,6 +170,19 @@ typedef struct nk_interp {
      * returns immediately.  This stands in for the interrupt/DMA completion
      * path a headless boot does not have yet.  Bit i covers SWI index i. */
     uint64_t swi_complete[8];
+    /* Round 33: a scheduler can intercept an executive call before the
+     * generic dispatch.  The hook sees the live CPU state and the SWI
+     * immediate; returning 1 means it installed a new context (PC/CPSR) and
+     * the interpreter must continue there, 0 falls through to swi_direct.
+     * Used to model `svc #0x4d` (WaitForAnyRequest) as a real block plus
+     * context switch instead of an inline "request complete" HLE. */
+    int (*swi_hook)(nk_cpu_t* c, struct nk_interp* ip, uint32_t imm,
+                    uint32_t pc);
+    /* Round 33: instruction-boundary preemption.  The scheduler sets a flag
+     * from a write hook (the kernel's thread-start hand-off) and this hook
+     * performs the actual context switch at the next instruction boundary.
+     * Returning 1 means a new context is installed; 0 does nothing. */
+    int (*yield_hook)(nk_cpu_t* c, struct nk_interp* ip);
     /* Bring-up allocator: EUser's RHeap is created by the kernel/scheduler
      * startup that a direct E32-entry boot skips.  When enabled, a call to
      * the guest RHeap::Alloc entry is served by a bump allocator over the

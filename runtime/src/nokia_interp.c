@@ -266,6 +266,9 @@ static int in_code(const nk_interp_t* ip, uint32_t a) {
  * explicit direct dispatcher keeps the same observable convention.  It is a
  * bring-up aid: NK_SWI_DIRECT=1, not the final CPU model. */
 static int swi_direct(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm, uint32_t pc) {
+    /* A bring-up scheduler gets first refusal: it may block the caller and
+     * install another thread's context. */
+    if (ip->swi_hook && ip->swi_hook(c, ip, imm, pc)) return 1;
     if (!ip->swi_direct || !ip->swi_table) return 0;
     uint32_t idx = imm & 0x1ffu;
     uint32_t slot = ip->swi_table + idx * 4u;
@@ -1728,6 +1731,10 @@ int nk_interp_run(nk_cpu_t* c, nk_interp_t* ip) {
     if (ip->banked) bank_save(c);   /* publish the initial SVC/USR view */
     unsigned tick_acc = 0;
     while (ip->budget-- > 0) {
+        /* Scheduler preemption point: a bring-up scheduler that has decided
+         * to switch threads installs the new context here, on an instruction
+         * boundary, and the loop continues at its PC. */
+        if (ip->yield_hook && ip->yield_hook(c, ip)) continue;
         /* Advance the UPP timer device in 16-instruction quanta.  It only
          * does work when NK_TIMER=1 and the guest has armed a unit. */
         if ((tick_acc++ & 15u) == 0) nk_bus_tick(c, 16);
