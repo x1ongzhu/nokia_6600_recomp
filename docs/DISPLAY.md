@@ -100,9 +100,24 @@ imports，或改用 kernel 的 process loader。
 ```
 
 最后一笔把 `0x5068c0a4` 变成 `0x50680000`；`[0x50680008]=0x068a0689`，
-于是调用逃到 `0x068a0688`。对象在构造后被当作 `TDes8` 风格的缓冲区
-使用，说明直接入口还缺真实进程的 C++/descriptor 状态。下一步要么
-补齐 constructors/descriptor 初始化，要么改用 kernel process loader。
+于是调用逃到 `0x068a0688`。
+
+完整调用链（round 40）：
+
+```
+5068a4f6  movs r0,#0x14           ; allocate 20 bytes
+5068a4f8  bl   operator new       ; -> 0x80600018
+5068a502  bl   0x5068a5bc         ; construct, vtable 0x5068c0a4
+5068a4ee  bl   0x5068b70c         ; EUser formatting path
+5038bc38  EUser descriptor helper
+5038bc6c  byte store to [r3+1]    ; r3 = 0x80600018, the object
+```
+
+同一个 `0x80600018` block 既是 CBase 对象又是格式化调用的 `TDes8`
+缓冲区，所以 vtable 被破坏。`NK_APP_STACK_CLEAR=1` 清零用户栈也不改变
+它：descriptor header 是 guest 自己构造的。直接入口因此缺少真实进程的
+user-side descriptor/thread context。下一步要么补齐这部分，要么改用
+kernel process loader。
 
 这条路径绕过了 kernel 死锁，是目前离第一帧最近的路线。
 

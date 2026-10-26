@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 39）
+最后更新：2026-10-26（round 40）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -166,6 +166,14 @@
   `0x50680000`；`[0x50680008]=0x068a0689`，调用逃到 `0x068a0688`。
   对象构造后被当作 `TDes8` 缓冲区复用，直接入口仍缺真实进程的
   C++/descriptor 状态。
+
+- **descriptor/object 重叠**（round 40）：`0x80600018` 是 20 字节对象，
+  构造函数装 vtable `0x5068c0a4`；随后
+  `0x5068a4ee -> 0x5068b70c -> EUser 0x5038bc38` 的格式化路径把同一
+  block 当作 `TDes8` 缓冲区，在 `0x5038bc6c` 写 byte，破坏 vtable。
+  `NK_APP_STACK_CLEAR=1` 无效，descriptor header 是 guest 构造的。
+  直接 FbServ 入口因此缺少真实进程的 user-side descriptor/thread
+  context。
 
 ### 未完成
 

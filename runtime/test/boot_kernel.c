@@ -2299,6 +2299,18 @@ int main(int argc, char** argv) {
                (uint32_t)env_ulong("NK_SCHED_ENTRY", SCHED_NULL_ENTRY));
     }
 
+    /* Direct app entry: a real process starts with a zeroed user stack.  The
+     * harness stack may still contain B7e/timerq setup words, which can be
+     * mistaken for descriptor headers by EUser formatting code. */
+    if (env_ulong("NK_APP_STACK_CLEAR", 0)) {
+        uint32_t base = (cpu.r[13] - 0x2000u) & ~3u;
+        if (!nk_page_ptr(&cpu, base))
+            nk_alloc_ram(&cpu, base, 0x2000u);
+        for (uint32_t o = 0; o < 0x2000u; o += 4)
+            nk_w32(&cpu, base + o, 0);
+        printf("app stack cleared: %#010x..%#010x\n", base, cpu.r[13]);
+    }
+
     printf("run: sp=%#010x cpsr=%#010x budget=%ld infer=%d call-infer=%d policy=%d\n",
            cpu.r[13], cpu.cpsr, ip.budget, ip.infer_mode, ip.infer_calls,
            ip.call_policy);

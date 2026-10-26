@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 39)
+## Status (2026-10-26, round 40)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -186,6 +186,13 @@ stable executive loop. What works:
   `TDes8`-style buffer after construction, so the direct-entry path lacks the
   C++/descriptor state a real process would have.
 
+- [x] **Descriptor/object overlap** (round 40): the 20-byte object at
+  `0x80600018` is constructed with vtable `0x5068c0a4`, then the formatting
+  path `0x5068a4ee -> 0x5068b70c -> EUser 0x5038bc38` uses the same block as
+  a `TDes8` buffer at `0x5038bc6c`. Clearing the user stack does not change
+  it; the guest builds the descriptor header itself. The direct FbServ route
+  therefore needs the user-side descriptor/thread context of a real process.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -303,7 +310,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round36.sh` | MMIO write PC/LR provenance; `0x41000000`/`0x41080000` is the boot-region table, not the LCD framebuffer |
 | `tools/test_round37.sh` | static display-chain inventory (`FbServ.exe`, `FbsCli.dll`, `BitGdi.dll`, `ecust.dll` hardware constants) |
 | `tools/test_round38.sh` | direct Thumb FbServ startup, 3,612 instructions, uninitialized-vtable blocker at `0x5068a572` |
-| `tools/test_round39.sh` | **current acceptance**: exact FbServ vtable write/overwrite sequence; byte/halfword write watches |
+| `tools/test_round39.sh` | exact FbServ vtable write/overwrite sequence; byte/halfword write watches |
+| `tools/test_round40.sh` | **current acceptance**: FbServ descriptor/object overlap call chain and 20-byte allocation |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
