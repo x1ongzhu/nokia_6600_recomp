@@ -665,6 +665,15 @@ handle `0x32`）。说明这个 wait 等的是**真实启动的线程**；下一
 EStart 的 blocker 是 service-start handshake，与 SVC 模型无关。
 验收 `tools/test_round77.sh`。
 
+### 2.31 round 78：fake scheduler thread 进入 EStart server entry
+
+`NK_SCHED_FAKE=1` 在 `0x80004600` 预建 scheduler slot 并把
+`[0x80000400]` 指向它；`NK_SCHED_ENTRY=0x503db158`、
+`NK_SCHED_STACK=0x80560000`。EStart wait 时 scheduler 切进 server
+entry。entry 跑约 100 条后在 `lr=0x503db18f` null-call（经由
+`0x503db454 -> slot 0x503b3d14 -> 0x503a2960`，pc=0）。
+framebuffer 仍 0 像素。验收 `tools/test_round78.sh`。
+
 ---
 
 ## 3. EUser 导入映射

@@ -713,6 +713,23 @@ framebuffer 0。说明 EStart 的 blocker 是 **service-start
 handshake**，与 banked SVC/exception 模型无关；下一步仍是真实
 request/server completion。验收：`tools/test_round77.sh`。
 
+### round 78：fake scheduler thread 进入 EStart server entry
+
+新增 `NK_SCHED_FAKE=1`：在 `0x80004600` 预建 scheduler slot 并把
+`[0x80000400]` 指向它；`NK_SCHED_ENTRY=0x503db158`、
+`NK_SCHED_STACK=0x80560000`。EStart wait 时 scheduler 不再报
+"no runnable thread"，而是切进 server entry。
+
+该 entry 跑约 100 条后在 `lr=0x503db18f` null-call：
+
+```
+0x503db18a  bl 0x503db454   ; slot 0x503b3d14 -> 0x503a2960
+pc = 0
+```
+
+新 frontier 是该 server import/argument，不是 scheduler 切换。
+framebuffer 仍 0。验收：`tools/test_round78.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -775,6 +792,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 实现真实 request/server completion：round 76/77 已证明 DThread
-   clone 和换 SVC 模型都不够。下一步完成 request 并交付消息，或实现
-   minimal scheduler/server。
+8. 补 EStart server 的第一个 import/argument：round 78 已用
+   `NK_SCHED_FAKE` 切进 server entry，当前在 `0x503db18f` null-call
+   （slot `0x503b3d14 -> 0x503a2960`）。先让 server 继续运行，再完成
+   wait。

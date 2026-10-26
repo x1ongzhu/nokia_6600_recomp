@@ -181,6 +181,10 @@
  *                           (round 33).  NK_SCHED_LOG=n limits the scheduler
  *                           log; NK_SCHED_DEFER=1 preempts only after the
  *                           start hand-off returns at 0x5033130c (round 35).
+ *   NK_SCHED_FAKE=1         pre-create a scheduler slot at 0x80004600 and
+ *                           point [0x80000400] at it; NK_SCHED_ENTRY is its
+ *                           first PC and NK_SCHED_STACK its stack (round 78).
+ *   NK_SCHED_R0=0x...       initial r0 for that fake thread (round 78).
  *   NK_E32_SECTIONS=1       with --e32: place data/exports/dllref at their
  *                           runtime addresses (finds the packed export run)
  *   NK_E32_HDR=0x64         serialized EKA1 image header size (code offset)
@@ -999,6 +1003,7 @@ static int sched_swi_hook(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm,
         }
         for (uint32_t o = 0; o < SCHED_STACK_SIZE; o += 4) nk_w32(c, base + o, 0);
         memset(next->r, 0, sizeof next->r);
+        next->r[0] = (uint32_t)env_ulong("NK_SCHED_R0", 0);
         next->r[13] = base + SCHED_STACK_SIZE - 0x10u;
         next->r[14] = 0xdead0000u;
         next->r[15] = (uint32_t)env_ulong("NK_SCHED_ENTRY", SCHED_NULL_ENTRY);
@@ -2488,6 +2493,21 @@ int main(int argc, char** argv) {
     /* Round 33: model `svc #0x4d` (WaitForAnyRequest) as a block plus a
      * context switch to the kernel's NULL thread.  It runs before the
      * generic SWI dispatch, so NK_SWI_COMPLETE=0x4d must not be set. */
+    if (env_ulong("NK_SCHED_FAKE", 0)) {
+        /* Round 78: pre-create the thread the app's StartThread owns so the
+         * scheduler's next-thread search finds it.  The first switch uses
+         * NK_SCHED_ENTRY / NK_SCHED_STACK to initialise it. */
+        uint32_t ft = 0x80004600u;
+        sched_slot(ft, 1);
+        nk_w32(&cpu, 0x80000400u, ft);
+        nk_w32(&cpu, ft + 0x00, 0x80003040u);
+        nk_w32(&cpu, ft + 0x14, 1);
+        nk_w32(&cpu, ft + 0x18, 0x80003200u);
+        nk_w32(&cpu, ft + 0x5c, 0x80003f00u);
+        nk_w32(&cpu, ft + 0x64, 0x80003300u);
+        printf("sched: fake thread %#010x pre-created for entry %#010x\n",
+               ft, (uint32_t)env_ulong("NK_SCHED_ENTRY", 0));
+    }
     if (env_ulong("NK_SCHED", 0)) {
         sched_on = 1;
         sched_defer = (int)env_ulong("NK_SCHED_DEFER", 0);
