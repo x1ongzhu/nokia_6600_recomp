@@ -547,6 +547,13 @@ banked SVC self-loop，而是跑到 EwSrv `0x506ca5e4` null call
 这说明 banked SVC return 和 EwSrv jump-table relocation 是两条独立
 的 blocker，direct dispatch 可以先绕开前者。
 
+`0xb5f00000` 的具体来源也追到了：`0x506ca5c0` 调 `0x506cd866` 时
+把 `r3=0x506ca57f`（EwSrv 函数自己的入口地址）传进去；`0x506cd866`
+是 `ldr r3,[r3]` thunk，于是读到 `0x506ca57c` 的首字
+`b5f00000` 并跳过去。也就是说，EwSrv export slot `0x506ce44c`
+snap 到 `0x506ca57f` 后，调用参数/目标仍不对，下一轮需要确认
+EwSrv 对该 slot 真正的函数入口（可能是相邻的 `0x506ca5ee` 等）。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。

@@ -399,6 +399,10 @@
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的
     `0x506cd868 -> 0xb5f00000` wild jump。说明 banked SVC return 和
     EwSrv jump-table relocation 是两条独立 blocker。
+  - `0xb5f00000` 的机制：`0x506ca5c0` 调 `0x506cd866` 时 r3 是
+    EwSrv 函数自身入口 `0x506ca57f`；`0x506cd866` 的
+    `ldr r3,[r3]` 从 `0x506ca57c` 读到首字 `b5f00000` 并跳过去。
+    snap 目标/调用参数仍不对，需要找该 slot 真正的 EwSrv 入口。
   - 该实验放在 `config/imports-app-main-6600.txt`，默认 app map
     （`imports-app-6600.txt`）仍只做 round-63 的 CBase rebind，保持
     干净返回。framebuffer 仍无 app 像素。

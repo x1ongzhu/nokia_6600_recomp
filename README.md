@@ -446,7 +446,9 @@ app main's StartThread/SVC path. What works:
   `0x503988f0`; the `0xe59ff028` MMIO writes are gone and the framebuffer is
   untouched. The remaining blocker is the app main's StartThread/SVC path,
   still self-looping at `0x50314f78` with `r1=0x32`.
-  `tools/test_round66.sh` pins the result.
+  `tools/test_round66.sh` pins the result, including a direct-dispatch
+  control that bypasses the banked SVC loop and reaches EwSrv's
+  `0xb5f00000` thunk jump.
 
 Not implemented yet:
 
@@ -591,7 +593,7 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round62.sh` | app-entry allocator cell header, StartThread completion, and shared EUser export-slot conflict |
 | `tools/test_round63.sh` | first app-side EUser import rebind; CBase vtable `0x503b359c`; static init returns cleanly |
 | `tools/test_round64.sh` | TTrap rebind exposes the app main path; kernel SVC-return self-loop at `0x50314f78` |
-| `tools/test_round66.sh` | **current acceptance**: low allocator rebind removes `0xe59ff028`; remaining StartThread/SVC self-loop |
+| `tools/test_round66.sh` | **current acceptance**: low allocator rebind removes `0xe59ff028`; banked SVC loop remains; direct dispatch reaches EwSrv |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
