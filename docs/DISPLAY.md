@@ -285,6 +285,10 @@ round 53 找到了真正的 LCD/framebuffer 基址。ecust.dll 的显示配置
 全 0。这现在是抓第一帧的 capture target；下一步是让 guest 真正执行
 显示初始化/draw。
 
+round 54 又验证了 kernel boot 本身：带 `NK_MAP_LCD=1` 跑满 6M，
+`0x59800000` 仍然全 0，停在 `0x50312720`。说明 kernel bring-up 也
+没有到达 display driver/UI 层；window-server/app-loader 仍是缺口。
+
 下一步是给 flat image 的 ROMFS app 加 literal-pool/relocation 处理，
 或 HLE window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 

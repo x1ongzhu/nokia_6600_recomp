@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 53)
+## Status (2026-10-26, round 54)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -306,6 +306,13 @@ stable executive loop. What works:
   SplashScreen run writes **no pixels**; the 4 MiB dump is all zero. This is
   now the capture target for the first frame.
 
+- [x] **Kernel boot also writes no LCD** (round 54): mapping
+  `0x59800000` during the normal kernel boot (`NK_MAP_LCD=1`, 6M budget)
+  still gives an all-zero 4 MiB dump. The kernel boot stops at `0x50312720`
+  before any display driver/UI process runs. Neither the kernel path nor the
+  stable SplashScreen path writes the LCD; the window-server/app-loader
+  layer is the missing piece.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -437,7 +444,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round50.sh` | EwSrv passes its first missing-DLL call via a mapped zero-return stub |
 | `tools/test_round51.sh` | EwSrv callmap redirect to its real prologue, then the packed-veneer literal frontier |
 | `tools/test_round52.sh` | EwSrv IAT is resolved but the veneer literal at `0x506c1dba` is padding (`0x40b846c0`) |
-| `tools/test_round53.sh` | **current acceptance**: real LCD base `0x59200000`, framebuffer `0x59800000`, currently all-zero |
+| `tools/test_round53.sh` | real LCD base `0x59200000`, framebuffer `0x59800000` |
+| `tools/test_round54.sh` | **current acceptance**: the normal kernel boot also writes no LCD pixels (4 MiB all-zero) |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 
