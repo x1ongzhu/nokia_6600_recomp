@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 95）
+最后更新：2026-10-26（round 96）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -715,6 +715,26 @@
     异常分配，EFile 在 868 条 Thumb 指令后进入一个阻塞等待，boot 继续
     跑到预算。
   - 验收 `tools/test_round95.sh`（control + revert 两次运行对比）。
+
+- **app 线程被饿死 + EFile 的 "FileServer" 门槛**（round 96）：
+  - `NK_SCHED_NO_PREEMPT=1`：首次切换后，bring-up supervisor 会在
+    insns=440,847 再次抢占 app 线程；而它此后**再也不发
+    `svc #0x4d`**，于是 EFile 在 ~1,500 条指令后被永久饿死，剩余预算
+    全给了 supervisor。加该开关后 app 线程一直跑到自己阻塞或返回。
+  - 发现 EFile 的启动门槛：入口 `0x503b7104` 走静态构造后调
+    main `0x503bfe6c`，main 先调 `0x503bfe18`。该门槛构造字面量
+    **"FileServer"**（UTF-16 @ `0x503c7a34`），调用 EUser export 757
+    （`0x503b4368` → `0x5039912c` → **`svc #0x1c`**），**只有返回
+    `-1`（KErrNotFound）才继续**。我们的模型返回 0，于是 main 立刻
+    返回，线程在 insns=446,003 "returned"，kernel 随即走非 0x32 的
+    `Kern::StartThread` 路径。
+  - 新增通用 `NK_SWI_RET=<imm>:<value>`。用 `NK_SWI_RET=0x1c:-1`
+    绕过门槛后，EFile 前进到 `0x5039c6bc` 的**真实 RHeap 空闲链表
+    遍历**，`r4=0x2f`、`r6=0x80601b64` 自旋：**HLE bump 分配器发出的
+    块不维护 guest heap 的 cell 链表，因此 guest 的真实 RHeap 代码
+    无法在 HLE 堆上运行** —— 这是下一个 frontier（要么把堆入口全部
+    HLE，要么改用 guest 真实堆）。
+  - 验收 `tools/test_round96.sh`。
   - direct-dispatch control（`NK_SWI_DIRECT=1 NK_SWI_EXCEPTION=0`）不再
     撞 banked SVC self-loop，而是到 EwSrv `0x506ca5e4`（1,561 条）；
     加 EwSrv slot `0x506ce44c -> 0x506ca57f` 后到已知的

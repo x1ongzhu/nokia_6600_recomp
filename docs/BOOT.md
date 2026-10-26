@@ -1118,3 +1118,19 @@ EUser 的导出表**同时就是所有 ROM 镜像的 import slot 表**：ROM imp
 时全部写回。control 运行仍报 `HLE alloc rejected: 0x503c7168`；
 revert 运行无异常分配，EFile 在 868 条 Thumb 指令后进入阻塞等待。
 验收 `tools/test_round95.sh`。
+
+### 2.49 round 96：app 线程饿死与 EFile 的 "FileServer" 门槛
+
+`NK_SCHED_NO_PREEMPT=1`：首次切换后 supervisor 会在 440,847 再次抢占
+app 线程，且此后不再发 `svc #0x4d`，EFile 因此被饿死。
+
+EFile 入口 `0x503b7104` → 静态构造 → main `0x503bfe6c` → 门槛
+`0x503bfe18`。门槛构造字面量 **"FileServer"**（UTF-16 @ `0x503c7a34`），
+调 EUser export 757（`0x503b4368` → `0x5039912c` → **`svc #0x1c`**），
+**只有返回 -1（KErrNotFound）才继续**。模型返回 0，main 立即返回，
+线程在 446,003 "returned"，kernel 走非 0x32 的 `Kern::StartThread` 路径。
+
+新增 `NK_SWI_RET=<imm>:<value>`。`NK_SWI_RET=0x1c:-1` 绕过门槛后，
+EFile 在 `0x5039c6bc` 自旋于真实 RHeap 空闲链表（`r4=0x2f`、
+`r6=0x80601b64`）：**HLE bump 分配器不维护 guest heap 的 cell 链表，
+guest 真实 RHeap 代码无法在其上运行**。验收 `tools/test_round96.sh`。

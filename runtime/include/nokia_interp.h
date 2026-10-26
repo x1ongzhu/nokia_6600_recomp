@@ -171,6 +171,10 @@ typedef struct nk_interp {
      * returns immediately.  This stands in for the interrupt/DMA completion
      * path a headless boot does not have yet.  Bit i covers SWI index i. */
     uint64_t swi_complete[8];
+    /* Bring-up override: return a fixed value from one SVC number instead of
+     * entering the kernel service.  0 disables it. */
+    uint32_t swi_ret_idx;
+    uint32_t swi_ret_value;
     /* Round 33: a scheduler can intercept an executive call before the
      * generic dispatch.  The hook sees the live CPU state and the SWI
      * immediate; returning 1 means it installed a new context (PC/CPSR) and

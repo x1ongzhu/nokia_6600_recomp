@@ -313,6 +313,17 @@ static int swi_direct(nk_cpu_t* c, nk_interp_t* ip, uint32_t imm, uint32_t pc) {
     if (ip->swi_hook && ip->swi_hook(c, ip, imm, pc)) return 1;
     if (!ip->swi_direct || !ip->swi_table) return 0;
     uint32_t idx = imm & 0x1ffu;
+    if (ip->swi_ret_idx && idx == ip->swi_ret_idx) {
+        if (ip->swi_log-- > 0)
+            fprintf(stderr, "[interp] SWI %#x at %#010x -> forced return %#x\n",
+                    imm, pc, ip->swi_ret_value);
+        c->r[0] = ip->swi_ret_value;
+        int new_t = (c->r[14] & 1u) ? 1 : 0;
+        int restored = pop_call(ip, c->r[14] & ~1u, &new_t);
+        set_thumb(c, restored ? new_t : (c->r[14] & 1u));
+        c->r[15] = c->r[14] & ~1u;
+        return 1;
+    }
     uint32_t slot = ip->swi_table + idx * 4u;
     if (ip->swi_complete[idx >> 6] & (1ull << (idx & 63u))) {
         uint32_t status = c->r[0];

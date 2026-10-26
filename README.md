@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 95)
+## Status (2026-10-26, round 96)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -101,7 +101,8 @@ ROM boot chain and the empty kernel object index; round 92 shows the kernel
 cannot start the next boot stage by itself; round 93 fixes thread entry-mode
 selection so a real ROM image (EFile) runs to the kernel; round 94 pushes it
 through the kernel start hand-off; round 95 stops kernel-time import rebinds
-from leaking into an app thread. What works:
+from leaking into an app thread; round 96 isolates EFile's "FileServer" gate
+and the HLE-heap / guest-RHeap conflict. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -720,6 +721,21 @@ from leaking into an app thread. What works:
   allocation and EFile reaches a blocking wait after 868 Thumb instructions.
   `tools/test_round95.sh` pins both runs.
 
+- [x] **App-thread starvation and the "FileServer" gate** (round 96):
+  `NK_SCHED_NO_PREEMPT=1` stops the bring-up supervisor from preempting the
+  application thread at insns=440,847 and never giving the CPU back (it issues
+  no further `svc #0x4d`). EFile's main `0x503bfe6c` first calls the gate
+  `0x503bfe18`, which builds the literal `"FileServer"` (UTF-16 at
+  `0x503c7a34`), calls EUser export 757 (`0x503b4368` -> `0x5039912c` ->
+  `svc #0x1c`) and continues only when the result is -1 (KErrNotFound). Our
+  model returns 0, so main returns immediately and the kernel takes the
+  non-0x32 `Kern::StartThread` path. The new `NK_SWI_RET=<imm>:<value>`
+  override bypasses the gate (`NK_SWI_RET=0x1c:-1`), after which EFile spins
+  at `0x5039c6bc` walking a real RHeap free list (`r4=0x2f`,
+  `r6=0x80601b64`): the HLE bump allocator does not maintain the guest heap's
+  cell links, so guest RHeap code cannot run on a HLE heap. That is the next
+  frontier. `tools/test_round96.sh` pins both runs.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -891,7 +907,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round92.sh` | kernel idles after one timer IRQ; no process is ever created; harness must do the boot hand-off |
 | `tools/test_round93.sh` | thread entry-mode honours iEntryPoint bit 0; EFile runs into the kernel |
 | `tools/test_round94.sh` | EFile passes the kernel start hand-off |
-| `tools/test_round95.sh` | **current acceptance**: `NK_IMPORTMAP_REVERT` keeps kernel-time rebinds out of the app thread; EFile blocks cleanly |
+| `tools/test_round95.sh` | `NK_IMPORTMAP_REVERT` keeps kernel-time rebinds out of the app thread |
+| `tools/test_round96.sh` | **current acceptance**: app thread is not starved; EFile's SVC 0x1c "FileServer" gate; HLE heap vs guest RHeap |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

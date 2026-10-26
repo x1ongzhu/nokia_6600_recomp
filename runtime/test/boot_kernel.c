@@ -1024,6 +1024,12 @@ static int sched_yield_hook(nk_cpu_t* c, nk_interp_t* ip) {
         sched_arm_pc = 0;
     }
     sched_need_yield = 0;
+    /* Round 96: once an application thread has been dispatched, the
+     * bring-up supervisor must not steal the CPU back - on this boot it
+     * never issues another svc #0x4d, so the app thread would be starved
+     * after ~1,500 instructions.  NK_SCHED_NO_PREEMPT=1 keeps the app
+     * thread running until it blocks by itself. */
+    if (env_ulong("NK_SCHED_NO_PREEMPT", 0) && sched_switches >= 1) return 0;
     if (!sched_on || !sched_supervisor) return 0;
     uint32_t t = nk_r32(c, SCHED_CURRENT);
     sched_thread* cur = sched_slot(t, 0);
@@ -2627,6 +2633,19 @@ int main(int argc, char** argv) {
     ip.swi_table = (uint32_t)env_ulong("NK_SWI_TABLE", 0x50314aec);
     ip.swi_log = (int)env_ulong("NK_SWI_LOG", 16);
     ip.banked = need_banks;
+    {
+        const char* sr = getenv("NK_SWI_RET");
+        if (sr) {
+            char* end = NULL;
+            unsigned long idx = strtoul(sr, &end, 0);
+            if (end && (*end == ':' || *end == '=')) {
+                ip.swi_ret_idx = (uint32_t)(idx & 0x1ffu);
+                ip.swi_ret_value = (uint32_t)strtoul(end + 1, NULL, 0);
+                printf("swi ret: svc %#lx -> %#x\n", idx & 0x1ffu,
+                       ip.swi_ret_value);
+            }
+        }
+    }
     ip.irq_log = (int)env_ulong("NK_IRQ_LOG", 0);
     const char* complete = getenv("NK_SWI_COMPLETE");
     if (complete) {
