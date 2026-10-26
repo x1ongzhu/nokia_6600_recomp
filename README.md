@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 37)
+## Status (2026-10-26, round 38)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -168,6 +168,15 @@ stable executive loop. What works:
   driver `ecust.dll` @ `0x50339750` with hardware constants `0x59E00010` /
   `0x59200000`. The first frame needs a launched FbServ process plus the
   LCD HLE; see [DISPLAY.md](docs/DISPLAY.md).
+
+- [x] **Direct FbServ startup** (round 38): `NK_ENTRY=0x506897d5
+  NK_SP=0x80580000` starts the original `FbServ.exe` directly in the flat
+  image, bypassing the kernel deadlock.  A Thumb `NK_ENTRY` now forces
+  `CPSR.T` even when `NK_CPSR` omits it.  FbServ runs **3,612 instructions**
+  and reaches its object initialization at `0x5068a572`; the next blocker is
+  the uninitialized object vtable `0x50680000` (`[vtable+8]=0x068a0689`), so
+  PC escapes to `0x068a0688`.  The next step is running FbServ's constructors
+  / DLL imports (or the kernel process loader).
 
 Not implemented yet:
 
@@ -284,7 +293,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round34.sh` | live DThread/CObjectIx graph, status-completion wake, Init3 HAL gate, banked stacks, 6M-instruction run (historical control) |
 | `tools/test_round35.sh` | hand-off returns before preemption, supervisor runs to 464k, Init3 deadlock pinned to the handle-`0x32`/DFC path |
 | `tools/test_round36.sh` | MMIO write PC/LR provenance; `0x41000000`/`0x41080000` is the boot-region table, not the LCD framebuffer |
-| `tools/test_round37.sh` | **current acceptance**: static display-chain inventory (`FbServ.exe`, `FbsCli.dll`, `BitGdi.dll`, `ecust.dll` hardware constants) |
+| `tools/test_round37.sh` | static display-chain inventory (`FbServ.exe`, `FbsCli.dll`, `BitGdi.dll`, `ecust.dll` hardware constants) |
+| `tools/test_round38.sh` | **current acceptance**: direct Thumb FbServ startup, 3,612 instructions, uninitialized-vtable blocker at `0x5068a572` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

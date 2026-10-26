@@ -61,7 +61,40 @@ handler 名称，但没有给出 framebuffer 或控制寄存器地址。
 
 ---
 
-## 3. 还缺什么
+## 3. 直接启动 FbServ（round 38）
+
+kernel 路径仍卡在 `RThread::Resume(0x32)`，所以 harness 增加了直接启动
+原始 `FbServ.exe` 的路径：
+
+```
+NK_ENTRY=0x506897d5 NK_SP=0x80580000 NK_CPSR=0x40000053
+```
+
+`FbServ` 的入口是 Thumb。`NK_CPSR=0x40000053` 不含 T 位，之前的
+harness 会把 Thumb prologue 当 ARM 解码，只在函数中途才恢复。现在
+**entry mode 是权威的**：Thumb `NK_ENTRY` 会强制 `CPSR.T=1`。
+
+结果：**3,612 条指令、0 undefined、0 unbound IAT**，FbServ 跑到
+`0x5068a572` 的对象初始化：
+
+```
+0x5068a572  ldr r0, [r5]
+0x5068a574  ldr r2, [r0, #8]
+0x5068a576  adds r0, r5, #0
+0x5068a578  movs r1, #3
+0x5068a57a  bl 0x5068b618        ; bx r2
+```
+
+对象 `0x80600018` 的 vtable 是 `0x50680000`，`[vtable+8]` 是
+`0x068a0689`，所以 PC 逃到 `0x068a0688`。这说明直接入口路径没有跑
+FbServ 的 C++ 构造函数/DLL import 初始化；下一步是补 constructors/
+imports，或改用 kernel 的 process loader。
+
+这条路径绕过了 kernel 死锁，是目前离第一帧最近的路线。
+
+---
+
+## 4. 还缺什么
 
 1. **进程启动**：`FbServ.exe` 还没有被 kernel 作为进程加载。当前
    supervisor 死在 `RThread::Resume(0x32)` 的 thread-start 等待上
@@ -75,11 +108,13 @@ handler 名称，但没有给出 framebuffer 或控制寄存器地址。
 
 ---
 
-## 4. 下一步
+## 5. 下一步
 
-1. 修 `RThread::Resume(0x32)` / thread-start completer（见 BOOT.md
-   2.11），让 supervisor 继续 Init2/Init3。
-2. 跟踪 `FbServ.exe` 的入口与 `FbsCli.dll` 的 `0x59200000` 引用，
+1. 修直接 FbServ 的对象初始化：跑 `.init_array`/constructors，或让
+   kernel 的 process loader 正常启动 FbServ。
+2. 修 `RThread::Resume(0x32)` / thread-start completer（见 BOOT.md
+   2.11），让 kernel 路径也能继续 Init2/Init3。
+3. 跟踪 `FbServ.exe` 的入口与 `FbsCli.dll` 的 `0x59200000` 引用，
    确认 variant 对象的 HAL id。
-3. 确认 LCD 寄存器窗口后实现 HLE，并在 guest 第一次提交 framebuffer
+4. 确认 LCD 寄存器窗口后实现 HLE，并在 guest 第一次提交 framebuffer
    时抓帧（PPM/PNG），而不是用宿主图案代替。

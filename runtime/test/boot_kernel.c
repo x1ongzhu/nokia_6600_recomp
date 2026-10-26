@@ -2119,7 +2119,12 @@ int main(int argc, char** argv) {
         const char* cs = getenv("NK_CPSR");
         if (cs) {
             cpu.cpsr = (uint32_t)strtoul(cs, NULL, 0);
-            printf("cpsr override: %#010x\n", cpu.cpsr);
+            /* The entry mode is authoritative: a Thumb NK_ENTRY must not be
+             * decoded as ARM just because NK_CPSR omitted the T bit. */
+            if (thumb_entry) cpu.cpsr |= NK_CPSR_T;
+            else             cpu.cpsr &= ~NK_CPSR_T;
+            printf("cpsr override: %#010x%s\n", cpu.cpsr,
+                   thumb_entry ? " (Thumb entry)" : "");
         }
     }
     cpu.r[15] = entry & ~1u;

@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 37）
+最后更新：2026-10-26（round 38）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -150,6 +150,15 @@
   `0x59E00010` 与 `0x59200000` 两个硬件窗口，仍需确认是 LCD/DMA/
   audio/keypad。第一帧需要先启动 FbServ 进程，再做 LCD HLE；详见
   [DISPLAY.md](DISPLAY.md)。
+
+- **直接启动 FbServ**（round 38）：kernel 路径仍卡在 handle `0x32`，
+  harness 新增直接入口：`NK_ENTRY=0x506897d5 NK_SP=0x80580000`。Thumb
+  `NK_ENTRY` 现在会强制 `CPSR.T=1`，不再被 `NK_CPSR=0x40000053` 清掉。
+  FbServ 跑 **3,612 条、0 undefined、0 unbound IAT**，到
+  `0x5068a572` 的对象初始化；对象 `0x80600018` 的 vtable 是
+  `0x50680000`，`[vtable+8]=0x068a0689`，PC 逃到 `0x068a0688`。
+  这说明直接入口没有跑 FbServ 的 constructors/DLL imports。下一步补
+  这部分，或改用 kernel process loader。详见 [DISPLAY.md](DISPLAY.md)。
 
 ### 未完成
 
