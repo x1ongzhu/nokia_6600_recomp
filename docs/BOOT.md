@@ -715,6 +715,13 @@ framebuffer 仍 0。验收 `tools/test_round82.sh`。
 下一 blocker 是该 dispatch 需要的真实 object/argument。
 验收 `tools/test_round83.sh`。
 
+### 2.37 round 84：EUser slot neighbor sweep 也不绘制
+
+把 slot `0x503cf984` 换成相邻表项 `0x503ce719`、`0x503c9e99`、
+`0x503c9c2d`，都在 30k–31k 条 null-call 或回到 `0x00a04d08`
+leave，framebuffer 仍 0。blocker 是 supervisor object/argument，不是
+单个 slot target。验收 `tools/test_round84.sh`。
+
 ---
 
 ## 3. EUser 导入映射

@@ -800,6 +800,14 @@ server 运行/返回链路已通；下一 blocker 仍是 supervisor 的
 路径；下一 blocker 是该 dispatch 需要的 supervisor object/argument。
 framebuffer 仍 0。验收：`tools/test_round83.sh`。
 
+### round 84：EUser slot neighbor sweep 也不绘制
+
+把 slot `0x503cf984` 依次换成相邻表项 `0x503ce719`、
+`0x503c9e99`、`0x503c9c2d`，结果都在 30k–31k 条 null-call 或回到
+`0x00a04d08` leave，framebuffer 仍 0。说明 blocker 是 supervisor
+object/argument，不是单个 slot target 选错。验收：
+`tools/test_round84.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -862,6 +870,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 补 supervisor `0x00a04d08` 需要的真实 object/argument：round 83
-   已证明 zero-return HLE 会进入 leave。下一步构造正确对象，而不是
-   继续 HLE。
+8. 构造 supervisor 传给 `0x00a04d08` 的正确 object/argument：
+   round 84 已排除相邻 slot target；下一步从 `r6/this` 的构造路径
+   入手，而不是换 slot/HLE。
