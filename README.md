@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 48)
+## Status (2026-10-26, round 49)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -266,6 +266,15 @@ stable executive loop. What works:
   imports/vtables are also uninitialised. Both point at the missing
   window-server/surface state, not the CPU.
 
+- [x] **Splash asset / EwSrv relocation facts** (round 49):
+  `SplashScreen.mbm` is a 0xd54-byte MBM with UID `0x10000041`, bitmap
+  offsets `0x10`/`0x8c0`, width `0xb0` (176), height `0xd0` (208) and
+  mostly-white `0x7fff` pixels. After the stable 2M SplashScreen run its RAM
+  contains **no MBM signature**, so the app has not loaded/decoded the
+  splash. EwSrv's null call comes from the Thumb veneer at `0x506c15ee`
+  loading the literal `0x4a7846c0`, which is not a valid IAT slot — a
+  relocation/veneer problem, not a simple unbound import.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -392,7 +401,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round45.sh` | stable real-SVC FbServ, full 2M budget in the EUser wait loop |
 | `tools/test_round46.sh` | splash-screen route; SplashScreen reaches EwSrv and stops on the bad pointer `0x506cbf1c` |
 | `tools/test_round47.sh` | EwSrv export snap; SplashScreen runs the full 2M budget in the wait service |
-| `tools/test_round48.sh` | **current acceptance**: wait-completion exposes a wild descriptor copy; direct EwSrv null-calls at `0x506c0b15` |
+| `tools/test_round48.sh` | wait-completion exposes a wild descriptor copy; direct EwSrv null-calls at `0x506c0b15` |
+| `tools/test_round49.sh` | **current acceptance**: splash MBM header, no MBM load in RAM, EwSrv bad veneer literal `0x4a7846c0` |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

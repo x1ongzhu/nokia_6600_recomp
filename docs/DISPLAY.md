@@ -221,7 +221,17 @@ round 48 用 `NK_WAIT_HLE=1`（semaphore Wait 完成 `[r5]` 并返回 0）让
 `lr=0x506c0b15` 处 null-call。两个路径都指向缺失的
 window-server/surface 状态，而不是 CPU。
 
-下一步是补齐 EwSrv/FbsCli 的 surface/descriptor 初始化，或 HLE
+round 49 又确认了两点：
+
+- `SplashScreen.mbm` 是 0xd54 字节的 MBM，header 在 `0x509efae0`：
+  UID `0x10000041`、bitmap offset `0x10`/`0x8c0`、宽 `0xb0`(176)、
+  高 `0xd0`(208)，像素主要是 `0x7fff`（RGB555 白）。stable 2M 运行后
+  的 RAM dump 里**没有 MBM signature**，说明 app 还没加载/解码 splash。
+- EwSrv 的 null call 来自 Thumb veneer `0x506c15ee` 加载的字面量
+  `0x4a7846c0`，它不是合法 IAT slot。这是 **relocation/veneer** 问题，
+  不是简单未绑定 import。
+
+下一步是补齐 EwSrv/FbsCli 的 relocation/surface 初始化，或 HLE
 window-server 的 create/draw 调用，把 splash 像素送进 framebuffer。
 
 另外，direct 路径对 `0x600000` 的 400 KB+ 写入不是 framebuffer，而是

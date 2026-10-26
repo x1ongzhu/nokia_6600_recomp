@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 48）
+最后更新：2026-10-26（round 49）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -235,6 +235,13 @@
   `0x5038d2d4` 的 wild descriptor copy（8-word expansion），跑到预算
   也没有显示绘制。直接跑 `EwSrv.exe`（`0x506a8205`）在
   `lr=0x506c0b15` null-call。下一步是 window-server/surface 状态。
+
+- **Splash MBM / EwSrv relocation**（round 49）：`SplashScreen.mbm`
+  是 0xd54 字节 MBM，header `0x509efae0`：UID `0x10000041`、offset
+  `0x10/0x8c0`、176×208、像素主要 `0x7fff`。stable 2M 运行后的 RAM
+  dump 没有 MBM signature，app 还没加载 splash。EwSrv null call 来自
+  veneer `0x506c15ee` 的坏字面量 `0x4a7846c0`，是 relocation/veneer
+  问题，不是未绑定 import。
 
 ### 未完成
 
