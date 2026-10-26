@@ -196,6 +196,14 @@
  *   NK_RAM_EXTRA=n          allocate n extra bytes of RAM above the 3 MiB
  *                           kernel-data window (the linear boot-region profile
  *                           uses NK_RAM_EXTRA=0x300000 for a 6 MiB bank)
+ *   NK_MAP_LCD=1            map the LCD controller 0x59200000 and the
+ *                           0x59800000 framebuffer (ecust.dll's display base)
+ *   NK_FB_MBM=1             decode SplashScreen.mbm's first bitmap from guest
+ *                           memory into a guest RGB565 source buffer at
+ *                           0x80800000 (round 61); pair with a guest
+ *                           EUser Mem::Copy to write the real Nokia logo frame
+ *   NK_FB_SRC=1             fill that source buffer with 16bpp white instead
+ *                           (round 58 splash-background control)
  *   NK_DUMP=a:l[,a:l...]    append guest memory ranges to NK_DUMP_FILE at the
  *                           end of the run (default out/memdump.bin)
  *   NK_POKE=a:v[,a:v...]    write 32-bit values to guest addresses before the
@@ -229,6 +237,105 @@ static uint8_t* read_file(const char* path, long* len) {
 static unsigned long env_ulong(const char* name, unsigned long def) {
     const char* s = getenv(name);
     return s ? strtoul(s, NULL, 0) : def;
+}
+
+/* Round 61: decode the first bitmap of the ROM MBM at SplashScreen.mbm and
+ * materialise it as 16bpp RGB565 in a guest buffer.  This is a bring-up HLE
+ * for the blocked FbsServ/CFbsBitmap loader (rounds 55-60): the compressed
+ * bytes are read from guest memory, so the picture is the firmware resource,
+ * not a host demo.  The framebuffer write itself is still done by guest
+ * EUser Mem::Copy (0x5038cfe0), exactly like the round-58 white frame. */
+typedef struct mbm_frame_info {
+    unsigned width, height, pixels, nonwhite;
+    unsigned x0, y0, x1, y1;
+    uint32_t fnv;
+} mbm_frame_info;
+
+static void mbm_put_pixel(nk_cpu_t* c, uint32_t dst, unsigned index, uint8_t v,
+                          mbm_frame_info* info) {
+    /* The ROM resource's 8bpp run payload is an anti-aliasing grey ramp
+     * (0xff white .. 0x00 black).  Expand it to RGB565 grey. */
+    uint16_t px = (uint16_t)((((uint32_t)v >> 3) << 11) |
+                             (((uint32_t)v >> 2) << 5) |
+                             ((uint32_t)v >> 3));
+    nk_w16(c, dst + index * 2u, px);
+    info->fnv = (info->fnv ^ (px & 0xffu)) * 16777619u;
+    info->fnv = (info->fnv ^ (px >> 8)) * 16777619u;
+    if (px != 0xffffu) {
+        unsigned x = index % info->width;
+        unsigned y = index / info->width;
+        if (!info->nonwhite) {
+            info->x0 = info->x1 = x;
+            info->y0 = info->y1 = y;
+        } else {
+            if (x < info->x0) info->x0 = x;
+            if (x > info->x1) info->x1 = x;
+            if (y < info->y0) info->y0 = y;
+            if (y > info->y1) info->y1 = y;
+        }
+        info->nonwhite++;
+    }
+}
+
+static int mbm_first_frame_to_rgb565(nk_cpu_t* c, uint32_t mbm, uint32_t mbm_size,
+                                     uint32_t dst, uint32_t dst_cap,
+                                     mbm_frame_info* info) {
+    memset(info, 0, sizeof(*info));
+    info->fnv = 2166136261u;
+    if (nk_r32(c, mbm) != 0x10000041u) return -1;
+    uint32_t count = nk_r32(c, mbm + 4);
+    uint32_t off0  = nk_r32(c, mbm + 8);
+    uint32_t off1  = (count > 1) ? nk_r32(c, mbm + 0xc) : mbm_size;
+    if (!count || off0 + 0x34u > mbm_size) return -2;
+
+    /* ROM bitmaps are stored as in-memory CBitwiseBitmaps: five header words,
+     * then SEpocBitmapHeader at +0x14 (same layout eka2l1's mbm loader uses). */
+    uint32_t h = mbm + off0 + 5u * 4u;
+    uint32_t size     = nk_r32(c, h + 0x00);
+    uint32_t hdrlen   = nk_r32(c, h + 0x04);
+    uint32_t width    = nk_r32(c, h + 0x08);
+    uint32_t height   = nk_r32(c, h + 0x0c);
+    uint32_t bpp      = nk_r32(c, h + 0x18);
+    uint32_t palette  = nk_r32(c, h + 0x20);
+    uint32_t compress = nk_r32(c, h + 0x24);
+    if (!width || !height || width > 4096u || height > 4096u) return -3;
+    if (bpp != 8u || compress != 1u) return -4;
+    if (size <= hdrlen || size > mbm_size || off1 > mbm_size) return -5;
+    if (palette != 0u) return -6;   /* grey ramp resource: no CLUT */
+
+    uint32_t n = width * height;
+    if (n > dst_cap / 2u) return -7;
+
+    /* The payload is placed from the *next* bitmap's offset so the ROM's
+     * alignment padding is included; eka2l1's bitmap_data_offset does the
+     * same.  For index 0 this resolves to MBM+0x54. */
+    uint32_t data_size = size - hdrlen;
+    if (off1 < data_size) return -8;
+    uint32_t data_off = (off1 - data_size) & ~3u;
+    if (data_off < (h - mbm) + hdrlen || data_off >= mbm_size) return -9;
+
+    info->width = width;
+    info->height = height;
+    info->x0 = width; info->y0 = height;
+
+    uint32_t pos = mbm + data_off, out = 0;
+    while (out < n && pos < mbm + mbm_size) {
+        uint8_t ctl = nk_r8(c, pos++);
+        if (ctl < 0x80u) {
+            if (pos >= mbm + mbm_size) return -10;
+            uint8_t v = nk_r8(c, pos++);
+            unsigned run = (unsigned)ctl + 1u;
+            while (run-- && out < n) mbm_put_pixel(c, dst, out++, v, info);
+        } else {
+            unsigned run = 256u - (unsigned)ctl;
+            while (run-- && out < n) {
+                if (pos >= mbm + mbm_size) return -11;
+                mbm_put_pixel(c, dst, out++, nk_r8(c, pos++), info);
+            }
+        }
+    }
+    info->pixels = out;
+    return out == n ? 0 : -12;
 }
 
 /* Load call-site fixups: `<call_pc> <target> <A|T>` per line, '#' comments.
@@ -2370,6 +2477,29 @@ int main(int argc, char** argv) {
             }
         }
         printf("user SVC patch: %u EUser stubs marked bit 23\n", patched);
+    }
+    if (env_ulong("NK_FB_MBM", 0)) {
+        /* Decode SplashScreen.mbm's first bitmap from guest memory into a
+         * guest RGB565 source buffer.  NK_FB_MBM=1 then lets the guest
+         * EUser Mem::Copy (0x5038cfe0) write the real Nokia logo into the
+         * LCD framebuffer.  See mbm_first_frame_to_rgb565 above. */
+        const uint32_t src = 0x80800000u;
+        if (nk_alloc_ram(&cpu, src, 0x20000u) != 0) {
+            fprintf(stderr, "FB MBM: cannot map source buffer %#x\n", src);
+            return 1;
+        }
+        mbm_frame_info info;
+        int rc = mbm_first_frame_to_rgb565(&cpu, 0x509efae0u, 0xd54u,
+                                           src, 0x20000u, &info);
+        if (rc != 0) {
+            fprintf(stderr, "FB MBM: SplashScreen.mbm decode failed rc=%d\n", rc);
+            return 1;
+        }
+        printf("FB MBM: SplashScreen.mbm @ 0x509efae0, bitmap 0 %ux%u, "
+               "EByteRLE8, %u pixels\n", info.width, info.height, info.pixels);
+        printf("FB MBM: src 0x%08x, non-white %u, bbox x=%u..%u y=%u..%u, "
+               "RGB565 fnv1a=0x%08x\n", src, info.nonwhite,
+               info.x0, info.x1, info.y0, info.y1, info.fnv);
     }
     if (env_ulong("NK_FB_SRC", 0)) {
         /* Fill a guest source buffer with 0xff (16bpp white) for the

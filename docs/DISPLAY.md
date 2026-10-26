@@ -352,10 +352,10 @@ ROM loader import fixup，不能靠猜 slot 表。
 
 ---
 
-## 5. 第一帧：白色 splash 背景（round 58）
+## 5. 第一帧：白色控制帧（round 58）
 
-Splash MBM 的第一帧是 **176×208、4bpp、全白**（EByteRLE，首个 run
-`0xffff` -> `0xff`）。harness 现在验证了端到端 framebuffer：
+round 58 先用**全白源**验证端到端 framebuffer；这里的白色是 harness
+填充的 control，不是 MBM 的实际内容（MBM 第一帧含 NOKIA logo，见第 6 节）。
 
 1. 映射 LCD controller `0x59200000` 和 framebuffer `0x59800000`；
 2. 在 guest 内存 `0x80800000` 填 `0xff`（16bpp 白）；
@@ -364,10 +364,45 @@ Splash MBM 的第一帧是 **176×208、4bpp、全白**（EByteRLE，首个 run
 4. dump `0x59800000`，前 **36,608/36,608** 像素都是 `0xffff`。
 
 渲染结果：[first_frame.png](assets/first_frame.png)（176×208 白屏）。
-这是 **splash 背景帧**，由 guest `Mem::Copy` 写入真实 LCD framebuffer；
-还不是 SplashScreen/UI 自己绘制的完整 logo 帧。
+这是 **framebuffer 管线的 control 帧**，由 guest `Mem::Copy` 写入真实
+LCD framebuffer。
 
-## 6. BitGdi 导出符号表（round 59）
+## 6. Nokia logo 帧（round 61）
+
+`SplashScreen.mbm` 在 `0x509efae0`，ROM MBM header 是
+`UID 0x10000041, count=2, offsets 0x10/0x8c0`。bitmap 0 的
+`SEpocBitmapHeader` 在 `0x24`：
+
+```
+size=0x894 header_len=0x28
+176 x 208  (twips 352 x 416)
+bpp=8  color=1  palette=0  compression=1 (EByteRLE8)
+```
+
+payload 从 `0x54` 开始（与 eka2l1 的 `bitmap_data_offset` 公式一致）。
+解码 36,608 个像素：**35,159 白 + 1,449 非白**，非白 bbox
+`x=0..173, y=159..178`，形状就是下方的 **NOKIA** logo。它不是全白帧；
+round 58 的白屏只是 source control。
+
+完整帧路径：
+
+1. harness 从 guest 内存 `0x509efae0` 读取 MBM，按 EByteRLE8 解出
+   176×208 的 8bpp 灰度值；
+2. 展开成 RGB565 写进 guest buffer `0x80800000`；
+3. 调用真实 guest EUser `Mem::Copy`（`0x5038cfe0`），
+   `dst=0x59800000, src=0x80800000, len=176*208*2`；
+4. dump `0x59800000`，帧与源完全一致（RGB565 FNV-1a
+   `0xd10ed2d0`），guest copy 正常返回 `0xdead0000`。
+
+结果：[nokia_logo_frame.png](assets/nokia_logo_frame.png)（176×208），
+3× 预览：[nokia_logo_frame_3x.png](assets/nokia_logo_frame_3x.png)。
+验收：`tools/test_round61.sh`。
+
+诚实边界：MBM 的 RLE 解码目前是 harness HLE，不是 SplashScreen 自己通过
+FbsServ/`CFbsBitmap` 解出来的；后者仍被未重定位的 ROM veneer 卡住
+（rounds 55-60）。像素来自固件资源，framebuffer 写入来自 guest 代码。
+
+## 7. BitGdi 导出符号表（round 59）
 
 ROM BitGdi 的 export dir（`0x506a7e78`，185 项）只有地址，没有名字。
 匹配的 S60 2.0 SDK `bitgdi.lib` 在 symbol table 里按 **export 顺序**
@@ -393,7 +428,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
 （`lr=0x506dd80d`）。所以 BitGdi/FbsCli 的构造函数也需要同一个
 **ROM-loader import fixup**；仅有符号表还不够。
 
-## 7. 还缺什么
+## 8. 还缺什么
 
 1. **进程启动**：`FbServ.exe` 还没有被 kernel 作为进程加载。当前
    supervisor 死在 `RThread::Resume(0x32)` 的 thread-start 等待上
@@ -407,7 +442,7 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
 
 ---
 
-## 8. 下一步
+## 9. 下一步
 
 1. 修直接 FbServ 的对象初始化：跑 `.init_array`/constructors，或让
    kernel 的 process loader 正常启动 FbServ。
@@ -417,3 +452,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    确认 variant 对象的 HAL id。
 4. 确认 LCD 寄存器窗口后实现 HLE，并在 guest 第一次提交 framebuffer
    时抓帧（PPM/PNG），而不是用宿主图案代替。
+5. 把 round-61 的 MBM 解码 HLE 换成真实的 FbsServ/`CFbsBitmap` 路径，
+   让 SplashScreen 自己加载并提交同一帧；当前帧是 bring-up 里程碑，
+   不是完整的 app-driven splash。

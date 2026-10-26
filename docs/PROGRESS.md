@@ -1,6 +1,6 @@
 # 开发进度与路线图 — Nokia 6600 (NHL-10)
 
-最后更新：2026-10-26（round 60）
+最后更新：2026-10-26（round 61）
 目标：把 **NHL-10 v5.53.0** 固件静态重编译成可在 macOS / Linux 上原生运行的
 6600；最终里程碑是启动到 Nokia 开机画面 / 待机 UI。
 
@@ -293,12 +293,11 @@
   指到 `0x506c92b8` 会进入 BitGdi 后 wild-jump 到 `0x5155a0ca`，
   其他 slot null-call。需要真实 ROM loader import fixup。
 
-- **第一帧：白色 splash 背景**（round 58）：Splash MBM 第一帧是
-  176×208、4bpp、全白。harness 映射 LCD/framebuffer，guest
+- **白色控制帧**（round 58）：harness 映射 LCD/framebuffer，guest
   `Mem::Copy`（`0x5038cfe0`）把 `0x80800000` 的 0xff 源复制到
   `0x59800000`，36,608/36,608 像素为 `0xffff`。渲染为
-  [first_frame.png](assets/first_frame.png)。这是 splash 背景帧，
-  由 guest 代码写入真实 LCD framebuffer；完整 logo/UI 绘制仍未完成。
+  [first_frame.png](assets/first_frame.png)。这是 framebuffer 管线的
+  control 帧，不是 MBM 的实际内容。
 
 - **BitGdi 导出符号表**（round 59）：ROM BitGdi export dir 有 185 个
   地址、无名字；匹配的 SDK `bitgdi.lib` 按 export 顺序保存 mangled
@@ -310,6 +309,18 @@
   FbsCli 后撞到未解析 veneer `0x506dd80c`，加载 placeholder
   `0xe59ff028` 并跳过去（`lr=0x506dd80d`）。BitGdi/FbsCli 构造函数
   也需要同一个 ROM-loader import fixup。
+
+- **Nokia logo 帧**（round 61）：真实 `SplashScreen.mbm` 的 bitmap 0
+  不是全白，而是 176×208、8bpp EByteRLE8；解出 36,608 像素中有
+  **1,449 个非白像素**，bbox `x=0..173, y=159..178`，即 NOKIA logo。
+  harness 从 guest 内存 `0x509efae0` 读 MBM，解成 RGB565 写入 guest
+  buffer `0x80800000`，再由真实 guest EUser `Mem::Copy` 写入
+  `0x59800000`；帧的 RGB565 FNV-1a 为 `0xd10ed2d0`，copy 正常返回
+  `0xdead0000`。结果：
+  [nokia_logo_frame.png](assets/nokia_logo_frame.png)（3× 预览
+  [nokia_logo_frame_3x.png](assets/nokia_logo_frame_3x.png)），
+  验收 `tools/test_round61.sh`。MBM RLE 解码仍是 harness HLE；
+  SplashScreen/FbsServ 自己的 `CFbsBitmap` 路径仍被 loader fixup 卡住。
 
 ### 未完成
 
@@ -610,7 +621,7 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 | P0 | 固件/镜像/布局/解释器/导入/启动状态 | 完成 |
 | P1 | kernel 进入 idle loop | **完成（round 29）** |
 | P2 | timer/IRQ、idle 退出、调度器/线程运行 | timer/IRQ **完成（round 30）**；timer-queue/kernel-start **完成（round 31）**；真实线程身份与 TTrap **完成（round 32）**；第一次调度切换/KERN 6 **完成（round 33）**；live 对象图/TRequestStatus 唤醒/Init3 HAL gate/异常栈 **完成（round 34，稳定 6M）**；完整 run queue 与 DFC 线程仍缺 |
-| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | 未开始 |
+| P3 | 显示/键盘/音频、文件服务、S60 app 启动 | **Nokia logo 帧已可见（round 61，bring-up HLE）**；app-driven 显示仍缺 loader fixup |
 | P4 | 待机 UI / 开机画面，跨设备验收 | 未开始 |
 
 ### 下一步（建议顺序）
@@ -637,6 +648,8 @@ for t in tools/test_*.sh; do sh "$t" || exit 1; done
 6. **Display controller HLE**：`176x208` 16bpp framebuffer、LCD 控制
    寄存器与 MBM/Sprite 读回；接上窗口后即可验证第一帧。
 7. 之后进入 WSERV / S60 app 启动与待机 UI。
+8. 用真实 FbsServ/`CFbsBitmap` 路径替换 round-61 的 MBM 解码 HLE，
+   让 SplashScreen 自己加载并提交 logo 帧。
 
 ---
 

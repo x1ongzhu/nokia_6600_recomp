@@ -61,7 +61,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   ([`config/6600.toml`](config/6600.toml),
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt)).
 
-## Status (2026-10-26, round 60)
+## Status (2026-10-26, round 61)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -70,7 +70,9 @@ kernel's NULL thread and returns**, and the **kernel's own `DThread` /
 `DProcess` / request-semaphore / `CObjectIx` objects now survive the
 thread-start and close paths**. The boot then runs **6,000,000 instructions
 with 14 timer IRQs and no faults**, through `Kern::Init3` and into the first
-stable executive loop. What works:
+stable executive loop. On the display side, the firmware's own
+`SplashScreen.mbm` logo frame is now decoded and written through guest
+`Mem::Copy` into the real LCD framebuffer (round 61). What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -339,14 +341,14 @@ stable executive loop. What works:
   other slots null-call. EwSrv needs the real ROM loader import fixup, not a
   guessed slot table.
 
-- [x] **First guest-written LCD frame** (round 58): the splash MBM's first
-  frame is a 176×208, 4bpp, all-white image (EByteRLE, first run `0xffff`).
-  The harness maps the LCD controller/framebuffer, fills a guest source with
-  `0xff`, and calls the guest EUser `Mem::Copy` at `0x5038cfe0` with
+- [x] **First guest-written LCD frame** (round 58): the harness maps the LCD
+  controller/framebuffer, fills a guest source with `0xff`, and calls the
+  guest EUser `Mem::Copy` at `0x5038cfe0` with
   `dst=0x59800000, src=0x80800000, len=176*208*2`. The guest copy writes
   **36,608/36,608 white pixels** to the real LCD framebuffer; the dump is
   rendered to [docs/assets/first_frame.png](docs/assets/first_frame.png).
-  This is the splash background frame, not yet the app's full logo/UI draw.
+  This is the white-source control for the framebuffer path, not the MBM's
+  actual contents.
 
 - [x] **BitGdi export symbol map** (round 59): the ROM BitGdi export
   directory has 185 addresses and no names, but the matching S60 2.0 SDK
@@ -363,6 +365,21 @@ stable executive loop. What works:
   placeholder `0xe59ff028` and branches there (`lr=0x506dd80d`). The
   BitGdi/FbsCli constructors need the same ROM-loader import fixup as EwSrv;
   the symbol map alone is not enough.
+
+- [x] **Nokia logo frame** (round 61): the first bitmap in the real
+  `SplashScreen.mbm` is a 176×208 8bpp EByteRLE resource, not an all-white
+  frame. Its payload decodes to 1,449 non-white pixels in the lower rows —
+  the embossed **NOKIA** logo. The harness now decodes that firmware bitmap
+  from guest memory into a guest RGB565 buffer, then the real guest EUser
+  `Mem::Copy` writes it to `0x59800000`; the captured frame is
+  [docs/assets/nokia_logo_frame.png](docs/assets/nokia_logo_frame.png)
+  (3× preview: [docs/assets/nokia_logo_frame_3x.png](docs/assets/nokia_logo_frame_3x.png)).
+  `tools/test_round61.sh` pins the header, pixel count, logo bbox and the
+  RGB565 FNV-1a hash. The decode is still a harness HLE because the
+  FbsServ/`CFbsBitmap` loader remains blocked; the pixels and the framebuffer
+  write come from the firmware/guest side.
+
+  ![Nokia logo frame](docs/assets/nokia_logo_frame_3x.png)
 
 Not implemented yet:
 
