@@ -707,6 +707,14 @@ supervisor。server 干净返回（26,652 条），supervisor 恢复后在
 29,295 条时又撞 `0x00a04d08`（3,441 次 MMIO 读 / 22,928 次写），
 framebuffer 仍 0。验收 `tools/test_round82.sh`。
 
+### 2.36 round 83：supervisor bad dispatch 不能简单 HLE
+
+把 slot `0x503cf984` HLE 成 zero-return stub，supervisor 从
+`0x00a04d08` 推进到 30,815 条，但进入 EUser TTrap/leave 路径，在
+`lr=0x5038cb70`（`r1=0xfffffff8`）null-call。返回 0 不是有效路径；
+下一 blocker 是该 dispatch 需要的真实 object/argument。
+验收 `tools/test_round83.sh`。
+
 ---
 
 ## 3. EUser 导入映射

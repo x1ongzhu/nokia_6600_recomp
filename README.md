@@ -62,7 +62,7 @@ at specific addresses**: display controller, keypad, timers, DSP/radio. See
   [`config/imports-r29-6600.txt`](config/imports-r29-6600.txt),
   [`config/imports-app-6600.txt`](config/imports-app-6600.txt)).
 
-## Status (2026-10-26, round 82)
+## Status (2026-10-26, round 83)
 
 The **real kernel boots from the flat image to its idle loop**, the **first
 hardware interrupt wakes it**, the **timer-queue singleton is created with the
@@ -91,8 +91,8 @@ started thread; round 76 rules out a DThread-shaped clone; round 77 rules
 out the SVC model; round 78 gets a fake scheduler thread into EStart's server
 entry; round 79 adds auto-complete so the server runs; round 80 clamps the
 wild Mem::Copy and advances it; round 81 shows the server entry needs a
-real StartThread frame; round 82 completes the server run/return cycle but the
-supervisor still hits `0x00a04d08`. What works:
+real StartThread frame; round 82 completes the server run/return cycle; round 83 shows the
+supervisor's `0x00a04d08` cannot be zero-return HLE'd. What works:
 
 - [x] Firmware extraction, EKA1 headers, kernel E32Image and ROMFS.
 - [x] Page-header-free packed stream; kernel exports land on function starts
@@ -582,6 +582,13 @@ supervisor still hits `0x00a04d08`. What works:
   22,928 writes. Framebuffer remains untouched.
   `tools/test_round82.sh` pins the result.
 
+- [x] **Supervisor dispatch cannot be zero-return HLE'd** (round 83):
+  HLE-ing slot `0x503cf984` advances the supervisor to 30,815 instructions
+  but enters the EUser TTrap/leave path, null-calling at
+  `lr=0x5038cb70` (`r1=0xfffffff8`). The next blocker is the real
+  object/argument that `0x00a04d08` needs. Framebuffer remains untouched.
+  `tools/test_round83.sh` pins the result.
+
 Not implemented yet:
 
 - [ ] **handle `0x32` / DFC thread** — `RThread::Resume(0x32)` looks up the
@@ -740,7 +747,8 @@ All scripts are self-contained and rebuild what they need (output goes to
 | `tools/test_round79.sh` | auto-complete runs the EStart server 200k; wild copy at `0x5038d724` |
 | `tools/test_round80.sh` | Mem::Copy clamp advances the server to `0x503da6d5`; new import null call |
 | `tools/test_round81.sh` | stack sentinel still null-calls at `0x503da6ee`; real StartThread frame needed |
-| `tools/test_round82.sh` | **current acceptance**: server returns and supervisor resumes; still hits `0x00a04d08` |
+| `tools/test_round82.sh` | server returns and supervisor resumes; still hits `0x00a04d08` |
+| `tools/test_round83.sh` | **current acceptance**: HLE supervisor dispatch enters TTrap/leave at `0x5038cb70`; real object needed |
 | `tools/build_kernel_smoke.sh` | lifted C function linked against the runtime |
 | `tools/build_rom_image.sh` | rebuild `out/6600_runtime.bin` |
 

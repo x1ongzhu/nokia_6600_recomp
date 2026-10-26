@@ -792,6 +792,14 @@ framebuffer: 0 non-zero bytes
 server 运行/返回链路已通；下一 blocker 仍是 supervisor 的
 `0x00a04d08` 虚拟调用。验收：`tools/test_round82.sh`。
 
+### round 83：supervisor bad dispatch 不能简单 HLE
+
+把 slot `0x503cf984` HLE 成 zero-return stub 后，supervisor 从
+`0x00a04d08` 推进到 **30,815 条**，但进入 EUser TTrap/leave 路径，
+在 `lr=0x5038cb70`（`r1=0xfffffff8`）null-call。返回 0 不是有效
+路径；下一 blocker 是该 dispatch 需要的 supervisor object/argument。
+framebuffer 仍 0。验收：`tools/test_round83.sh`。
+
 实验配置放在 `config/imports-app-main-6600.txt`；默认
 `config/imports-app-6600.txt` 仍只做 round-63 的 CBase rebind。
 framebuffer 仍然没有 app 像素。验收：`tools/test_round64.sh`。
@@ -854,6 +862,6 @@ round 60 先试了 `CFbsBitmap::Create`（FbsCli export 147，
    app 的 import slots。
 7. 修 EwSrv jump table / literal relocation：round 62 的
    `0x506ca5e4` 和 `0x506cd866 -> 0xb5f00000` 都是未重定位指针。
-8. 回到 supervisor 的 `0x00a04d08` 虚拟调用：round 82 已让 server
-   跑完并返回，supervisor 仍在该点缺对象/参数。下一步确认 server
-   返回后 supervisor 期望的状态。
+8. 补 supervisor `0x00a04d08` 需要的真实 object/argument：round 83
+   已证明 zero-return HLE 会进入 leave。下一步构造正确对象，而不是
+   继续 HLE。
